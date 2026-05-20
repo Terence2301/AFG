@@ -6595,6 +6595,17 @@ elif "Commerciaux" in nav:
     if not _has_ca_c:
         alert("📥 Importez la <b>base CA</b> depuis <b>Accueil</b>.","warn"); st.stop()
 
+    # ══════════════════════════════════════════════════════════════════════════
+    # GARANTIE CHIFAFFA — reconversion systématique avant tout calcul
+    # Protège contre : cache ancien (pré-correctif), strings "3 711 385,45",
+    # float32 résiduel, NaN silencieux dus au format texte FR/BEAC
+    # ══════════════════════════════════════════════════════════════════════════
+    _ca_c = _ca_c.copy()
+    if "CHIFAFFA" in _ca_c.columns:
+        _ca_c["CHIFAFFA"] = clean_numeric_col(_ca_c["CHIFAFFA"])
+    if "COMMAPPO" in _ca_c.columns:
+        _ca_c["COMMAPPO"] = clean_numeric_col(_ca_c["COMMAPPO"])
+
     # ── Filtre période ─────────────────────────────────────────────────────────
     _sel_c  = period_selector("comm_v41","📅 Période DATECOMP", df_ca=_ca_c)
     _ca_cf  = filter_by_period(_ca_c, _sel_c, date_col="DATECOMP")
@@ -6605,8 +6616,8 @@ elif "Commerciaux" in nav:
     _ca_cf = _ca_cf.copy()
 
     # ── TOTAL DE RÉFÉRENCE EXACT ───────────────────────────────────────────────
-    # Calculé directement sur le DataFrame filtré — jamais sur un agrégat
-    # C'est ce nombre qui doit correspondre à SOUS.TOTAL(9;U:U) dans Excel
+    # Somme directe sur le DataFrame filtré après reconversion garantie
+    # Ce total = SOUS.TOTAL(9;U:U) dans Excel
     _ca_ref_tot = float(_ca_cf["CHIFAFFA"].sum()) if "CHIFAFFA" in _ca_cf.columns else 0.0
     _nb_ref_tot = len(_ca_cf)
 
