@@ -4289,6 +4289,476 @@ elif "Accueil" in nav:
                             chl(fig_mix, 340, f"🥧 Partenaires vs Interne · {_lbl}")
                             st.plotly_chart(fig_mix, use_container_width=True)
 
+    # ══════════════════════════════════════════════════════════════════════════
+    # TABLEAU DE BORD ANALYTIQUE CA — Courbe évolution + Analyse des écarts
+    # S'affiche uniquement si la base CA est chargée avec ≥ 2 exercices
+    # ══════════════════════════════════════════════════════════════════════════
+    _ca_dash = st.session_state.get("ca_ext")
+    if _ca_dash is not None and not _ca_dash.empty and "ANNEE_COMP" in _ca_dash.columns:
+        _ann_dispo_d = sorted(
+            [int(y) for y in pd.to_numeric(_ca_dash["ANNEE_COMP"], errors="coerce").dropna().unique()
+             if 2000 <= int(y) <= 2099], reverse=True)
+
+        if len(_ann_dispo_d) >= 1:
+            st.markdown("---")
+            st.markdown("""
+            <div style="background:linear-gradient(135deg,#003366,#001F4D);border-radius:12px;
+                 padding:.9rem 1.4rem;margin-bottom:1rem;border-left:5px solid #C9A227;">
+              <div style="color:#E8C44A;font-size:9px;font-weight:800;text-transform:uppercase;
+                   letter-spacing:.15em;">TABLEAU DE BORD ANALYTIQUE — BASE CA CHARGÉE</div>
+              <div style="color:white;font-size:1.1rem;font-weight:900;">
+                📊 Évolution · Écarts annuels · Santé financière</div>
+            </div>""", unsafe_allow_html=True)
+
+            # ── Sélection des années à analyser ──────────────────────────────
+            _da1, _da2, _da3 = st.columns([2, 1, 1])
+            with _da1:
+                _ann_sel_d = st.multiselect(
+                    "📅 Années à afficher dans les graphiques",
+                    options=_ann_dispo_d,
+                    default=_ann_dispo_d,
+                    key="ca_dash_yrs_v42",
+                    format_func=str,
+                    help="Sélectionnez les exercices à comparer")
+            with _da2:
+                _ref_ann = st.selectbox(
+                    "📌 Année N (référence écart)",
+                    options=_ann_dispo_d,
+                    index=0 if _ann_dispo_d else 0,
+                    key="ca_dash_ref_v42",
+                    format_func=str)
+            with _da3:
+                _comp_ann = st.selectbox(
+                    "📌 Année N-1 (comparaison écart)",
+                    options=_ann_dispo_d,
+                    index=min(1, len(_ann_dispo_d)-1),
+                    key="ca_dash_comp_v42",
+                    format_func=str)
+
+            if not _ann_sel_d:
+                _ann_sel_d = _ann_dispo_d
+
+            # ── Calcul des agrégats par mois et par année ─────────────────────
+            _ca_d = _ca_dash.copy()
+            _yr_d = pd.to_numeric(_ca_d["ANNEE_COMP"], errors="coerce")
+            _ca_d = _ca_d[_yr_d.isin([int(y) for y in _ann_sel_d])].copy()
+
+            # Agrégat mensuel par année (pour la courbe)
+            if "YYYYMM_COMP" in _ca_d.columns and "MOIS_COMP" in _ca_d.columns:
+                _evo_m = _ca_d.groupby(["ANNEE_COMP","MOIS_COMP","YYYYMM_COMP"])["CHIFAFFA"].sum().reset_index()
+                _evo_m["ANNEE_COMP"] = pd.to_numeric(_evo_m["ANNEE_COMP"], errors="coerce").astype(int)
+                _evo_m = _evo_m.sort_values(["ANNEE_COMP","MOIS_COMP"])
+                _evo_m["MOIS_NOM"] = _evo_m["MOIS_COMP"].map(
+                    {1:"Jan",2:"Fév",3:"Mar",4:"Avr",5:"Mai",6:"Juin",
+                     7:"Juil",8:"Aoû",9:"Sep",10:"Oct",11:"Nov",12:"Déc"})
+            else:
+                _evo_m = pd.DataFrame()
+
+            # Agrégat annuel total
+            _ann_tot = {}
+            for _ay in _ann_dispo_d:
+                _msk_y = (_yr_d == _ay).values
+                _ann_tot[_ay] = float(_ca_dash[_msk_y]["CHIFAFFA"].sum())
+
+            # ── GRAPHIQUE 1 : Courbe évolution CA mensuelle (multi-années) ────
+            if not _evo_m.empty:
+                st.markdown("#### 📈 Courbe d'évolution du CA mensuel par exercice")
+                _palette = [GOLD, BLUEL, GREEN, RED, TEAL, AMBER, NAVY, "#9B59B6"]
+                fig_evo_d = go.Figure()
+                for _i, _ay in enumerate(sorted(_ann_sel_d)):
+                    _sub = _evo_m[_evo_m["ANNEE_COMP"] == _ay].sort_values("MOIS_COMP")
+                    if _sub.empty: continue
+                    _clr = _palette[_i % len(_palette)]
+                    # Courbe principale
+                    fig_evo_d.add_trace(go.Scatter(
+                        x=_sub["MOIS_NOM"], y=_sub["CHIFAFFA"],
+                        name=str(_ay),
+                        mode="lines+markers",
+                        line=dict(color=_clr, width=2.5),
+                        marker=dict(size=8, color=_clr, line=dict(color="white",width=1.5)),
+                        hovertemplate=f"<b>Exercice {_ay}</b><br>Mois : %{{x}}<br>"
+                                      f"CA : %{{y:,.0f}} FCFA<extra></extra>",
+                        fill="tozeroy" if _i == 0 else "none",
+                        fillcolor=f"rgba{tuple(list(bytes.fromhex(_clr.lstrip('#'))) + [25])}" if _clr.startswith('#') and len(_clr)==7 else None))
+                    # Annotation valeur max
+                    _idx_max = _sub["CHIFAFFA"].idxmax()
+                    fig_evo_d.add_annotation(
+                        x=_sub.loc[_idx_max,"MOIS_NOM"],
+                        y=_sub.loc[_idx_max,"CHIFAFFA"],
+                        text=f"Max {_ay}:<br>{_sub.loc[_idx_max,'CHIFAFFA']:,.0f}",
+                        showarrow=True, arrowhead=2, arrowcolor=_clr,
+                        font=dict(size=9,color=_clr), bgcolor="white",
+                        bordercolor=_clr, borderwidth=1, opacity=0.85)
+
+                fig_evo_d.update_layout(
+                    xaxis=dict(categoryorder="array",
+                        categoryarray=["Jan","Fév","Mar","Avr","Mai","Juin",
+                                        "Juil","Aoû","Sep","Oct","Nov","Déc"],
+                        title="Mois", tickfont=dict(size=11)),
+                    yaxis=dict(title="CA encaissé (FCFA)", tickformat=",.0f"),
+                    legend=dict(orientation="h", y=-0.18, font=dict(size=11)),
+                    hovermode="x unified",
+                    plot_bgcolor="white", paper_bgcolor="white",
+                    font=dict(family="Inter, sans-serif", size=12))
+                chl(fig_evo_d, 520, "📈 Évolution mensuelle du CA encaissé (CHIFAFFA) — Comparaison multi-exercices")
+                st.plotly_chart(fig_evo_d, use_container_width=True)
+
+            # ── GRAPHIQUE 2 : Barres annuelles + cumul ────────────────────────
+            if len(_ann_tot) >= 1:
+                _da_b1, _da_b2 = st.columns(2)
+                with _da_b1:
+                    st.markdown("#### 💰 CA total par exercice")
+                    _ann_sel_sort = sorted([y for y in _ann_sel_d if y in _ann_tot])
+                    _vals_ann = [_ann_tot[y] for y in _ann_sel_sort]
+                    _clrs_ann = [GREEN if v == max(_vals_ann) else (RED if v == min(_vals_ann) else BLUEL) for v in _vals_ann]
+                    _pcts_ann = []
+                    for _i2, _va in enumerate(_vals_ann):
+                        if _i2 > 0 and _vals_ann[_i2-1] > 0:
+                            _pct = (_va - _vals_ann[_i2-1]) / _vals_ann[_i2-1] * 100
+                            _pcts_ann.append(f"{'+' if _pct>=0 else ''}{_pct:.1f}%")
+                        else:
+                            _pcts_ann.append("Base")
+                    fig_ann_bar = go.Figure()
+                    fig_ann_bar.add_trace(go.Bar(
+                        x=[str(y) for y in _ann_sel_sort],
+                        y=_vals_ann,
+                        marker_color=_clrs_ann,
+                        text=[f"{v:,.0f}" for v in _vals_ann],
+                        textposition="outside",
+                        textfont=dict(size=10, color=NAVY),
+                        hovertemplate="<b>%{x}</b><br>CA : %{y:,.0f} FCFA<extra></extra>"))
+                    # Ligne de tendance
+                    if len(_vals_ann) >= 2:
+                        import numpy as _np42
+                        _x_num = list(range(len(_vals_ann)))
+                        _coeffs = _np42.polyfit(_x_num, _vals_ann, 1)
+                        _trend = [_np42.polyval(_coeffs, xi) for xi in _x_num]
+                        fig_ann_bar.add_trace(go.Scatter(
+                            x=[str(y) for y in _ann_sel_sort], y=_trend,
+                            mode="lines", name="Tendance",
+                            line=dict(color=GOLD, width=2, dash="dot"),
+                            hoverinfo="skip"))
+                    fig_ann_bar.update_layout(
+                        xaxis=dict(title="Exercice"), yaxis=dict(title="CA (FCFA)",tickformat=",.0f"),
+                        showlegend=True, plot_bgcolor="white", paper_bgcolor="white")
+                    chl(fig_ann_bar, 420, "💰 CA total par exercice + tendance linéaire")
+                    st.plotly_chart(fig_ann_bar, use_container_width=True)
+
+                with _da_b2:
+                    st.markdown("#### 📊 Répartition mensuelle par exercice (Waterfall)")
+                    if not _evo_m.empty and len(_ann_sel_sort) >= 1:
+                        # Waterfall du dernier exercice sélectionné
+                        _wy = max(_ann_sel_sort)
+                        _sub_w = _evo_m[_evo_m["ANNEE_COMP"]==_wy].sort_values("MOIS_COMP")
+                        if not _sub_w.empty:
+                            _diffs = [_sub_w.iloc[0]["CHIFAFFA"]] + list(_sub_w["CHIFAFFA"].diff().iloc[1:])
+                            _colors_wf = [GREEN if d >= 0 else RED for d in _diffs]
+                            fig_wf = go.Figure(go.Bar(
+                                x=_sub_w["MOIS_NOM"].tolist(),
+                                y=_sub_w["CHIFAFFA"].tolist(),
+                                marker_color=[GREEN if v >= _sub_w["CHIFAFFA"].mean() else RED for v in _sub_w["CHIFAFFA"]],
+                                text=[f"{v:,.0f}" for v in _sub_w["CHIFAFFA"]],
+                                textposition="outside", textfont=dict(size=9),
+                                hovertemplate="<b>%{x}</b><br>CA : %{y:,.0f} FCFA<extra></extra>"))
+                            fig_wf.add_hline(y=_sub_w["CHIFAFFA"].mean(),
+                                line_dash="dash", line_color=NAVY, opacity=0.7,
+                                annotation_text=f"Moy. {_sub_w['CHIFAFFA'].mean():,.0f}",
+                                annotation_font_size=9)
+                            fig_wf.update_layout(xaxis=dict(categoryorder="array",
+                                categoryarray=["Jan","Fév","Mar","Avr","Mai","Juin","Juil","Aoû","Sep","Oct","Nov","Déc"]),
+                                plot_bgcolor="white", paper_bgcolor="white")
+                            chl(fig_wf, 420, f"📊 CA mensuel {_wy} vs moyenne (vert=au-dessus, rouge=en-dessous)")
+                            st.plotly_chart(fig_wf, use_container_width=True)
+
+            # ── ANALYSE DES ÉCARTS ENTRE DEUX ANNÉES ─────────────────────────
+            st.markdown("---")
+            st.markdown(f"""
+            <div style="background:linear-gradient(135deg,#1A1A2E,#16213E);border-radius:12px;
+                 padding:.9rem 1.4rem;margin-bottom:1rem;border-left:5px solid #E8C44A;">
+              <div style="color:#E8C44A;font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.14em;">
+                ANALYSE DES ÉCARTS</div>
+              <div style="color:white;font-size:1rem;font-weight:900;">
+                📐 Comparaison {_ref_ann} vs {_comp_ann} — Écart CA & Indicateurs</div>
+            </div>""", unsafe_allow_html=True)
+
+            _ca_ref_v = _ann_tot.get(int(_ref_ann),  0.0)
+            _ca_cmp_v = _ann_tot.get(int(_comp_ann), 0.0)
+            _ecart_abs = _ca_ref_v - _ca_cmp_v
+            _ecart_pct = (_ecart_abs / max(abs(_ca_cmp_v), 1)) * 100
+            _ecart_c   = GREEN if _ecart_abs >= 0 else RED
+            _ecart_sym = "▲" if _ecart_abs >= 0 else "▼"
+
+            # Nb quittances par année
+            _nb_ref_v = int((_yr_d == int(_ref_ann)).sum())
+            _nb_cmp_v = int((_yr_d == int(_comp_ann)).sum())
+            _nb_ecart = _nb_ref_v - _nb_cmp_v
+            _nb_ecart_pct = _nb_ecart / max(_nb_cmp_v, 1) * 100
+
+            # Ticket moyen par année
+            _tk_ref = _ca_ref_v / max(_nb_ref_v, 1)
+            _tk_cmp = _ca_cmp_v / max(_nb_cmp_v, 1)
+            _tk_ect = _tk_ref - _tk_cmp
+
+            # Carte d'écart globale
+            st.markdown(f"""
+            <div style="background:white;border:2px solid {'#2ECC71' if _ecart_abs>=0 else '#E74C3C'};
+                 border-radius:14px;padding:1.2rem 1.8rem;margin:10px 0;
+                 box-shadow:0 4px 16px rgba(0,0,0,.08);">
+              <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:1rem;align-items:center;">
+                <div style="text-align:center;padding:12px;background:#F8F9FA;border-radius:10px;">
+                  <div style="font-size:10px;color:#5A6478;font-weight:700;margin-bottom:4px;">
+                    📅 EXERCICE {_ref_ann}</div>
+                  <div style="font-size:1.3rem;font-weight:900;color:#003366;">
+                    {_ca_ref_v:,.0f}</div>
+                  <div style="font-size:9px;color:#5A6478;">FCFA · {_nb_ref_v:,} quitt.</div>
+                </div>
+                <div style="text-align:center;padding:12px;background:#F8F9FA;border-radius:10px;">
+                  <div style="font-size:10px;color:#5A6478;font-weight:700;margin-bottom:4px;">
+                    📅 EXERCICE {_comp_ann}</div>
+                  <div style="font-size:1.3rem;font-weight:900;color:#003366;">
+                    {_ca_cmp_v:,.0f}</div>
+                  <div style="font-size:9px;color:#5A6478;">FCFA · {_nb_cmp_v:,} quitt.</div>
+                </div>
+                <div style="text-align:center;padding:12px;
+                     background:{'#E8F5E9' if _ecart_abs>=0 else '#FFEBEE'};border-radius:10px;
+                     border:2px solid {'#2ECC71' if _ecart_abs>=0 else '#E74C3C'};">
+                  <div style="font-size:10px;color:#5A6478;font-weight:700;margin-bottom:4px;">
+                    📐 ÉCART ABSOLU</div>
+                  <div style="font-size:1.3rem;font-weight:900;color:{'#2ECC71' if _ecart_abs>=0 else '#E74C3C'};">
+                    {_ecart_sym} {abs(_ecart_abs):,.0f}</div>
+                  <div style="font-size:9px;color:#5A6478;">FCFA</div>
+                </div>
+                <div style="text-align:center;padding:12px;
+                     background:{'#E8F5E9' if _ecart_abs>=0 else '#FFEBEE'};border-radius:10px;
+                     border:2px solid {'#2ECC71' if _ecart_abs>=0 else '#E74C3C'};">
+                  <div style="font-size:10px;color:#5A6478;font-weight:700;margin-bottom:4px;">
+                    📈 ÉVOLUTION</div>
+                  <div style="font-size:1.5rem;font-weight:900;color:{'#2ECC71' if _ecart_abs>=0 else '#E74C3C'};">
+                    {_ecart_sym} {abs(_ecart_pct):.1f}%</div>
+                  <div style="font-size:9px;color:#5A6478;">{_ref_ann} / {_comp_ann}</div>
+                </div>
+              </div>
+            </div>""", unsafe_allow_html=True)
+
+            # KPIs d'écart détaillés
+            _ek1,_ek2,_ek3,_ek4,_ek5,_ek6 = st.columns(6)
+            with _ek1: kpi("💰 CA " + str(_ref_ann),    f"{_ca_ref_v:,.0f}",   "FCFA encaissé",      "gold","")
+            with _ek2: kpi("💰 CA " + str(_comp_ann),   f"{_ca_cmp_v:,.0f}",   "FCFA encaissé",      "teal","")
+            with _ek3: kpi("📐 Écart FCFA",             f"{_ecart_abs:+,.0f}", f"{_ecart_sym} {abs(_ecart_pct):.1f}%", "green" if _ecart_abs>=0 else "red","")
+            with _ek4: kpi("🧾 Quitt. " + str(_ref_ann), f"{_nb_ref_v:,}",     "lignes CA",          "","")
+            with _ek5: kpi("📊 Quitt. " + str(_comp_ann), f"{_nb_cmp_v:,}",    "lignes CA",          "","")
+            with _ek6: kpi("🎫 Ticket moyen écart",     f"{_tk_ect:+,.0f}",    "FCFA/quittance",     "green" if _tk_ect>=0 else "red","")
+
+            # ── Graphique comparatif mois par mois ────────────────────────────
+            if not _evo_m.empty and int(_ref_ann) != int(_comp_ann):
+                _eg1, _eg2 = st.columns(2)
+                with _eg1:
+                    st.markdown(f"#### 📊 Comparaison mensuelle {_ref_ann} vs {_comp_ann}")
+                    _sub_ref = _evo_m[_evo_m["ANNEE_COMP"]==int(_ref_ann)].sort_values("MOIS_COMP").set_index("MOIS_COMP")
+                    _sub_cmp = _evo_m[_evo_m["ANNEE_COMP"]==int(_comp_ann)].sort_values("MOIS_COMP").set_index("MOIS_COMP")
+                    _mois_communs = sorted(set(_sub_ref.index) & set(_sub_cmp.index))
+                    _mois_nom_c = {1:"Jan",2:"Fév",3:"Mar",4:"Avr",5:"Mai",6:"Juin",
+                                   7:"Juil",8:"Aoû",9:"Sep",10:"Oct",11:"Nov",12:"Déc"}
+                    fig_cmp = go.Figure()
+                    fig_cmp.add_trace(go.Bar(
+                        x=[_mois_nom_c.get(m,str(m)) for m in _mois_communs],
+                        y=[_sub_ref.loc[m,"CHIFAFFA"] for m in _mois_communs],
+                        name=str(_ref_ann), marker_color=GOLD, opacity=0.85,
+                        hovertemplate=f"<b>%{{x}} {_ref_ann}</b><br>CA : %{{y:,.0f}} FCFA<extra></extra>"))
+                    fig_cmp.add_trace(go.Bar(
+                        x=[_mois_nom_c.get(m,str(m)) for m in _mois_communs],
+                        y=[_sub_cmp.loc[m,"CHIFAFFA"] for m in _mois_communs],
+                        name=str(_comp_ann), marker_color=BLUEL, opacity=0.85,
+                        hovertemplate=f"<b>%{{x}} {_comp_ann}</b><br>CA : %{{y:,.0f}} FCFA<extra></extra>"))
+                    fig_cmp.update_layout(barmode="group",
+                        xaxis=dict(categoryorder="array",
+                            categoryarray=list(_mois_nom_c.values())),
+                        yaxis=dict(title="CA (FCFA)",tickformat=",.0f"),
+                        legend=dict(orientation="h",y=-0.2),
+                        plot_bgcolor="white", paper_bgcolor="white",
+                        hovermode="x unified")
+                    chl(fig_cmp, 440, f"📊 CA mensuel {_ref_ann} vs {_comp_ann}")
+                    st.plotly_chart(fig_cmp, use_container_width=True)
+
+                with _eg2:
+                    st.markdown(f"#### 📐 Écart mensuel {_ref_ann} − {_comp_ann}")
+                    _ecarts_m = []
+                    _mois_e   = []
+                    for _m in _mois_communs:
+                        _v_ref = _sub_ref.loc[_m,"CHIFAFFA"]
+                        _v_cmp = _sub_cmp.loc[_m,"CHIFAFFA"]
+                        _ecarts_m.append(_v_ref - _v_cmp)
+                        _mois_e.append(_mois_nom_c.get(_m,str(_m)))
+                    _clrs_e = [GREEN if e>=0 else RED for e in _ecarts_m]
+                    fig_eca = go.Figure(go.Bar(
+                        x=_mois_e, y=_ecarts_m,
+                        marker_color=_clrs_e,
+                        text=[f"{e:+,.0f}" for e in _ecarts_m],
+                        textposition="outside", textfont=dict(size=9),
+                        hovertemplate="<b>%{x}</b><br>Écart : %{y:+,.0f} FCFA<extra></extra>"))
+                    fig_eca.add_hline(y=0, line_color=NAVY, line_width=2)
+                    fig_eca.add_hline(y=sum(_ecarts_m)/max(len(_ecarts_m),1),
+                        line_dash="dot", line_color=GOLD, opacity=0.8,
+                        annotation_text=f"Écart moy. {sum(_ecarts_m)/max(len(_ecarts_m),1):+,.0f}",
+                        annotation_font_size=9)
+                    fig_eca.update_layout(
+                        yaxis=dict(title=f"Écart {_ref_ann}−{_comp_ann} (FCFA)", tickformat=",.0f",
+                                   zerolinecolor=NAVY, zerolinewidth=2),
+                        xaxis=dict(categoryorder="array", categoryarray=list(_mois_nom_c.values())),
+                        plot_bgcolor="white", paper_bgcolor="white")
+                    chl(fig_eca, 440, f"📐 Écart mensuel {_ref_ann}−{_comp_ann} (vert=hausse, rouge=baisse)")
+                    st.plotly_chart(fig_eca, use_container_width=True)
+
+                # Tableau des écarts mois par mois
+                if _mois_communs:
+                    st.markdown(f"#### 📋 Tableau des écarts mensuels {_ref_ann} vs {_comp_ann}")
+                    _tbl_rows = []
+                    for _m in _mois_communs:
+                        _vr = _sub_ref.loc[_m,"CHIFAFFA"]
+                        _vc = _sub_cmp.loc[_m,"CHIFAFFA"]
+                        _ea = _vr - _vc
+                        _ep = _ea / max(_vc, 1) * 100
+                        _tbl_rows.append({
+                            "Mois":       _mois_nom_c.get(_m,str(_m)),
+                            f"CA {_ref_ann}": f"{_vr:,.0f} FCFA",
+                            f"CA {_comp_ann}": f"{_vc:,.0f} FCFA",
+                            "Écart absolu": f"{'▲' if _ea>=0 else '▼'} {abs(_ea):,.0f} FCFA",
+                            "Évolution": f"{'▲' if _ea>=0 else '▼'} {abs(_ep):.1f}%",
+                            "Signal": "🟢 Hausse" if _ea>=0 else "🔴 Baisse"
+                        })
+                    _tbl_rows.append({
+                        "Mois": "📋 TOTAL",
+                        f"CA {_ref_ann}": f"{_ca_ref_v:,.0f} FCFA",
+                        f"CA {_comp_ann}": f"{_ca_cmp_v:,.0f} FCFA",
+                        "Écart absolu": f"{'▲' if _ecart_abs>=0 else '▼'} {abs(_ecart_abs):,.0f} FCFA",
+                        "Évolution": f"{'▲' if _ecart_abs>=0 else '▼'} {abs(_ecart_pct):.1f}%",
+                        "Signal": "🟢 Hausse" if _ecart_abs>=0 else "🔴 Baisse"
+                    })
+                    st.dataframe(pd.DataFrame(_tbl_rows), use_container_width=True,
+                                 hide_index=True, height=420)
+
+                    # Export tableau écarts
+                    _buf_eca = io.BytesIO()
+                    with pd.ExcelWriter(_buf_eca, engine="openpyxl") as _wx_e:
+                        pd.DataFrame(_tbl_rows).to_excel(_wx_e, index=False, sheet_name=f"Écarts {_ref_ann}-{_comp_ann}")
+                    st.download_button(
+                        f"⬇️ Exporter tableau des écarts {_ref_ann} vs {_comp_ann}",
+                        data=_buf_eca.getvalue(),
+                        file_name=f"AFG_Ecarts_CA_{_ref_ann}_vs_{_comp_ann}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True)
+
+            # ── INDICATEURS DE SANTÉ FINANCIÈRE ──────────────────────────────
+            st.markdown("---")
+            st.markdown("""
+            <div style="background:linear-gradient(135deg,#0E7C66,#003366);border-radius:12px;
+                 padding:.9rem 1.4rem;margin-bottom:1rem;border-left:5px solid #2ECC71;">
+              <div style="color:#4DFFE0;font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.14em;">
+                SANTÉ FINANCIÈRE</div>
+              <div style="color:white;font-size:1rem;font-weight:900;">
+                💊 Indicateurs clés de performance — Toutes bases chargées</div>
+            </div>""", unsafe_allow_html=True)
+
+            # Données disponibles
+            _pf_h  = st.session_state.get("portefeuille_ext")
+            _sin_h = st.session_state.get("sin_ext")
+            _kpf   = st.session_state.get("kpis_pf", {})
+            _kca   = st.session_state.get("kpis_ca", {})
+            _ksin  = st.session_state.get("kpis_sin", {})
+
+            _ca_tot_h    = float(_ann_tot.get(max(_ann_tot.keys(),default=0), 0)) if _ann_tot else 0.0
+            _ca_full_h   = float(_ca_dash["CHIFAFFA"].sum()) if "CHIFAFFA" in _ca_dash.columns else 0.0
+            _nb_pol_h    = _kpf.get("nb_total",  len(_pf_h) if _pf_h is not None else 0)
+            _nb_act_h    = _kpf.get("nb_actif",  0)
+            _ca_mont_h   = _kpf.get("ca_tot",    0)
+            _regl_h      = _ksin.get("total_regle", 0) if _ksin else 0
+            _sap_h       = _ksin.get("sap", 0) if _ksin else 0
+
+            # Calculs indicateurs
+            _prime_moy   = _ca_full_h / max(int(_yr_d.notna().sum()), 1)  # prime moy/quittance
+            _sp_h        = _regl_h / max(_ca_full_h, 1) * 100 if _ca_full_h > 0 and _regl_h > 0 else None
+            _tx_act_h    = _nb_act_h / max(_nb_pol_h, 1) * 100 if _nb_pol_h > 0 else None
+            _charge_sin_h= (_regl_h + _sap_h) / max(_ca_full_h, 1) * 100 if _ca_full_h > 0 else None
+            _taux_resil_h= _kpf.get("tx_resil", None)
+
+            _sh1,_sh2,_sh3,_sh4 = st.columns(4)
+            with _sh1:
+                _scorecard = []
+                if _tx_act_h is not None:
+                    _s = "🟢" if _tx_act_h>=50 else ("🟡" if _tx_act_h>=25 else "🔴")
+                    _scorecard.append(f"{_s} Taux actif : **{_tx_act_h:.1f}%**")
+                if _taux_resil_h is not None:
+                    _s = "🟢" if _taux_resil_h<=25 else ("🟡" if _taux_resil_h<=50 else "🔴")
+                    _scorecard.append(f"{_s} Taux résil. : **{_taux_resil_h:.1f}%**")
+                if _sp_h is not None:
+                    _s = "🟢" if _sp_h<=60 else ("🟡" if _sp_h<=80 else "🔴")
+                    _scorecard.append(f"{_s} Ratio S/P : **{_sp_h:.1f}%**")
+                st.markdown("**📋 Score de santé**")
+                for _sc in _scorecard:
+                    st.markdown(_sc)
+                if not _scorecard:
+                    st.caption("Chargez toutes les bases pour afficher le score")
+
+            with _sh2:
+                st.markdown("**💰 Encaissements (CA)**")
+                st.metric("Total CHIFAFFA", fmt(_ca_full_h), f"{fmt(_ecart_abs)} vs {_comp_ann}" if _ecart_abs != 0 else None,
+                          delta_color="normal")
+                st.metric("Ticket moyen", fmt(_prime_moy))
+
+            with _sh3:
+                st.markdown("**🏥 Sinistres**")
+                if _regl_h > 0:
+                    st.metric("Total réglé", fmt(_regl_h))
+                    st.metric("SAP (provisions)", fmt(_sap_h))
+                    if _charge_sin_h is not None:
+                        st.metric("Charge sinistres/CA", f"{_charge_sin_h:.1f}%",
+                                  delta_color="inverse")
+                else:
+                    st.caption("Importez la base Prestations")
+
+            with _sh4:
+                st.markdown("**📊 Portefeuille**")
+                if _nb_pol_h > 0:
+                    st.metric("Polices totales",  f"{_nb_pol_h:,}")
+                    st.metric("Polices actives",  f"{_nb_act_h:,}",
+                              f"{_tx_act_h:.1f}%" if _tx_act_h else None)
+                    st.metric("Primes portefeuille", fmt(_ca_mont_h))
+                else:
+                    st.caption("Importez le portefeuille")
+
+            # Jauge globale santé financière
+            _score_vals = []
+            if _tx_act_h is not None:  _score_vals.append(min(_tx_act_h/60*40, 40))
+            if _sp_h     is not None:  _score_vals.append(max(40 - _sp_h/100*40, 0))
+            if _taux_resil_h is not None: _score_vals.append(max(20 - _taux_resil_h/50*20, 0))
+            _score_global = sum(_score_vals) if _score_vals else 50
+            _score_label  = "Excellente" if _score_global>=75 else ("Bonne" if _score_global>=50 else ("Fragile" if _score_global>=25 else "Critique"))
+            _score_color  = GREEN if _score_global>=75 else (AMBER if _score_global>=50 else (GOLD if _score_global>=25 else RED))
+
+            fig_jauge = go.Figure(go.Indicator(
+                mode="gauge+number+delta",
+                value=_score_global,
+                title={"text": f"Score Santé Financière<br><span style='font-size:13px;color:{_score_color}'>{_score_label}</span>"},
+                delta={"reference": 60, "increasing": {"color": GREEN}, "decreasing": {"color": RED}},
+                gauge={
+                    "axis": {"range": [0, 100], "tickwidth": 1},
+                    "bar": {"color": _score_color, "thickness": 0.35},
+                    "bgcolor": "white",
+                    "borderwidth": 2,
+                    "bordercolor": "#E0E0E0",
+                    "steps": [
+                        {"range": [0, 25],   "color": "#FFEBEE"},
+                        {"range": [25, 50],  "color": "#FFF8E1"},
+                        {"range": [50, 75],  "color": "#E8F5E9"},
+                        {"range": [75, 100], "color": "#E3F2FD"},
+                    ],
+                    "threshold": {"line": {"color": NAVY, "width": 4},
+                                  "thickness": 0.75, "value": 60}
+                }))
+            fig_jauge.update_layout(height=300, paper_bgcolor="white",
+                font=dict(family="Inter,sans-serif", size=12))
+            st.plotly_chart(fig_jauge, use_container_width=True)
+
     # ── IMPORT BASE PRESTATIONS / SINISTRES ───────────────────────────────────
     kpis_sin = st.session_state.get("kpis_sin", {})
     with st.expander(
