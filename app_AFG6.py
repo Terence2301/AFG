@@ -49,7 +49,7 @@ st.set_page_config(
     page_icon="🛡️",
     layout="wide",
     initial_sidebar_state="expanded",
-    menu_items={"About": "AFG Assurances Bénin Vie v22.0 — Conforme CIMA"}
+    menu_items={"About": "AFG Assurances Bénin Vie v32.0 — Conforme CIMA"}
 )
 
 import pandas as pd, numpy as np
@@ -57,8 +57,58 @@ import plotly.express as px, plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import sqlite3
 from datetime import datetime, timedelta, date
-import warnings, os, random, io, hashlib, base64
+import warnings, os, random, io, hashlib, base64, gc as _gc_stdlib, tempfile, pathlib
 warnings.filterwarnings("ignore")
+
+# ── Lecture Excel robuste pour fichiers volumineux (>50 Mo) ──────────────────
+def _read_excel_robust(file_obj, sheet_name=0, dtype=None):
+    """Lit un fichier Excel de manière robuste pour les gros fichiers.
+    Stratégie :
+      1. Écrit d'abord dans un fichier temporaire (évite les lectures stream répétées)
+      2. Lit avec openpyxl (engine explicite — pas de détection automatique)
+      3. Libère la mémoire après lecture
+    Compatible avec st.UploadedFile et chemins str/Path."""
+    try:
+        # Si c'est un UploadedFile Streamlit → écrire sur disque d'abord
+        if hasattr(file_obj, "read"):
+            raw = file_obj.read()
+            suffix = ".xlsx"
+            if hasattr(file_obj, "name"):
+                ext = pathlib.Path(file_obj.name).suffix.lower()
+                suffix = ext if ext in (".xlsx", ".xls") else ".xlsx"
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(raw)
+                tmp_path = tmp.name
+            del raw  # libérer immédiatement
+            _gc_stdlib.collect()
+        else:
+            tmp_path = str(file_obj)
+        try:
+            engine = "openpyxl" if tmp_path.endswith(".xlsx") else "xlrd"
+            df = pd.read_excel(tmp_path, sheet_name=sheet_name,
+                               engine=engine, dtype=dtype)
+        except Exception:
+            # Fallback sans engine explicite
+            df = pd.read_excel(tmp_path, sheet_name=sheet_name, dtype=dtype)
+        finally:
+            # Supprimer le temporaire
+            if hasattr(file_obj, "read"):
+                try: os.unlink(tmp_path)
+                except Exception: pass
+        _gc_stdlib.collect()
+        return df
+    except Exception as _e:
+        raise RuntimeError(f"Impossible de lire le fichier Excel : {_e}") from _e
+
+def _read_excel_sheet_safe(file_obj, preferred_sheet="Liste"):
+    """Essaie de lire la feuille preferred_sheet, sinon lit la première feuille."""
+    try:
+        return _read_excel_robust(file_obj, sheet_name=preferred_sheet)
+    except Exception:
+        if hasattr(file_obj, "seek"):
+            try: file_obj.seek(0)
+            except Exception: pass
+        return _read_excel_robust(file_obj, sheet_name=0)
 
 # ── COULEURS ──────────────────────────────────────────────────────────────────
 NAVY="#003366"; BLUE="#004D99"; BLUEL="#0072CE"
@@ -71,7 +121,7 @@ AMBER="#D35400"; TEAL="#0A7B6C"
 PORT_REEL = {
     "total": 42323, "actif": 11623, "resilie": 25657, "inactif": 3367,
     "echu": 1660, "suspendu": 16,
-    "tx_actif": 27.5, "tx_resil": 60.6,
+    "tx_actif": 27.5, "tx_resil": 65.9,  # CIMA: resilies/(total-inactifs)
     "ca_total": 24_396_246_131, "coti_total": 3_385_492_740,
     "ca_actifs": 11_285_025_424,
     "nb_comm": 1316,
@@ -184,6 +234,14 @@ DB = os.path.join(DB_DIR, "afg_v13.db")
 def gc():
     return sqlite3.connect(DB, check_same_thread=False)
 
+def calc_tx_resil(df_pf):
+    """CIMA: resilies/(total-inactifs)*100"""
+    if df_pf is None or df_pf.empty or "ETAT_POLICE" not in df_pf.columns: return 0.0
+    n_r=int((df_pf["ETAT_POLICE"]=="RESILIE").sum())
+    n_i=int((df_pf["ETAT_POLICE"]=="INACTIF").sum())
+    return round(n_r/max(len(df_pf)-n_i,1)*100,1)
+
+
 # ── PORTEFEUILLE EXCEL — chargement automatique ──────────────────────────────
 # Le fichier Excel du portefeuille (export logiciel métier) peut être placé :
 #   1) à côté de ce script (./Portefeuille_non_deces_au_31_12_2025._princ.xlsx)
@@ -211,60 +269,417 @@ def _find_portefeuille_path():
             return p
     return None
 
-# Chemin du cache pickle — survit aux déconnexions/rechargements
-_PF_CACHE = os.path.join(DB_DIR, "afg_portefeuille_cache.pkl")
-_PF_META  = os.path.join(DB_DIR, "afg_portefeuille_meta.json")
+# ══════════════════════════════════════════════════════════════════════════════
+# PERSISTANCE MULTI-BASES — v32
+# 3 bases indépendantes : Portefeuille, CA, Prestations
+# Chaque base a son propre cache disque + version_ts pour détection de mise à jour
+# ══════════════════════════════════════════════════════════════════════════════
+import json as _json_mod
 
-def save_portefeuille_cache(df: "pd.DataFrame", meta: dict = None):
-    """Sauvegarde le portefeuille en cache pickle sur disque."""
+_PF_CACHE   = os.path.join(DB_DIR, "afg_portefeuille_cache.pkl")
+_PF_META    = os.path.join(DB_DIR, "afg_portefeuille_meta.json")
+_CA_CACHE   = os.path.join(DB_DIR, "afg_ca_cache.pkl")
+_CA_META    = os.path.join(DB_DIR, "afg_ca_meta.json")
+_SIN_CACHE  = os.path.join(DB_DIR, "afg_sin_cache.pkl")
+_SIN_META   = os.path.join(DB_DIR, "afg_sin_meta.json")
+
+def _save_base(df, cache_path, meta_path, meta_extra=None):
+    """Sauvegarde générique base + meta JSON avec version_ts."""
     try:
-        df.to_pickle(_PF_CACHE)
-        import json
-        info = meta or {}
-        info["saved_at"] = datetime.now().isoformat()
-        info["rows"] = len(df)
-        info["cols"] = len(df.columns)
-        with open(_PF_META, "w", encoding="utf-8") as f:
-            json.dump(info, f, ensure_ascii=False, indent=2)
+        df.to_pickle(cache_path)
+        info = meta_extra or {}
+        info["saved_at"]   = datetime.now().isoformat()
+        info["version_ts"] = datetime.now().timestamp()
+        info["rows"]       = len(df)
+        info["cols"]       = len(df.columns)
+        with open(meta_path,"w",encoding="utf-8") as _f:
+            _json_mod.dump(info, _f, ensure_ascii=False, indent=2)
+        return True
     except Exception:
-        pass
+        return False
 
-def delete_portefeuille_cache():
-    """Supprime le cache portefeuille du disque."""
-    for p in [_PF_CACHE, _PF_META]:
-        try:
-            if os.path.exists(p):
-                os.remove(p)
-        except Exception:
-            pass
+def _load_base(cache_path):
+    """Charge une base depuis son cache pickle."""
+    if not os.path.exists(cache_path): return None
+    try: return pd.read_pickle(cache_path)
+    except Exception: return None
 
-def load_portefeuille_cache() -> "pd.DataFrame | None":
-    """Charge le portefeuille depuis le cache pickle disque."""
-    if not os.path.exists(_PF_CACHE):
-        return None
+def _get_meta(meta_path):
+    """Retourne les métadonnées d'une base."""
     try:
-        return pd.read_pickle(_PF_CACHE)
-    except Exception:
-        return None
-
-def get_portefeuille_meta() -> dict:
-    """Retourne les métadonnées du cache (date, taille)."""
-    try:
-        import json
-        if os.path.exists(_PF_META):
-            with open(_PF_META, "r", encoding="utf-8") as f:
-                return json.load(f)
-    except Exception:
-        pass
+        if os.path.exists(meta_path):
+            with open(meta_path,"r",encoding="utf-8") as _f:
+                return _json_mod.load(_f)
+    except Exception: pass
     return {}
 
-@st.cache_data(show_spinner=False)
-def load_portefeuille_auto():
-    """Charge le portefeuille depuis le cache disque (pickle).
-    Appelé au démarrage — survit aux déconnexions."""
-    return load_portefeuille_cache()
+def _get_version_ts(meta_path):
+    """Timestamp de version d'une base (pour détection mise à jour)."""
+    return float(_get_meta(meta_path).get("version_ts", 0))
 
-@st.cache_data(show_spinner=False)
+# ── PORTEFEUILLE ──────────────────────────────────────────────────────────────
+def save_portefeuille_cache(df, meta=None):
+    """Sauvegarde le portefeuille.
+    MODE REMPLACE : la nouvelle base remplace complètement l'ancienne.
+    MODE AJOUTE   : les nouvelles polices (NUMEPOLI_P absent) sont ajoutées."""
+    return _save_base(df, _PF_CACHE, _PF_META, meta)
+
+def save_portefeuille_merge(df_new, meta=None):
+    """Fusionne la nouvelle base avec l'ancienne (ajoute les nouvelles polices)."""
+    try:
+        df_old = _load_base(_PF_CACHE)
+        if df_old is not None and "NUMEPOLI_P" in df_old.columns and "NUMEPOLI_P" in df_new.columns:
+            old_keys = set(zip(df_old["CODEINTE_P"].astype(str), df_old["NUMEPOLI_P"].astype(str)))
+            mask_new = df_new.apply(
+                lambda r: (str(r["CODEINTE_P"]), str(r["NUMEPOLI_P"])) not in old_keys, axis=1)
+            df_add = df_new[mask_new]
+            df_merged = pd.concat([df_old, df_add], ignore_index=True)
+            m = meta or {}
+            m["nb_ajouts"] = len(df_add)
+            return _save_base(df_merged, _PF_CACHE, _PF_META, m)
+        return save_portefeuille_cache(df_new, meta)
+    except Exception:
+        return save_portefeuille_cache(df_new, meta)
+
+def load_portefeuille_cache(): return _load_base(_PF_CACHE)
+def delete_portefeuille_cache():
+    for p in [_PF_CACHE, _PF_META]:
+        try:
+            if os.path.exists(p): os.remove(p)
+        except Exception: pass
+
+def get_portefeuille_meta(): return _get_meta(_PF_META)
+
+# ── BASE CA ───────────────────────────────────────────────────────────────────
+def save_ca_cache(df, meta=None):
+    """Sauvegarde la base CA — MODE REMPLACE : écrase l'ancienne base."""
+    return _save_base(df, _CA_CACHE, _CA_META, meta)
+
+def save_ca_merge(df_new, meta=None):
+    """Fusionne la nouvelle base CA avec l'ancienne.
+    Logique : concatène et déduplique sur POLICE_KEY+DATECOMP+CHIFAFFA.
+    Retourne (df_merged, nb_ajouts) ou None si échec."""
+    try:
+        df_old = _load_base(_CA_CACHE)
+        # ⚠️ Ne jamais faire `df_old or ...` — ambiguïté DataFrame
+        if df_old is not None and not df_old.empty:
+            nb_avant = len(df_old)
+            df_merged = pd.concat([df_old, df_new], ignore_index=True)
+            dup_cols = [c for c in ["POLICE_KEY","DATECOMP","CHIFAFFA","NUMEPOLI","CODEINTE"] if c in df_merged.columns]
+            if dup_cols:
+                df_merged = df_merged.drop_duplicates(subset=dup_cols, keep="last")
+            else:
+                df_merged = df_merged.drop_duplicates(keep="last")
+            nb_ajouts = len(df_merged) - nb_avant
+            m = meta if meta is not None else {}
+            m["nb_ajouts"] = max(nb_ajouts, 0)
+            m["total_apres_fusion"] = len(df_merged)
+            _save_base(df_merged, _CA_CACHE, _CA_META, m)
+            return df_merged, max(nb_ajouts, 0)
+        # Pas d'ancienne base → simple sauvegarde
+        save_ca_cache(df_new, meta)
+        return df_new, len(df_new)
+    except Exception as _e_merge:
+        try:
+            save_ca_cache(df_new, meta)
+        except Exception:
+            pass
+        return df_new, len(df_new)
+
+def save_sin_merge(df_new, meta=None):
+    """Fusionne la nouvelle base Prestations avec l'ancienne.
+    Déduplication sur No Sinistre si disponible."""
+    try:
+        df_old = _load_base(_SIN_CACHE)
+        # ⚠️ Ne jamais faire `df_old or ...` — ambiguïté DataFrame
+        if df_old is not None and not df_old.empty:
+            df_merged = pd.concat([df_old, df_new], ignore_index=True)
+            dup_cols = [c for c in ["No Sinistre","Int police","No Police"] if c in df_merged.columns]
+            if dup_cols:
+                df_merged = df_merged.drop_duplicates(subset=dup_cols, keep="last")
+            else:
+                df_merged = df_merged.drop_duplicates(keep="last")
+            m = meta if meta is not None else {}
+            m["nb_ajouts"] = len(df_new)
+            _save_base(df_merged, _SIN_CACHE, _SIN_META, m)
+            return df_merged, len(df_new)
+        save_sin_cache(df_new, meta)
+        return df_new, len(df_new)
+    except Exception:
+        try:
+            save_sin_cache(df_new, meta)
+        except Exception:
+            pass
+        return df_new, len(df_new)
+
+def load_ca_cache(): return _load_base(_CA_CACHE)
+def delete_ca_cache():
+    for p in [_CA_CACHE, _CA_META]:
+        try:
+            if os.path.exists(p): os.remove(p)
+        except Exception: pass
+def get_ca_meta(): return _get_meta(_CA_META)
+
+# ── BASE PRESTATIONS / SINISTRES ──────────────────────────────────────────────
+def save_sin_cache(df, meta=None):
+    """Sauvegarde la base Prestations (sinistres). Indépendante du portefeuille."""
+    return _save_base(df, _SIN_CACHE, _SIN_META, meta)
+
+def load_sin_cache(): return _load_base(_SIN_CACHE)
+def delete_sin_cache():
+    for p in [_SIN_CACHE, _SIN_META]:
+        try:
+            if os.path.exists(p): os.remove(p)
+        except Exception: pass
+def get_sin_meta(): return _get_meta(_SIN_META)
+
+# ── CHARGEMENT AUTO AU DÉMARRAGE (sans @st.cache_data) ───────────────────────
+# ⚠️ PAS de @st.cache_data : on veut toujours la version la plus récente du disque
+def load_portefeuille_auto(): return load_portefeuille_cache()
+
+# ── CONVERSION NUMÉRIQUE ROBUSTE — FORMAT FR/AFRIQUE ─────────────────────────
+def clean_numeric_col(series):
+    """Convertit une colonne numérique en float64 de manière robuste.
+    Gère tous les formats rencontrés dans les exports BEAC/AFG :
+      • '3 711 385,45'   → espace comme séparateur milliers + virgule décimale
+      • '3\xa0711\xa0385,45' → espace insécable (caractère U+00A0)
+      • '1,234.56'       → format anglais
+      • '1.234,56'       → format européen
+      • '3711385.45'     → déjà correct
+      • Colonnes déjà float/int → retournées telles quelles
+    Garantit qu'aucune valeur numérique valide ne devient NaN."""
+    import numpy as _np
+    # Si déjà numérique → retourner directement en float64
+    if series.dtype.kind in ('f','i','u'):
+        return series.astype('float64')
+    # Conversion robuste
+    s = series.astype(str).str.strip()
+    # Supprimer espaces insécables (U+00A0) et espaces normaux utilisés comme séparateurs de milliers
+    s = s.str.replace('\xa0', '', regex=False)
+    s = s.str.replace('\u202f', '', regex=False)  # espace fine insécable
+    # Détecter le format européen : "1.234,56" → . pour milliers, , pour décimale
+    mask_eu = s.str.match(r'^\-?\d{1,3}(\.\d{3})+(,\d+)?$', na=False)
+    s_copy = s.copy()
+    s_copy[mask_eu] = s[mask_eu].str.replace('.', '', regex=False).str.replace(',', '.', regex=False)
+    # Pour le reste : virgule = séparateur décimal (format FR/BEAC)
+    # Supprimer les espaces restants (séparateurs de milliers)
+    s_copy = s_copy.str.replace(' ', '', regex=False)
+    # Remplacer virgule par point (format FR → standard)
+    s_copy = s_copy.str.replace(',', '.', regex=False)
+    result = pd.to_numeric(s_copy, errors='coerce')
+    # Diagnostic : signaler les pertes si importantes
+    nb_nan = result.isna().sum()
+    nb_tot = len(result)
+    if nb_nan > 0 and nb_nan / max(nb_tot, 1) > 0.05:
+        import warnings
+        warnings.warn(f"clean_numeric_col: {nb_nan}/{nb_tot} valeurs non converties ({nb_nan/nb_tot*100:.1f}%)")
+    return result
+
+# ── FONCTIONS ANALYTIQUES MULTI-BASES ────────────────────────────────────────
+def preparer_portefeuille(df):
+    """Prépare le portefeuille — UNIQUEMENT les colonnes utiles au dashboard.
+    Réduit la taille mémoire de ~60-70% sur les gros fichiers (>100 Mo).\n    Utilise clean_numeric_col pour garantir la fiabilité des montants."""
+    if df is None: return None
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+
+    # Colonnes métier strictement nécessaires
+    COLS_PF = ["NUMEPOLI_P","CODEINTE_P","ETAT_POLICE","LIBECATE",
+               "MONTENCA","COTI_PERIODIQUE","NBRE_PRIME",
+               "NOM_APP","CODEAPPO","NOM_ASSU","LIBEVILL","CODEVILL",
+               "DATESOUS","DATENAIS","CODERISQ","CODEASSU","CODEBANQ","CODEPERI"]
+    cols_keep = [c for c in COLS_PF if c in df.columns]
+    df = df[cols_keep].copy()
+
+    # Colonnes calculées
+    if "CODEINTE_P" in df.columns and "NUMEPOLI_P" in df.columns:
+        df["POLICE_KEY"] = (df["CODEINTE_P"].astype(str).str.strip() + "-" +
+                            df["NUMEPOLI_P"].astype(str).str.strip())
+    if "DATESOUS" in df.columns:
+        df["ANNEE_SOUS"] = pd.to_datetime(
+            df["DATESOUS"], dayfirst=True, errors="coerce").dt.year.astype("Int64")
+    if "CODERISQ" in df.columns and "NUMEPOLI_P" in df.columns:
+        nb_ass = df.groupby("NUMEPOLI_P")["CODERISQ"].max().reset_index()
+        nb_ass.columns = ["NUMEPOLI_P","NB_ASSURES"]
+        df = df.merge(nb_ass, on="NUMEPOLI_P", how="left")
+
+    # Optimisation types mémoire
+    # Optimisation types mémoire — clean_numeric_col gère tous les formats FR/BEAC
+    if "ETAT_POLICE" in df.columns: df["ETAT_POLICE"] = df["ETAT_POLICE"].astype("category")
+    # Autres colonnes en str (pas category → évite TypeError sur fillna après merge)
+    for col in ["LIBECATE","LIBEVILL","CODEAPPO","NOM_APP"]:
+        if col in df.columns: df[col] = df[col].astype(str).replace("nan", "")
+    for col in ["MONTENCA","COTI_PERIODIQUE","NBRE_PRIME"]:
+        if col in df.columns: df[col] = clean_numeric_col(df[col])  # float64 robuste
+    return df
+
+
+def preparer_ca(df):
+    """Prépare la base CA — UNIQUEMENT les colonnes utiles. Réduit la mémoire de ~50-60%."""
+    if df is None: return None
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+
+    COLS_CA = ["NUMEPOLI","CODEINTE","CHIFAFFA","DATECOMP",
+               "CODEAPPO","NOM_APP","PRIMNETT","COMMAPPO"]
+    cols_keep = [c for c in COLS_CA if c in df.columns]
+    df = df[cols_keep].copy()
+
+    if "CODEINTE" in df.columns and "NUMEPOLI" in df.columns:
+        df["POLICE_KEY"] = (df["CODEINTE"].astype(str).str.strip() + "-" +
+                            df["NUMEPOLI"].astype(str).str.strip())
+    if "DATECOMP" in df.columns:
+        _dc = pd.to_datetime(df["DATECOMP"], dayfirst=True, errors="coerce")
+        df["ANNEE_COMP"]  = _dc.dt.year.astype("Int64")
+        df["MOIS_COMP"]   = _dc.dt.month.astype("Int64")
+        df["TRIM_COMP"]   = _dc.dt.quarter.astype("Int64")
+        df["SEM_COMP"]    = ((_dc.dt.month - 1) // 6 + 1).astype("Int64")
+        df["YYYYMM_COMP"] = _dc.dt.to_period("M").astype(str)
+    if "CHIFAFFA" not in df.columns: df["CHIFAFFA"] = 0.0
+    if "COMMAPPO" not in df.columns: df["COMMAPPO"] = 0.0
+    if "CODEAPPO" in df.columns:
+        df["CODEAPPO_STR"] = df["CODEAPPO"].apply(
+            lambda x: str(int(x)) if pd.notna(x) and
+            str(x).replace(".0","").isdigit() else str(x))
+
+    for col in ["CHIFAFFA","PRIMNETT","COMMAPPO"]:
+        if col in df.columns: df[col] = clean_numeric_col(df[col])  # float64 robuste — gère "3 711 385,45"
+    if "CODEAPPO" in df.columns: df["CODEAPPO"] = df["CODEAPPO"].astype("category")
+    return df
+
+
+def preparer_sin(df):
+    """Prépare la base Prestations — UNIQUEMENT les colonnes utiles. Réduit la mémoire de ~50-60%."""
+    if df is None: return None
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+
+    COLS_SIN = ["No Sinistre","Int police","No Police","Nature Sinistre","Statut",
+                "Date Survenance","Date Déclaration","Date validation","Date Comptabilisation",
+                "Réglement Principal","Règlement Principal","Reglement Principal",
+                "Réglement principal","Règlement principal",
+                "Réglement Total","Règlement Total","Reglement Total"]
+    cols_keep = [c for c in COLS_SIN if c in df.columns]
+    df = df[cols_keep].copy()
+
+    if "Int police" in df.columns and "No Police" in df.columns:
+        df["POLICE_KEY"] = (df["Int police"].astype(str).str.strip() + "-" +
+                            df["No Police"].astype(str).str.strip())
+    for col in ["Date Survenance","Date Déclaration","Date validation","Date Comptabilisation"]:
+        if col in df.columns:
+            df[col+"_ANNEE"] = pd.to_datetime(
+                df[col], dayfirst=True, errors="coerce").dt.year.astype("Int64")
+    if "Nature Sinistre" in df.columns:
+        def _norm_nat(v):
+            s = str(v).strip()
+            su = s.upper().replace("É","E").replace("È","E").replace("Ê","E")
+            if "DECES" in su: return "Décès (toutes causes)"
+            return s if s and s.lower()!="nan" else "Non précisé"
+        df["NAT_NORM"] = df["Nature Sinistre"].apply(_norm_nat).astype("category")
+    _regl_col = None
+    for _c in ["Réglement Principal","Règlement Principal","Reglement Principal",
+               "Réglement principal","Règlement principal",
+               "Réglement Total","Règlement Total","Reglement Total"]:
+        if _c in df.columns: _regl_col = _c; break
+    if _regl_col is not None:
+        df["REGL_PRINC"] = clean_numeric_col(df[_regl_col]).fillna(0)  # float64 robuste
+    else:
+        df["REGL_PRINC"] = 0.0
+    return df
+
+def joindre_ca_portefeuille(df_pf, df_ca):
+    """Joint la base CA avec le portefeuille via POLICE_KEY.
+    Retourne df_pf enrichi avec les colonnes CA : CHIFAFFA, CODEAPPO_CA, etc."""
+    if df_pf is None or df_ca is None: return df_pf
+    if "POLICE_KEY" not in df_pf.columns or "POLICE_KEY" not in df_ca.columns:
+        return df_pf
+    ca_agg = df_ca.groupby("POLICE_KEY").agg(
+        CHIFAFFA_TOT=("CHIFAFFA","sum"),
+        PRIMNETT_TOT=("PRIMNETT","sum") if "PRIMNETT" in df_ca.columns else ("CHIFAFFA","sum"),
+        COMMAPPO_TOT=("COMMAPPO","sum") if "COMMAPPO" in df_ca.columns else ("CHIFAFFA","count"),
+        NB_QUITTANCES=("POLICE_KEY","count"),
+        ANNEE_CA=("ANNEE_COMP","first") if "ANNEE_COMP" in df_ca.columns else ("CHIFAFFA","count"),
+    ).reset_index()
+    df_joined = df_pf.merge(ca_agg, on="POLICE_KEY", how="left")
+    df_joined["CHIFAFFA_TOT"] = df_joined["CHIFAFFA_TOT"].fillna(0)
+    return df_joined
+
+def calc_kpis_portefeuille(df):
+    """Calcule tous les KPIs depuis le portefeuille préparé."""
+    if df is None or df.empty:
+        return {}
+    # États
+    etats = df["ETAT_POLICE"].value_counts().to_dict() if "ETAT_POLICE" in df.columns else {}
+    nb_tot   = len(df)
+    nb_actif = etats.get("ACTIF",0)
+    nb_resil = etats.get("RESILIE",0)
+    nb_inact = etats.get("INACTIF",0)
+    nb_echu  = etats.get("ECHU",0) + etats.get("ASSURE ECHU",0)
+    nb_susp  = etats.get("SUSPENDU",0) + etats.get("SUSPENSION DU TERME",0)
+    # Taux résiliation CIMA : résiliés / (total - inactifs)
+    tx_resil = round(nb_resil / max(nb_tot - nb_inact, 1) * 100, 1)
+    tx_actif = round(nb_actif / max(nb_tot, 1) * 100, 1)
+    # CA
+    ca_tot   = float(df["MONTENCA"].sum()) if "MONTENCA" in df.columns else 0
+    cotis_moy = float(df["COTI_PERIODIQUE"].dropna().mean()) if "COTI_PERIODIQUE" in df.columns else 0
+    # Commerciaux
+    nb_comm  = df["NOM_APP"].nunique() if "NOM_APP" in df.columns else 0
+    # Assurés uniques
+    nb_assures = df["CODEASSU"].nunique() if "CODEASSU" in df.columns else 0
+    # Polices uniques
+    nb_polices = df["POLICE_KEY"].nunique() if "POLICE_KEY" in df.columns else nb_tot
+    # Nb assurés par CODERISQ (polices groupe)
+    if "NB_ASSURES" in df.columns:
+        nb_assures_total = int(df.groupby("NUMEPOLI_P")["NB_ASSURES"].max().sum()) if "NUMEPOLI_P" in df.columns else nb_assures
+    else:
+        nb_assures_total = nb_assures
+    return {
+        "nb_tot": nb_tot, "nb_actif": nb_actif, "nb_resil": nb_resil,
+        "nb_inact": nb_inact, "nb_echu": nb_echu, "nb_susp": nb_susp,
+        "tx_resil": tx_resil, "tx_actif": tx_actif,
+        "ca_tot": ca_tot, "cotis_moy": cotis_moy,
+        "nb_comm": nb_comm, "nb_assures": nb_assures,
+        "nb_assures_total": nb_assures_total, "nb_polices": nb_polices,
+    }
+
+def calc_kpis_ca(df_ca, df_pf=None):
+    """Calcule les KPIs CA depuis la base CA (CHIFAFFA, DATECOMP)."""
+    if df_ca is None or df_ca.empty:
+        return {}
+    ca_total = float(df_ca["CHIFAFFA"].sum()) if "CHIFAFFA" in df_ca.columns else 0
+    nb_quitt = len(df_ca)
+    nb_comm_ca = df_ca["CODEAPPO"].nunique() if "CODEAPPO" in df_ca.columns else 0
+    nb_pol_ca  = df_ca["POLICE_KEY"].nunique() if "POLICE_KEY" in df_ca.columns else 0
+    annees = sorted(df_ca["ANNEE_COMP"].dropna().unique().astype(int).tolist()) if "ANNEE_COMP" in df_ca.columns else []
+    return {
+        "ca_total": ca_total, "nb_quittances": nb_quitt,
+        "nb_comm_ca": nb_comm_ca, "nb_polices_ca": nb_pol_ca,
+        "annees": annees,
+    }
+
+def calc_kpis_sin(df_sin):
+    """Calcule les KPIs sinistres depuis la base Prestations."""
+    if df_sin is None or df_sin.empty:
+        return {}
+    nb_dos  = len(df_sin)
+    if "REGL_PRINC" in df_sin.columns:
+        regle = float(df_sin["REGL_PRINC"].sum())
+    elif "Réglement Principal" in df_sin.columns:
+        regle = float(pd.to_numeric(df_sin["Réglement Principal"], errors="coerce").fillna(0).sum())
+    elif "Réglement Total" in df_sin.columns:
+        regle = float(pd.to_numeric(df_sin["Réglement Total"], errors="coerce").fillna(0).sum())
+    else:
+        regle = 0
+    sap     = float(df_sin["SAP au 31/12/2025"].sum()) if "SAP au 31/12/2025" in df_sin.columns else 0
+    nb_clos = (df_sin["Sort Sinistre"]=="Cloturé").sum() if "Sort Sinistre" in df_sin.columns else 0
+    nb_ouv  = (df_sin["Sort Sinistre"]=="Ouvert").sum() if "Sort Sinistre" in df_sin.columns else 0
+    return {
+        "nb_dossiers": nb_dos, "total_regle": regle, "sap": sap,
+        "nb_clos": nb_clos, "nb_ouverts": nb_ouv,
+        "tx_clos": round(nb_clos/max(nb_dos,1)*100,1),
+    }
+
+# ── SANS @st.cache_data : toujours cohérent avec la version en session ────────
 def get_apporteurs_index():
     """Retourne un dict {CODEAPPO_str_upper: NOM_APP} construit depuis le
     portefeuille Excel chargé en session ou auto-détecté.
@@ -291,12 +706,12 @@ def get_apporteurs_index():
 
 # Comptes direction (stockés dans session JSON-like dans session_state à init)
 DIRECTION_USERS_DEFAULT = {
-    "PDG AFG":        {"pwd": hashlib.sha256(b"pdg2025AFG").hexdigest(),    "role": "Direction",      "nom": "PDG AFG",              "init": "PDG", "code": "PDG001"},
-    "DG AFG":         {"pwd": hashlib.sha256(b"dg2025AFG").hexdigest(),     "role": "Direction",      "nom": "DG AFG",               "init": "DGA", "code": "DGA001"},
-    "ADMIN AFG":      {"pwd": hashlib.sha256(b"admin2025AFG").hexdigest(),  "role": "Administrateur", "nom": "Administrateur AFG",   "init": "ADM", "code": "ADM001"},
-    "MANAGER AFG":    {"pwd": hashlib.sha256(b"manager2025").hexdigest(),   "role": "Manager",        "nom": "Directeur Commercial", "init": "DCO", "code": "DCO001"},
-    "ACTUAIRE AFG":   {"pwd": hashlib.sha256(b"actuaire2025").hexdigest(),  "role": "Actuaire",       "nom": "Actuaire Principal",   "init": "ACT", "code": "ACT001"},
-    "DEMO VISITEUR":  {"pwd": hashlib.sha256(b"demo").hexdigest(),          "role": "Visiteur",       "nom": "Visiteur Démo",        "init": "DEM", "code": "DEM001"},
+    "PDG AFG":        {"pwd": hashlib.sha256(b"1001").hexdigest(),    "role": "Direction",      "nom": "PDG AFG",              "init": "PDG", "code": "PDG001"},
+    "DG AFG":         {"pwd": hashlib.sha256(b"1002").hexdigest(),     "role": "Direction",      "nom": "DG AFG",               "init": "DGA", "code": "DGA001"},
+    "ADMIN AFG":      {"pwd": hashlib.sha256(b"1003").hexdigest(),  "role": "Administrateur", "nom": "Administrateur AFG",   "init": "ADM", "code": "ADM001"},
+    "MANAGER AFG":    {"pwd": hashlib.sha256(b"1004").hexdigest(),   "role": "Manager",        "nom": "Directeur Commercial", "init": "DCO", "code": "DCO001"},
+    "ACTUAIRE AFG":   {"pwd": hashlib.sha256(b"1005").hexdigest(),  "role": "Actuaire",       "nom": "Actuaire Principal",   "init": "ACT", "code": "ACT001"},
+    "DEMO VISITEUR":  {"pwd": hashlib.sha256(b"0000").hexdigest(),          "role": "Visiteur",       "nom": "Visiteur Démo",        "init": "DEM", "code": "DEM001"},
 }
 
 ROLE_COLORS = {
@@ -310,9 +725,12 @@ def get_db_conn():
     return gc()
 
 def load_direction_users():
-    """Charge les comptes direction depuis la BD (table users_direction)"""
+    """Charge les comptes direction depuis la BD.
+    ⚠️ FORCE la mise à jour si les hash en BD ne correspondent pas aux defaults
+    (évite les anciens mots de passe qui persistent entre déploiements)."""
+    defaults = {k.upper(): v for k, v in DIRECTION_USERS_DEFAULT.items()}
     try:
-        c = get_db_conn()
+        c = gc()
         c.execute("""CREATE TABLE IF NOT EXISTS users_direction(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             identifiant TEXT UNIQUE,
@@ -323,31 +741,37 @@ def load_direction_users():
             code TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP)""")
         c.commit()
+
+        # ── Synchronisation forcée des comptes par défaut ─────────────────────
+        # INSERT OR REPLACE → écrase TOUJOURS les anciens hash pour les comptes
+        # par défaut, garantissant que les mots de passe sont à jour après chaque déploiement
+        for ident, u in DIRECTION_USERS_DEFAULT.items():
+            c.execute("""INSERT INTO users_direction(identifiant,pwd_hash,role,nom,init,code)
+                         VALUES(?,?,?,?,?,?)
+                         ON CONFLICT(identifiant) DO UPDATE SET
+                           pwd_hash=excluded.pwd_hash,
+                           role=excluded.role,
+                           nom=excluded.nom,
+                           init=excluded.init,
+                           code=excluded.code""",
+                      (ident.upper(), u['pwd'], u['role'], u['nom'], u['init'], u['code']))
+        c.commit()
+
+        # ── Charger tous les comptes (defaults + comptes créés manuellement) ──
         df = pd.read_sql("SELECT * FROM users_direction", c)
         c.close()
         users = {}
         for _, r in df.iterrows():
             users[str(r['identifiant']).upper()] = {
-                "pwd": r['pwd_hash'],
+                "pwd":  r['pwd_hash'],
                 "role": r['role'],
-                "nom": r['nom'],
+                "nom":  r['nom'],
                 "init": r['init'],
                 "code": r['code'],
             }
-        # Fusionner avec les defaults si vide
-        if not users:
-            users = {k.upper(): v for k,v in DIRECTION_USERS_DEFAULT.items()}
-            # Sauvegarder en BD
-            c2 = get_db_conn()
-            for ident, u in DIRECTION_USERS_DEFAULT.items():
-                try:
-                    c2.execute("INSERT OR IGNORE INTO users_direction(identifiant,pwd_hash,role,nom,init,code) VALUES(?,?,?,?,?,?)",
-                        (ident.upper(), u['pwd'], u['role'], u['nom'], u['init'], u['code']))
-                except Exception: pass
-            c2.commit(); c2.close()
-        return users
+        return users if users else defaults
     except Exception:
-        return {k.upper(): v for k,v in DIRECTION_USERS_DEFAULT.items()}
+        return defaults
 
 def ck(identifiant: str, password: str):
     """Authentifie un utilisateur (direction OU commercial)"""
@@ -361,7 +785,7 @@ def ck(identifiant: str, password: str):
 
     # 2) Vérifier dans les commerciaux (NOM PRÉNOM en majuscules = identifiant, code = mot de passe)
     try:
-        c = get_db_conn()
+        c = gc()
         cur = c.cursor()
         cur.execute("SELECT nom, prenom, code_agent, agence, telephone, email FROM commerciaux WHERE UPPER(nom||' '||prenom)=? AND code_agent=?",
                     (ident, password.strip()))
@@ -571,23 +995,71 @@ _defaults = {
     "contrat_auth": False,
     "contrat_user": None,
     "portefeuille_ext": None,
-    "pf_loaded_from_cache": False,  # flag pour affichage info
+    "pf_loaded_from_cache": False,
+    "_pf_version_ts":  0.0,  # timestamp version portefeuille
+    # ── Bases complémentaires (indépendantes du portefeuille) ──
+    "ca_ext":          None,  # base CA (CHIFAFFA, DATECOMP)
+    "_ca_version_ts":  0.0,
+    "sin_ext":         None,  # base Prestations/Sinistres
+    "_sin_version_ts": 0.0,
+    # ── KPIs consolidés (recalculés à chaque chargement) ──
+    "kpis_pf":  {},   # KPIs portefeuille
+    "kpis_ca":  {},   # KPIs CA
+    "kpis_sin": {},   # KPIs sinistres
 }
 for _k, _v in _defaults.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
 
-# ── Auto-chargement depuis le CACHE DISQUE (survit aux déconnexions) ─────────
-# Le portefeuille reste chargé tant que l'utilisateur ne le supprime pas
-# explicitement depuis l'interface.
-if st.session_state.get("portefeuille_ext") is None:
-    try:
-        _df_auto = load_portefeuille_auto()   # lit le pickle disque
-        if _df_auto is not None and len(_df_auto) > 0:
-            st.session_state["portefeuille_ext"] = _df_auto
-            st.session_state["pf_loaded_from_cache"] = True
-    except Exception:
-        pass
+# ══════════════════════════════════════════════════════════════════════════════
+# CHARGEMENT AUTOMATIQUE DES 3 BASES AU DÉMARRAGE (version_ts garanti)
+# Chaque base est rechargée si le disque est plus récent que la session.
+# ══════════════════════════════════════════════════════════════════════════════
+def _reload_if_newer(ss_key, ts_key, cache_fn, meta_path, prep_fn=None, kpis_fn=None, kpis_key=None):
+    """Recharge une base si le fichier disque est plus récent que la session."""
+    disk_ts = _get_version_ts(meta_path)
+    sess_ts = st.session_state.get(ts_key, 0.0)
+    if st.session_state.get(ss_key) is None or disk_ts > sess_ts:
+        df_disk = cache_fn()
+        if df_disk is not None and len(df_disk) > 0:
+            df_prep = prep_fn(df_disk) if prep_fn else df_disk
+            st.session_state[ss_key] = df_prep
+            st.session_state[ts_key] = disk_ts
+            if kpis_fn and kpis_key:
+                st.session_state[kpis_key] = kpis_fn(df_prep)
+            return True
+    return False
+
+# Charger le portefeuille
+_reload_if_newer(
+    "portefeuille_ext", "_pf_version_ts",
+    load_portefeuille_cache, _PF_META,
+    prep_fn=preparer_portefeuille,
+    kpis_fn=calc_kpis_portefeuille, kpis_key="kpis_pf")
+if st.session_state.get("portefeuille_ext") is not None:
+    st.session_state["pf_loaded_from_cache"] = True
+
+# Charger la base CA
+_reload_if_newer(
+    "ca_ext", "_ca_version_ts",
+    load_ca_cache, _CA_META,
+    prep_fn=preparer_ca,
+    kpis_fn=calc_kpis_ca, kpis_key="kpis_ca")
+
+# Charger la base Prestations/Sinistres
+_reload_if_newer(
+    "sin_ext", "_sin_version_ts",
+    load_sin_cache, _SIN_META,
+    prep_fn=preparer_sin,
+    kpis_fn=calc_kpis_sin, kpis_key="kpis_sin")
+
+# KPIs consolidés si manquants
+if st.session_state.get("portefeuille_ext") is not None and not st.session_state.get("kpis_pf"):
+    st.session_state["kpis_pf"] = calc_kpis_portefeuille(st.session_state["portefeuille_ext"])
+if st.session_state.get("ca_ext") is not None and not st.session_state.get("kpis_ca"):
+    st.session_state["kpis_ca"] = calc_kpis_ca(st.session_state["ca_ext"])
+if st.session_state.get("sin_ext") is not None and not st.session_state.get("kpis_sin"):
+    st.session_state["kpis_sin"] = calc_kpis_sin(st.session_state["sin_ext"])
 
 # ═══════════════════════════════════════════════════════════════════════════
 # PAGE LOGIN
@@ -627,7 +1099,7 @@ if not st.session_state.auth:
             ])
             +"</div></div>"
             "<div style='font-size:9px;color:rgba(255,255,255,.3);margin-top:1.5rem;line-height:1.75;'>"
-            "© 2025 AFG Assurances Bénin Vie · Système v22.0<br>"
+            "© 2025 AFG Assurances Bénin Vie · Système v32.0<br>"
             "04 BP 0851 · Cadjèhoun · Cotonou, Bénin<br>"
             "Données confidentielles — Accès restreint</div>"
             "</div>",
@@ -657,21 +1129,37 @@ if not st.session_state.auth:
                     "margin-bottom:12px;border-left:3px solid #0072CE;font-size:11.5px;color:#003366;'>"
                     "<b>👤 Commerciaux (apporteurs AFG) :</b> Identifiant = <b>NOM_APP</b> "
                     "(nom apporteur en MAJUSCULES, ex : <i>GNANCADJA LÉOPOLD</i>) "
-                    "· Mot de passe = <b>CODEAPPO</b> (code apporteur, ex : <i>2000</i>).<br>"
-                    "Astuce : vous pouvez aussi saisir votre <b>code apporteur</b> dans les deux champs.<br>"
-                    "<b>🏢 Direction / Admin :</b> Identifiant = nom du compte · Mot de passe = votre mot de passe.</div>",
+                    "· Code PIN = <b>CODEAPPO</b> (4 chiffres, ex : <i>2000</i>).<br>"
+                    "<b>🏢 Direction / Admin :</b> Identifiant = nom du compte · Code PIN = 4 chiffres.</div>",
                     unsafe_allow_html=True)
-                lu = st.text_input("👤  Identifiant", placeholder="Ex : GNANCADJA LÉOPOLD  ou  PDG AFG", key="lu13")
-                lp = st.text_input("🔑  Mot de passe", type="password", placeholder="Votre mot de passe", key="lp13")
+
+                # ── Bloc démo — codes en clair pour la démonstration ──────────
+                st.markdown("""
+                <div style="background:#FFFDE7;border:1.5px solid #F9A825;border-radius:10px;
+                     padding:10px 14px;margin-bottom:12px;font-size:11px;color:#5D4037;">
+                  <b>🎯 Comptes de démonstration — Codes PIN :</b><br>
+                  <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-top:6px;">
+                    <span>👑 <b>PDG AFG</b> → <code style="background:#FFF8E1;padding:1px 6px;border-radius:4px;font-weight:900;">1001</code></span>
+                    <span>🏢 <b>DG AFG</b> → <code style="background:#FFF8E1;padding:1px 6px;border-radius:4px;font-weight:900;">1002</code></span>
+                    <span>🔧 <b>ADMIN AFG</b> → <code style="background:#FFF8E1;padding:1px 6px;border-radius:4px;font-weight:900;">1003</code></span>
+                    <span>📊 <b>MANAGER AFG</b> → <code style="background:#FFF8E1;padding:1px 6px;border-radius:4px;font-weight:900;">1004</code></span>
+                    <span>📐 <b>ACTUAIRE AFG</b> → <code style="background:#FFF8E1;padding:1px 6px;border-radius:4px;font-weight:900;">1005</code></span>
+                    <span>👁️ <b>DEMO VISITEUR</b> → <code style="background:#FFF8E1;padding:1px 6px;border-radius:4px;font-weight:900;">0000</code></span>
+                  </div>
+                </div>""", unsafe_allow_html=True)
+
+                lu = st.text_input("👤  Identifiant", placeholder="Ex : PDG AFG  ou  GNANCADJA LÉOPOLD", key="lu13")
+                lp = st.text_input("🔑  Code PIN (4 chiffres)", type="password",
+                                   placeholder="Ex : 1001", key="lp13",
+                                   max_chars=4)
                 sub = st.form_submit_button("🔐  ACCÉDER AU SYSTÈME  ▶", use_container_width=True)
                 if sub:
                     _lu_v = lu.strip()
                     _lp_v = lp.strip()
                     if not _lu_v or not _lp_v:
                         st.error("⚠️ Veuillez remplir les deux champs.")
-                    elif _lp_v.isdigit() and len(_lp_v) < 4:
-                        # Code numérique = code apporteur commercial → min 4 chiffres
-                        st.error("⚠️ Code apporteur trop court — minimum 4 chiffres requis.")
+                    elif not _lp_v.isdigit() or len(_lp_v) != 4:
+                        st.error("⚠️ Le code doit être exactement 4 chiffres (ex : 1234).")
                     else:
                         u_res = ck(_lu_v, _lp_v)
                         if u_res:
@@ -681,8 +1169,8 @@ if not st.session_state.auth:
                         else:
                             st.error(
                                 "❌ Identifiants incorrects. "
-                                "Commerciaux : vérifiez votre nom exact (NOM_APP) et votre code (CODEAPPO min 4 chiffres). "
-                                "Direction / Admin : vérifiez votre identifiant et mot de passe.")
+                                "Commerciaux : vérifiez votre nom exact (NOM_APP) et votre code (CODEAPPO 4 chiffres). "
+                                "Direction / Admin : vérifiez votre identifiant et code PIN.")
 
             # Identifiants direction affichés (pas les commerciaux — confidentiels)
             with st.expander("🔑 Identifiants direction (démo)", expanded=False):
@@ -733,15 +1221,17 @@ if not st.session_state.auth:
                     key="new_ident",
                     help="En majuscules de préférence. Doit être unique dans le système.")
                 new_pwd   = st.text_input(
-                    "🔑 Mot de passe *",
+                    "🔑 Code PIN *",
                     type="password",
-                    placeholder="Minimum 6 caractères",
-                    key="new_pwd")
+                    placeholder="Exactement 4 chiffres",
+                    key="new_pwd",
+                    max_chars=4)
                 new_pwd2  = st.text_input(
-                    "🔑 Confirmer le mot de passe *",
+                    "🔑 Confirmer le code PIN *",
                     type="password",
-                    placeholder="Répétez exactement votre mot de passe",
-                    key="new_pwd2")
+                    placeholder="Répétez vos 4 chiffres",
+                    key="new_pwd2",
+                    max_chars=4)
                 st.markdown(
                     "<div style='background:#FFF8E1;border-radius:6px;padding:7px 10px;"
                     "font-size:10.5px;color:#7B3C00;margin-top:4px;'>"
@@ -754,10 +1244,10 @@ if not st.session_state.auth:
                     errs_cr = []
                     if not new_ident.strip():
                         errs_cr.append("Identifiant obligatoire")
-                    if len(new_pwd) < 6:
-                        errs_cr.append("Mot de passe trop court (minimum 6 caractères)")
+                    if not new_pwd.isdigit() or len(new_pwd) != 4:
+                        errs_cr.append("Le code PIN doit être exactement 4 chiffres (ex : 2025)")
                     if new_pwd != new_pwd2:
-                        errs_cr.append("Les deux mots de passe ne correspondent pas")
+                        errs_cr.append("Les deux codes PIN ne correspondent pas")
                     if errs_cr:
                         for e in errs_cr: st.error(f"❌ {e}")
                     else:
@@ -1033,28 +1523,52 @@ init_db()
 def q(sql, params=()):
     c = gc(); df = pd.read_sql_query(sql, c, params=params); c.close(); return df
 
-def fmt(v):
-    if not v or v==0: return "—"
-    if v>=1_000_000_000: return f"{v/1e9:.2f} Mrd FCFA"
-    if v>=1_000_000: return f"{v/1e6:.2f} M FCFA"
-    if v>=1_000: return f"{v/1e3:.0f} K FCFA"
+def fmt(v, exact=False):
+    """Formate un montant FCFA de manière lisible.
+    exact=True → affiche le montant exact sans arrondi (pour vérification)."""
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return "—"
+    if v == 0: return "0 FCFA"
+    if exact: return f"{v:,.0f} FCFA"
+    if v >= 1_000_000_000: return f"{v/1e9:.3f} Mrd FCFA"
+    if v >= 1_000_000: return f"{v/1e6:.3f} M FCFA"
+    if v >= 1_000: return f"{v/1e3:.0f} K FCFA"
     return f"{v:,.0f} FCFA"
+
+def fmt_exact(v):
+    """Montant exact avec séparateurs de milliers — pour vérification comptable."""
+    try:
+        v = float(v)
+        return f"{v:,.0f} FCFA"
+    except (TypeError, ValueError):
+        return "—"
 
 def dbg(v,vp):
     if not vp or vp==0: return ""
     d_=(v-vp)/vp*100; cc="delta-up" if d_>=0 else "delta-dn"
     return f'<span class="{cc}">{"▲" if d_>=0 else "▼"} {abs(d_):.1f}%</span>'
 
-def chl(fig,h=370,title=""):
-    fig.update_layout(height=h,plot_bgcolor='white',paper_bgcolor='white',
-        font=dict(family='Inter',size=12,color=NAVY),
-        margin=dict(l=6,r=6,t=40 if title else 8,b=8),
-        title=dict(text=title,font=dict(size=13,color=NAVY,family='Inter')) if title else None,
-        legend=dict(orientation='h',y=1.05,x=0,font=dict(size=11)),
-        hovermode='x unified')
-    fig.update_xaxes(showgrid=False,showline=True,linecolor=MGRAY)
-    fig.update_yaxes(showgrid=True,gridcolor='#EEF2F7',showline=False)
+def chl(fig,h=500,title=""):
+    """Layout professionnel : marges généreuses, textes lisibles 11-12px."""
+    fig.update_layout(
+        height=h,plot_bgcolor='white',paper_bgcolor='white',
+        font=dict(family='Inter, sans-serif',size=12,color='#2C3E50'),
+        margin=dict(l=65,r=40,t=58 if title else 20,b=65),
+        title=dict(text=title,font=dict(size=14,color=NAVY,family='Inter'),
+                   x=0.01,xanchor='left') if title else {},
+        legend=dict(orientation='h',y=1.02,x=0,bgcolor='rgba(255,255,255,0.92)',
+                    bordercolor='#DDE3EE',borderwidth=1,font=dict(size=11)),
+        hovermode='x unified',
+        hoverlabel=dict(bgcolor='white',bordercolor=NAVY,font_size=12,font_family='Inter'))
+    fig.update_xaxes(showgrid=True,gridwidth=1,gridcolor='#EEF2F7',
+        showline=True,linewidth=1,linecolor='#DDE3EE',
+        tickfont=dict(size=11,color='#2C3E50'),title_font=dict(size=12,color=NAVY))
+    fig.update_yaxes(showgrid=True,gridwidth=1,gridcolor='#EEF2F7',showline=False,
+        tickfont=dict(size=11,color='#2C3E50'),title_font=dict(size=12,color=NAVY))
     return fig
+
 
 def sth(title,tag=""):
     tg=f'<span class="stag">{tag}</span>' if tag else ""
@@ -1199,6 +1713,180 @@ def yr_label(yr):
         return ", ".join(sorted(yr, reverse=True)) if yr else "Toutes les années"
     return str(yr)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# v33 — Sélecteur de période (Année / Semestre / Trimestre / Mois)
+# Utilisé pour le CA (DATECOMP) et la page Partenaires Financiers
+# ─────────────────────────────────────────────────────────────────────────────
+def _ca_annees_disponibles(df_ca):
+    """Extrait les années disponibles depuis ANNEE_COMP (priorité) ou DATECOMP.
+    ANNEE_COMP est pré-calculée dans preparer_ca avec le bon parsing → zéro perte.
+    Retourne une liste d'entiers Python triée décroissante."""
+    if df_ca is None or (hasattr(df_ca, "empty") and df_ca.empty):
+        return []
+    # Priorité : ANNEE_COMP pré-calculée (Int64, fiable)
+    if "ANNEE_COMP" in df_ca.columns:
+        _raw = pd.to_numeric(df_ca["ANNEE_COMP"], errors="coerce").dropna().unique()
+        _yrs = sorted([int(y) for y in _raw if 2000 <= int(y) <= 2099], reverse=True)
+        if _yrs:
+            return _yrs
+    # Fallback : re-parser DATECOMP
+    if "DATECOMP" in df_ca.columns:
+        _s = pd.to_datetime(df_ca["DATECOMP"], dayfirst=True, errors="coerce")
+        _raw2 = _s.dt.year.dropna().unique()
+        return sorted([int(y) for y in _raw2 if 2000 <= int(y) <= 2099], reverse=True)
+    return []
+
+
+def period_selector(key, label="📅 Période d'analyse (DATECOMP)", df_ca=None):
+    """Sélecteur de période SANS dépendre d'ANNEE_COMP pré-calculé.
+    Les années sont extraites directement depuis DATECOMP à chaque appel.
+    Retourne dict {granularite, years, value, label, year (compat)}
+    où years = liste Python int des années sélectionnées."""
+
+    # ── Années disponibles dans la base ──────────────────────────────────────
+    dispo = _ca_annees_disponibles(df_ca)
+    if not dispo:
+        dispo = list(range(2025, 2019, -1))
+
+    st.markdown(
+        f"<div style='background:linear-gradient(135deg,#003366,#001F4D);border-radius:10px;"
+        f"padding:7px 14px;margin-bottom:10px;border:1px solid rgba(201,162,39,0.3);"
+        f"display:flex;align-items:center;gap:10px;'>"
+        f"<span style='color:#E8C84A;font-size:16px;'>📅</span>"
+        f"<span style='color:white;font-weight:700;font-size:12px;'>{label}</span>"
+        f"</div>", unsafe_allow_html=True)
+
+    c1, c2, c3 = st.columns([1, 1, 1])
+    with c1:
+        gran = st.selectbox(
+            "Granularité",
+            ["Toutes", "Année(s)", "Semestre", "Trimestre", "Mois"],
+            index=1, key=f"{key}_gran", label_visibility="collapsed")
+
+    # ── Toutes périodes ───────────────────────────────────────────────────────
+    if gran == "Toutes":
+        with c2:
+            st.markdown("<div style='color:#5A6478;font-size:11px;padding-top:8px;'>"
+                        "— toutes années confondues —</div>", unsafe_allow_html=True)
+        lbl = f"Toutes périodes ({', '.join(str(y) for y in dispo[:4])}{'…' if len(dispo)>4 else ''})"
+        return {"granularite": "Toutes", "years": dispo, "year": None, "value": None, "label": lbl}
+
+    # ── Sélection multi-années ────────────────────────────────────────────────
+    if gran == "Année(s)":
+        with c2:
+            yrs_sel = st.multiselect(
+                "Années", options=dispo,
+                default=[dispo[0]] if dispo else [],
+                key=f"{key}_yrs", label_visibility="collapsed",
+                format_func=str)
+        if not yrs_sel:
+            yrs_sel = dispo  # si rien sélectionné → toutes
+        yrs_int = sorted([int(y) for y in yrs_sel], reverse=True)
+        lbl = "Année " + str(yrs_int[0]) if len(yrs_int)==1 else "Années " + ", ".join(str(y) for y in yrs_int)
+        return {"granularite": "Année", "years": yrs_int, "year": yrs_int[0], "value": None, "label": lbl}
+
+    # ── Granularités fines (Semestre / Trimestre / Mois) ─────────────────────
+    with c2:
+        yr_one = int(st.selectbox("Année", dispo, index=0,
+                                  key=f"{key}_yr1", label_visibility="collapsed"))
+    val = None
+    val_label = ""
+    with c3:
+        if gran == "Semestre":
+            val = st.selectbox("Semestre", ["S1","S2"], key=f"{key}_sem", label_visibility="collapsed")
+            val_label = f"{val} {yr_one}"
+        elif gran == "Trimestre":
+            val = st.selectbox("Trimestre", ["T1","T2","T3","T4"], key=f"{key}_tri", label_visibility="collapsed")
+            val_label = f"{val} {yr_one}"
+        elif gran == "Mois":
+            mois_lst = ["01-Janvier","02-Février","03-Mars","04-Avril","05-Mai","06-Juin",
+                        "07-Juillet","08-Août","09-Septembre","10-Octobre","11-Novembre","12-Décembre"]
+            val = st.selectbox("Mois", mois_lst, key=f"{key}_mois", label_visibility="collapsed")
+            val_label = f"{val.split('-')[1]} {yr_one}"
+    return {"granularite": gran, "years": [yr_one], "year": yr_one, "value": val, "label": val_label}
+
+
+def filter_by_period(df, sel, date_col="DATECOMP",
+                     y_col="ANNEE_COMP", m_col="MOIS_COMP",
+                     t_col="TRIM_COMP", s_col="SEM_COMP"):
+    """Filtre un DataFrame selon period_selector.
+    ✅ Stratégie FIABLE : utilise ANNEE_COMP/MOIS_COMP pré-calculées dans preparer_ca.
+    Ces colonnes sont calculées UNE SEULE FOIS avec le bon parsing dayfirst=True.
+    Évite le re-parsing de DATECOMP qui perd des lignes selon le format texte.
+    Zéro perte de données sur les filtres par année."""
+    if df is None or df.empty or sel is None:
+        return df
+    g = sel.get("granularite", "Toutes")
+    if g == "Toutes":
+        return df
+
+    out = df.copy()
+
+    # ── Colonnes temporelles disponibles ──────────────────────────────────────
+    # Priorité 1 : colonnes pré-calculées dans preparer_ca (plus fiables)
+    # Priorité 2 : re-parsing de date_col en dernier recours
+    _has_yr_col = y_col in out.columns
+    _has_mo_col = m_col in out.columns
+
+    if _has_yr_col:
+        # Utiliser ANNEE_COMP directement — pas de re-parsing
+        _yr = pd.to_numeric(out[y_col], errors="coerce")
+    elif date_col and date_col in out.columns:
+        # Fallback : re-parser depuis date_col
+        _dt = pd.to_datetime(out[date_col], dayfirst=True, errors="coerce")
+        _yr = _dt.dt.year.astype("float64")
+    else:
+        return out  # impossible de filtrer
+
+    # ── Filtre années ─────────────────────────────────────────────────────────
+    years = sel.get("years") or ([sel["year"]] if sel.get("year") else [])
+    years_int = [int(y) for y in years if y is not None]
+    if years_int:
+        mask_yr = _yr.isin(years_int)
+        out = out[mask_yr.values]
+        if out.empty:
+            return out
+
+    val = sel.get("value")
+    if val is None:
+        return out
+
+    # ── Filtre sous-période ───────────────────────────────────────────────────
+    if _has_mo_col:
+        _mo = pd.to_numeric(out[m_col], errors="coerce")
+        _qt = pd.to_numeric(out[t_col], errors="coerce") if t_col in out.columns else ((_mo - 1) // 4 + 1)
+        _sm = pd.to_numeric(out[s_col], errors="coerce") if s_col in out.columns else ((_mo - 1) // 6 + 1)
+    elif date_col and date_col in out.columns:
+        _dt2 = pd.to_datetime(out[date_col], dayfirst=True, errors="coerce")
+        _mo  = _dt2.dt.month
+        _qt  = _dt2.dt.quarter
+        _sm  = ((_mo - 1) // 6 + 1)
+    else:
+        return out
+
+    if g == "Semestre":
+        sem = 1 if str(val).upper() == "S1" else 2
+        out = out[(_sm == sem).values]
+    elif g == "Trimestre":
+        tri = int(str(val)[1:])
+        out = out[(_qt == tri).values]
+    elif g == "Mois":
+        try:
+            mo = int(str(val).split("-")[0])
+            out = out[(_mo == mo).values]
+        except Exception:
+            pass
+    return out
+
+def is_partenaire_code(code):
+    """Vrai si le code apporteur est sur 3 chiffres et différent de 100."""
+    if code is None: return False
+    s = str(code).strip()
+    # Retire éventuel ".0" issu d'un float
+    if s.endswith(".0"): s = s[:-2]
+    return s.isdigit() and len(s) == 3 and s != "100"
+
+
 # ── STATS PAR PRODUIT (pour graphiques) ──────────────────────────────────────
 def get_stats_produits(df):
     """Retourne stats complètes par produit avec groupe"""
@@ -1261,9 +1949,9 @@ with st.sidebar:
             "📝  Saisie BIA",
             "🗂️  Base BIA",
             "📊  Performances",
-            "🏆  Classement",
             "🛒  Produits (18)",
             "👥  Commerciaux",
+            "🤝  Partenaires Financiers",
             "👤  Clients",
             "⚠️  Sinistres",
             "🔮  Prévisions ML",
@@ -1351,7 +2039,7 @@ with st.sidebar:
             st.session_state["portefeuille_ext"] = None
             st.session_state["pf_loaded_from_cache"] = False
             st.rerun()
-    st.markdown(f"<div style='text-align:center;font-size:8.5px;opacity:0.3;padding:5px 0;'>© 2025 AFG Assurances Bénin Vie<br>Conforme CIMA · v22.0</div>",unsafe_allow_html=True)
+    st.markdown(f"<div style='text-align:center;font-size:8.5px;opacity:0.3;padding:5px 0;'>© 2025 AFG Assurances Bénin Vie<br>Conforme CIMA · v32.0</div>",unsafe_allow_html=True)
 
 # ── Données filtrées ──────────────────────────────────────────────────────────
 d0s,d1s=d0.isoformat(),d1.isoformat()
@@ -1380,7 +2068,7 @@ st.markdown(f"""
       font-size:10px;font-weight:900;color:#003366;text-align:center;line-height:1.2;flex-shrink:0;'>AFG<br>VIE</div>
     <div class="afg-brand">
       <h1>AFG Assurances Bénin Vie</h1>
-      <p>Tableau de Bord PDG v22.0 · Conforme CIMA · Groupe AFG Holding · Atlantic Group</p>
+      <p>Tableau de Bord PDG v32.0 · Conforme CIMA · Groupe AFG Holding · Atlantic Group</p>
     </div>
   </div>
   <div class="afg-topbar-right">
@@ -1393,7 +2081,7 @@ st.markdown(f"""
   </div>
 </div>
 <div class="breadcrumb">
-  🏠 AFG Dashboard v22.0
+  🏠 AFG Dashboard v32.0
   <span style='color:{MGRAY}'>›</span>
   <span class="bc-active">{page_name}</span>
   <span style='margin-left:auto;font-size:10px;color:{DGRAY}'>
@@ -1600,34 +2288,6 @@ if "Saisie BIA" in nav:
     # FORMULAIRE PRINCIPAL (tout le reste est dans le form)
     # ═══════════════════════════════════════════════════════════════════════
     # ═══════════════════════════════════════════════════════════════════════
-    # BLOC RÉACTIF C — SIGNATURES (HORS formulaire — file_uploader interdit dans form)
-    # ═══════════════════════════════════════════════════════════════════════
-    st.markdown('<div class="bia-sec"><div class="bia-lbl" style="background:#C0392B;">Signatures — Obligatoires avant validation</div>',unsafe_allow_html=True)
-    st.markdown(
-        "<div style='background:#FDECEA;border:1px solid #C0392B;border-radius:8px;"
-        "padding:8px 12px;margin-bottom:12px;font-size:12px;color:#7B1414;'>"
-        "⚠️ Les trois signatures photographiées sont <b>OBLIGATOIRES</b> pour valider le BIA. "
-        "Chaque signature doit être précédée de <b>«LU ET APPROUVÉ»</b>.</div>",
-        unsafe_allow_html=True)
-    sig_c1,sig_c2,sig_c3=st.columns(3)
-    with sig_c1:
-        st.markdown('<div class="sig-box sig-req">📷 Signature Souscripteur<br><small>précédée de "LU ET APPROUVÉ"</small></div>',unsafe_allow_html=True)
-        sig_souscr=st.file_uploader("Photo signature souscripteur *",type=["jpg","jpeg","png","webp"],key="sig_s",label_visibility="collapsed")
-        if sig_souscr: st.image(sig_souscr,caption="✅ Signature souscripteur",use_container_width=True)
-    with sig_c2:
-        st.markdown('<div class="sig-box sig-req">📷 Signature Assuré(e)<br><small>précédée de "LU ET APPROUVÉ"</small></div>',unsafe_allow_html=True)
-        sig_ass=st.file_uploader("Photo signature assuré *",type=["jpg","jpeg","png","webp"],key="sig_a",label_visibility="collapsed")
-        if sig_ass: st.image(sig_ass,caption="✅ Signature assuré",use_container_width=True)
-    with sig_c3:
-        st.markdown('<div class="sig-box sig-req">📷 Signature Conseiller<br><small>agent commercial AFG</small></div>',unsafe_allow_html=True)
-        sig_cons=st.file_uploader("Photo signature conseiller *",type=["jpg","jpeg","png","webp"],key="sig_c",label_visibility="collapsed")
-        if sig_cons: st.image(sig_cons,caption="✅ Signature conseiller",use_container_width=True)
-    # Stocker dans session_state pour validation dans le form
-    st.session_state["_sig_souscr_ok"] = sig_souscr is not None
-    st.session_state["_sig_ass_ok"]    = sig_ass    is not None
-    st.session_state["_sig_cons_ok"]   = sig_cons   is not None
-    st.markdown("</div>",unsafe_allow_html=True)
-
     with st.form("bia_v13_form", clear_on_submit=False):
 
         # ── AGENCE & IDENTIFICATION (auto-rempli pour les commerciaux) ─────
@@ -2384,6 +3044,40 @@ if "Saisie BIA" in nav:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+
+    # ─── SIGNATURES BIA (HORS form, EN BAS) ────────────────────────────────────
+    st.markdown("---")
+    st.markdown(
+        "<div style='background:linear-gradient(135deg,#7B241C,#C0392B);border-radius:12px;"
+        "padding:12px 18px;margin-bottom:12px;border-left:5px solid #F1948A;'>"
+        "<div style='color:white;font-size:14px;font-weight:900;margin-bottom:5px;'>"
+        "✍️  SIGNATURES — Obligatoires avant validation</div>"
+        "<div style='color:rgba(255,255,255,0.88);font-size:12px;line-height:1.8;'>"
+        "⚠️ Les <b>3 signatures</b> sont obligatoires. "
+        "Chaque signature précédée de <b>«LU ET APPROUVÉ»</b>.<br>"
+        "📋 Remplissez le formulaire → uploadez les 3 signatures → cliquez ✅ VALIDER."
+        "</div></div>", unsafe_allow_html=True)
+    _sc1,_sc2,_sc3 = st.columns(3)
+    _sig_labels = [("Souscripteur","sig_s"),("Assuré(e)","sig_a"),("Conseiller AFG","sig_c")]
+    for _col,(_lbl,_key) in zip([_sc1,_sc2,_sc3],_sig_labels):
+        with _col:
+            st.markdown(
+                f"<div style='background:rgba(192,57,43,0.07);border:2px dashed #C0392B;"
+                f"border-radius:10px;padding:12px;text-align:center;margin-bottom:8px;'>"
+                f"<div style='font-size:1.8rem;'>📷</div>"
+                f"<div style='font-weight:800;font-size:12px;color:#7B241C;'>Signature {_lbl}</div>"
+                f"<div style='font-size:10px;color:#5A6478;'>Précédée de «LU ET APPROUVÉ»</div>"
+                f"</div>", unsafe_allow_html=True)
+            _f = st.file_uploader(f"Signature {_lbl} *",
+                type=["jpg","jpeg","png","webp"],key=_key,label_visibility="collapsed")
+            if _f: st.image(_f,caption=f"✅ {_lbl}",use_container_width=True)
+    sig_souscr = st.session_state.get("sig_s")
+    sig_ass    = st.session_state.get("sig_a")
+    sig_cons   = st.session_state.get("sig_c")
+    st.session_state["_sig_souscr_ok"] = sig_souscr is not None
+    st.session_state["_sig_ass_ok"]    = sig_ass is not None
+    st.session_state["_sig_cons_ok"]   = sig_cons is not None
+
 # PAGE — BASE BIA
 # ═══════════════════════════════════════════════════════════════════════════════
 elif "Base BIA" in nav:
@@ -2631,7 +3325,46 @@ elif "Accueil" in nav:
         "SELECT COUNT(*) as n FROM bulletins_bia WHERE date_saisie=?", gc(),
         params=(today.isoformat(),))["n"].iloc[0]
 
-    PR = PORT_REEL  # alias court
+    PR = PORT_REEL  # alias court — fallback si aucune base chargée
+
+    # ── KPIs dynamiques depuis les bases chargées ─────────────────────────────
+    _kpis_pf  = st.session_state.get("kpis_pf",  {})
+    _kpis_ca  = st.session_state.get("kpis_ca",  {})
+    _kpis_sin = st.session_state.get("kpis_sin", {})
+    _pf_live  = st.session_state.get("portefeuille_ext")
+    _ca_live  = st.session_state.get("ca_ext")
+    _sin_live = st.session_state.get("sin_ext")
+    _has_pf   = _pf_live is not None and len(_pf_live) > 0
+    _has_ca   = _ca_live is not None and len(_ca_live) > 0
+    _has_sin  = _sin_live is not None and len(_sin_live) > 0
+
+    # ── Injecter dans PORT_REEL si base chargée (override du snapshot) ────────
+    if _has_pf and _kpis_pf:
+        PR = {
+            **PORT_REEL,  # garder les clés non surchargées
+            "total":    _kpis_pf.get("nb_tot",   PORT_REEL["total"]),
+            "actif":    _kpis_pf.get("nb_actif",  PORT_REEL["actif"]),
+            "resilie":  _kpis_pf.get("nb_resil",  PORT_REEL["resilie"]),
+            "inactif":  _kpis_pf.get("nb_inact",  PORT_REEL["inactif"]),
+            "echu":     _kpis_pf.get("nb_echu",   PORT_REEL["echu"]),
+            "suspendu": _kpis_pf.get("nb_susp",   PORT_REEL["suspendu"]),
+            "tx_actif": _kpis_pf.get("tx_actif",  PORT_REEL["tx_actif"]),
+            "tx_resil": _kpis_pf.get("tx_resil",  PORT_REEL["tx_resil"]),
+            "ca_total": _kpis_pf.get("ca_tot",    PORT_REEL["ca_total"]),
+            "ca_actifs":_kpis_pf.get("ca_tot",    PORT_REEL["ca_actifs"]),
+            "nb_comm":  _kpis_pf.get("nb_comm",   PORT_REEL["nb_comm"]),
+            # CA commercial depuis base CA si disponible
+            "chifaffa": _kpis_ca.get("ca_total", 0) if _has_ca else 0,
+            # Assurés via CODERISQ
+            "nb_assures":       _kpis_pf.get("nb_assures",       0),
+            "nb_assures_total": _kpis_pf.get("nb_assures_total", 0),
+            "nb_polices":       _kpis_pf.get("nb_polices",       0),
+            # Sinistres
+            "sin_regle":  _kpis_sin.get("total_regle", 0),
+            "sin_sap":    _kpis_sin.get("sap", 0),
+            "sin_clos":   _kpis_sin.get("nb_clos", 0),
+            "sin_ouverts":_kpis_sin.get("nb_ouverts", 0),
+        }
 
     # ── Bannière PDG ──────────────────────────────────────────────────────────
     st.markdown(f"""
@@ -2640,7 +3373,7 @@ elif "Accueil" in nav:
       <div style="display:flex;align-items:center;justify-content:space-between;gap:2rem;flex-wrap:wrap;">
         <div>
           <div style="color:{GOLDL};font-size:9px;font-weight:700;text-transform:uppercase;
-               letter-spacing:.12em;margin-bottom:4px;">AFG Assurances Bénin Vie — PDG Dashboard v14 · Données réelles 31/12/2025</div>
+               letter-spacing:.12em;margin-bottom:4px;">AFG Assurances Bénin Vie — PDG Dashboard v26 · Données réelles 31/12/2025</div>
           <div style="color:white;font-size:1.3rem;font-weight:900;line-height:1.2;margin-bottom:4px;">
             À AFG Assurances Bénin Vie, nous avons pensé à vous !</div>
           <div style="color:rgba(255,255,255,0.7);font-size:12px;">
@@ -2704,7 +3437,7 @@ elif "Accueil" in nav:
             nb_comm_pp = df_pp["NOM_APP"].nunique() if "NOM_APP" in df_pp.columns else 0
             nb_clients_pp = df_pp["NOM_ASSU"].nunique() if "NOM_ASSU" in df_pp.columns else 0
             tx_actif_pp = actif_pp/max(tot_pp,1)*100
-            tx_resil_pp = resil_pp/max(tot_pp,1)*100
+            tx_resil_pp = resil_pp/max(tot_pp-inact_pp,1)*100  # CIMA
             ticket_moy = ca_tot_pp/max(tot_pp,1)
             ticket_act = ca_act_pp/max(actif_pp,1)
             arpu = ca_tot_pp/max(nb_clients_pp,1)
@@ -2732,7 +3465,7 @@ elif "Accueil" in nav:
                     f"{tx_resil_pp:.1f}%" + (" ⚠️" if tx_resil_pp>25 else ""),
                     "red" if tx_resil_pp>25 else "amber","")
         with k4: kpi("💰 Encaissements actifs",fmt(ca_act_pp),"polices ACTIF","teal","")
-        with k5: kpi("💳 CA total",fmt(ca_tot_pp),"tous statuts","gold","")
+        with k5: kpi("💳 Total Encaissements",fmt(ca_tot_pp),"tous statuts","gold","")
         with k6: kpi("👥 Commerciaux",f"{nb_comm_pp:,}","apporteurs distincts","","")
 
         # KPIs avancés (rang 2)
@@ -2751,31 +3484,39 @@ elif "Accueil" in nav:
             vals_s   = [actif_pp,resil_pp,inact_pp,echu_pp,susp_pp]
             fig_s = px.pie(values=vals_s, names=labels_s, hole=0.42,
                 color_discrete_sequence=[GREEN,RED,AMBER,NAVY,GOLD])
-            fig_s.update_traces(textinfo="percent+label", textfont_size=10)
-            chl(fig_s,290,f"🔵 Répartition statuts — {label_yr}")
+            fig_s.update_traces(textinfo="percent+label", textfont_size=12)
+            chl(fig_s,510,f"🔵 Répartition statuts — {label_yr}")
             st.plotly_chart(fig_s, use_container_width=True)
         with c2:
-            if df_pp is not None and "SEXE_ASSU" in df_pp.columns:
+            if df_pp is not None and "SEXERISQ" in df_pp.columns:
+                gn = df_pp["SEXERISQ"].astype(str).str.upper().value_counts()
+                h_cnt = int(gn.get("M",0))
+                f_cnt = int(gn.get("F",0))
+            elif df_pp is not None and "SEXE_ASSU" in df_pp.columns:
                 gn = df_pp["SEXE_ASSU"].astype(str).str.upper().value_counts()
-                h = int(gn.get("M",0)+gn.get("MASCULIN",0))
-                f = int(gn.get("F",0)+gn.get("FEMININ",0)+gn.get("FÉMININ",0))
+                h_cnt = int(gn.get("M",0)+gn.get("MASCULIN",0))
+                f_cnt = int(gn.get("F",0)+gn.get("FEMININ",0)+gn.get("FÉMININ",0))
             else:
-                h = PR['genre']['M']; f = PR['genre']['F']
-            fig_g = px.pie(values=[h,f], names=["Hommes","Femmes"], hole=0.42,
+                h_cnt = PR['genre']['M']; f_cnt = PR['genre']['F']
+            fig_g = px.pie(values=[h_cnt,f_cnt], names=["Hommes 👨","Femmes 👩"], hole=0.42,
                 color_discrete_sequence=[BLUEL,GOLD])
-            fig_g.update_traces(textinfo="percent+value", textfont_size=10)
-            chl(fig_g,290,"👥 Répartition par genre")
+            fig_g.update_traces(textinfo="percent+value", textfont_size=12)
+            chl(fig_g,510,"👥 Répartition par genre")
             st.plotly_chart(fig_g, use_container_width=True)
         with c3:
-            if df_pp is not None and "PERIODICITE" in df_pp.columns:
+            PERI_MAP = {"M":"Mensuel","T":"Trimestriel","A":"Annuel","L":"Semestriel","S":"Semestriel","U":"Unique"}
+            if df_pp is not None and "CODEPERI" in df_pp.columns:
+                raw_per = df_pp["CODEPERI"].astype(str).value_counts().to_dict()
+                per = {PERI_MAP.get(k,k): v for k,v in raw_per.items()}
+            elif df_pp is not None and "PERIODICITE" in df_pp.columns:
                 per = df_pp["PERIODICITE"].astype(str).value_counts().to_dict()
             else:
-                per = PR["periodicite"]
+                per = {"Mensuel":40286,"Trimestriel":984,"Annuel":438,"Semestriel":513,"Unique":40}
             fig_p = go.Figure(go.Bar(
                 x=list(per.values()), y=list(per.keys()), orientation='h',
                 marker_color=BLUEL, text=[f"{v:,}" for v in per.values()]))
             fig_p.update_traces(textposition='outside')
-            chl(fig_p,290,"📅 Périodicité des cotisations")
+            chl(fig_p,510,"📅 Périodicité des cotisations")
             st.plotly_chart(fig_p, use_container_width=True)
 
         # ── Évolution annuelle (toujours sur l'historique COMPLET) ────────────
@@ -2807,84 +3548,166 @@ elif "Accueil" in nav:
                 line=dict(color=RED,width=2.5), mode="lines+markers", secondary_y=True)
         fig_ann.update_yaxes(title_text="Nb contrats", secondary_y=False)
         fig_ann.update_yaxes(title_text="Encaissements (FCFA)", secondary_y=True, showgrid=False)
-        chl(fig_ann,340,"📈 Évolution historique — souscriptions & encaissements")
+        chl(fig_ann,520,"📈 Évolution historique — souscriptions & encaissements")
         st.plotly_chart(fig_ann, use_container_width=True)
 
         # ── Stats produits (filtrés par année) ────────────────────────────────
-        sth(f"🛒 Statistiques par produit — {label_yr}","DÉTAIL CATÉGORIES")
+        sth(f"🛒 Produits, villes et commerciaux", f"ANALYSES · {label_yr}")
+
+        # == PRODUITS ==
         if df_pp is not None and "LIBECATE" in df_pp.columns:
-            stp = df_pp.groupby("LIBECATE").agg(
-                Total=("LIBECATE","count"),
-                Actifs=("ETAT_POLICE", lambda x:(x=="ACTIF").sum()) if "ETAT_POLICE" in df_pp.columns else ("LIBECATE","count"),
-                Resilies=("ETAT_POLICE", lambda x:(x=="RESILIE").sum()) if "ETAT_POLICE" in df_pp.columns else ("LIBECATE","count"),
-                CA=("MONTENCA","sum") if "MONTENCA" in df_pp.columns else ("LIBECATE","count"),
-            ).reset_index()
-            stp["Tx résil."] = (stp["Resilies"]/stp["Total"].clip(1)*100).round(1)
-            stp["Tx résil."] = stp["Tx résil."].apply(lambda r: f"{'🔴' if r>50 else ('🟡' if r>25 else '🟢')} {r:.1f}%")
-            stp["CA"] = stp["CA"].apply(fmt)
-            stp = stp.sort_values("Total", ascending=False).rename(columns={"LIBECATE":"Produit"})
-            st.dataframe(stp, use_container_width=True, hide_index=True)
+            _stp = df_pp.groupby("LIBECATE").agg(
+                total=("LIBECATE","count"),
+                actifs=("ETAT_POLICE",lambda x:(x=="ACTIF").sum()) if "ETAT_POLICE" in df_pp.columns else ("LIBECATE","count"),
+                resilies=("ETAT_POLICE",lambda x:(x=="RESILIE").sum()) if "ETAT_POLICE" in df_pp.columns else ("LIBECATE","count"),
+                ca=("MONTENCA","sum") if "MONTENCA" in df_pp.columns else ("LIBECATE","count"),
+            ).reset_index().sort_values("total",ascending=False)
+            _pnoms=[str(r) for r in _stp["LIBECATE"].tolist()]
+            _ptot=_stp["total"].tolist(); _pact=_stp["actifs"].tolist()
+            _pres=_stp["resilies"].tolist(); _pca=_stp["ca"].tolist()
         else:
-            prods_rows = []
-            for p in PR["produits"]:
-                tx_r = p["resilie"]/max(p["total"],1)*100
-                tx_col = "🔴" if tx_r>50 else ("🟡" if tx_r>25 else "🟢")
-                prods_rows.append({"Code":p["code"],"Produit":p["nom"],
-                    "Total":f"{p['total']:,}","Actifs":f"{p['actif']:,}",
-                    "Résiliés":f"{p['resilie']:,}","Tx résil.":f"{tx_col} {tx_r:.1f}%",
-                    "CA":fmt(p["ca"]),"Cotisations":fmt(p["coti"])})
-            st.dataframe(pd.DataFrame(prods_rows), use_container_width=True, hide_index=True)
+            _pnoms=[p["nom"] for p in PR["produits"]]; _ptot=[p["total"] for p in PR["produits"]]
+            _pact=[p["actif"] for p in PR["produits"]]; _pres=[p["resilie"] for p in PR["produits"]]
+            _pca=[p["ca"] for p in PR["produits"]]
 
-        # ── Top villes (filtrées) ─────────────────────────────────────────────
-        sth(f"🗺️ Top 13 villes (LIBEVILL) — {label_yr}","RÉSEAU")
+        gp1,gp2 = st.columns(2)
+        with gp1:
+            _p_s=sorted(zip(_pnoms,_ptot,_pact),key=lambda x:x[1])[:12]
+            _col_p=[GREEN if a/max(t,1)>0.35 else AMBER if a/max(t,1)>0.15 else RED for _,t,a in _p_s]
+            fig_p1=go.Figure(go.Bar(x=[t for _,t,_ in _p_s],y=[n[:32] for n,_,_ in _p_s],
+                orientation="h",marker_color=_col_p,
+                text=[f"{t:,}" for _,t,_ in _p_s],textposition="outside",
+                textfont=dict(size=11,color="#2C3E50"),
+                hovertemplate="<b>%{y}</b><br>Total: %{x:,}<extra></extra>"))
+            fig_p1.update_layout(yaxis=dict(tickfont=dict(size=10)))
+            chl(fig_p1,530,f"📋 Polices par produit · {label_yr}")
+            st.plotly_chart(fig_p1,use_container_width=True)
+        with gp2:
+            _top8=list(zip(_pnoms,_ptot,_pact,_pres))[:8]
+            fig_p2=go.Figure()
+            fig_p2.add_trace(go.Bar(name="✅ Actifs",y=[n[:28] for n,_,_,_ in _top8],
+                x=[a for _,_,a,_ in _top8],orientation="h",marker_color=GREEN,
+                text=[f"{a:,}" for _,_,a,_ in _top8],textposition="inside",textfont=dict(size=11,color="white")))
+            fig_p2.add_trace(go.Bar(name="📉 Résiliés",y=[n[:28] for n,_,_,_ in _top8],
+                x=[r for _,_,_,r in _top8],orientation="h",marker_color=RED,
+                text=[f"{r:,}" for _,_,_,r in _top8],textposition="inside",textfont=dict(size=11,color="white")))
+            fig_p2.update_layout(barmode="stack",yaxis=dict(tickfont=dict(size=10),autorange="reversed"))
+            chl(fig_p2,530,f"📊 Actifs vs Résiliés par produit · {label_yr}")
+            st.plotly_chart(fig_p2,use_container_width=True)
+
+        if any(_pca):
+            gca1,gca2=st.columns(2)
+            with gca1:
+                _ca_s=sorted(zip(_pnoms,_pca),key=lambda x:x[1])
+                fig_pca=go.Figure(go.Bar(x=[v for _,v in _ca_s],y=[n[:32] for n,_ in _ca_s],
+                    orientation="h",
+                    marker=dict(color=[v for _,v in _ca_s],colorscale=[[0,BLUEL],[0.5,GOLD],[1,GREEN]],showscale=False),
+                    text=[fmt(v) for _,v in _ca_s],textposition="outside",textfont=dict(size=10,color="#2C3E50")))
+                fig_pca.update_layout(yaxis=dict(tickfont=dict(size=10)))
+                chl(fig_pca,530,f"💰 Encaissements par produit · {label_yr}")
+                st.plotly_chart(fig_pca,use_container_width=True)
+            with gca2:
+                fig_sun=px.sunburst(names=_pnoms+["AFG"],parents=["AFG"]*len(_pnoms)+[""],
+                    values=_pca+[sum(_pca)],color=_pact+[sum(_pact)],
+                    color_continuous_scale=[[0,RED],[0.5,AMBER],[1,GREEN]])
+                fig_sun.update_traces(textfont_size=11)
+                fig_sun.update_layout(height=530,margin=dict(l=10,r=10,t=45,b=10),
+                    title=dict(text=f"☀️ Sunburst CA par produit · {label_yr}",
+                               font=dict(size=13,color=NAVY),x=0.01))
+                st.plotly_chart(fig_sun,use_container_width=True)
+
+        # == VILLES ==
+        st.markdown("---")
+        sth(f"📍 Géographie — Villes",f"TOP 15 · {label_yr}")
         if df_pp is not None and "LIBEVILL" in df_pp.columns:
-            vv = df_pp.groupby("LIBEVILL").size().reset_index(name="nb").sort_values("nb",ascending=False).head(13)
-            v_sorted = list(zip(vv["LIBEVILL"].tolist(), vv["nb"].tolist()))
+            _vv=df_pp.groupby("LIBEVILL").agg(
+                nb=("LIBEVILL","count"),
+                ca=("MONTENCA","sum") if "MONTENCA" in df_pp.columns else ("LIBEVILL","count"),
+                actifs=("ETAT_POLICE",lambda x:(x=="ACTIF").sum()) if "ETAT_POLICE" in df_pp.columns else ("LIBEVILL","count")
+            ).reset_index().sort_values("nb",ascending=False).head(15)
+            _vn=_vv["LIBEVILL"].tolist(); _vval=_vv["nb"].tolist()
+            _vca=_vv["ca"].tolist(); _vact=_vv["actifs"].tolist()
         else:
-            villes = PR["villes_actif"]
-            v_sorted = sorted(villes.items(), key=lambda x:-x[1])
-        fig_v = go.Figure(go.Bar(
-            x=[v[1] for v in v_sorted], y=[v[0] for v in v_sorted],
-            orientation='h', marker_color=BLUEL,
-            text=[f"{v[1]:,}" for v in v_sorted]))
-        fig_v.update_traces(textposition='outside')
-        chl(fig_v,380,f"📍 Polices par ville — Bénin · {label_yr}")
-        st.plotly_chart(fig_v, use_container_width=True)
+            _vn=list(PR["villes_actif"].keys()); _vval=list(PR["villes_actif"].values())
+            _vca=[0]*len(_vn); _vact=_vval
 
-        # ── Top 10 commerciaux (filtrés) ──────────────────────────────────────
-        sth(f"🏆 Top 10 commerciaux — {label_yr}","CLASSEMENT FILTRÉ")
+        gv1,gv2=st.columns(2)
+        with gv1:
+            fig_vb=go.Figure(go.Bar(x=_vval[:13],y=_vn[:13],orientation="h",
+                marker=dict(color=_vval[:13],colorscale=[[0,TEAL],[1,NAVY]],showscale=False),
+                text=[f"{v:,}" for v in _vval[:13]],textposition="outside",
+                textfont=dict(size=11,color="#2C3E50")))
+            fig_vb.update_layout(yaxis=dict(autorange="reversed",tickfont=dict(size=11)))
+            chl(fig_vb,530,f"📍 Top 13 villes — Polices · {label_yr}")
+            st.plotly_chart(fig_vb,use_container_width=True)
+        with gv2:
+            if any(_vca):
+                _vca_s=sorted(zip(_vn[:13],_vca[:13]),key=lambda x:x[1])
+                fig_vcab=go.Figure(go.Bar(x=[v for _,v in _vca_s],y=[n for n,_ in _vca_s],
+                    orientation="h",marker=dict(color=[v for _,v in _vca_s],colorscale=[[0,GOLD],[1,NAVY]],showscale=False),
+                    text=[fmt(v) for _,v in _vca_s],textposition="outside",textfont=dict(size=10,color="#2C3E50")))
+                fig_vcab.update_layout(yaxis=dict(tickfont=dict(size=11)))
+                chl(fig_vcab,530,f"💰 Top 13 villes — CA · {label_yr}")
+                st.plotly_chart(fig_vcab,use_container_width=True)
+            else:
+                fig_vpie=px.pie(values=_vval[:10],names=_vn[:10],hole=0.38)
+                fig_vpie.update_traces(textinfo="percent+label",textfont_size=11)
+                chl(fig_vpie,530,f"📍 Répartition villes · {label_yr}")
+                st.plotly_chart(fig_vpie,use_container_width=True)
+
+        # == HEATMAP VILLE x PRODUIT ==
+        if df_pp is not None and "LIBEVILL" in df_pp.columns and "LIBECATE" in df_pp.columns:
+            _tv=df_pp["LIBEVILL"].value_counts().head(7).index.tolist()
+            _tp=df_pp["LIBECATE"].value_counts().head(7).index.tolist()
+            _hd=df_pp[df_pp["LIBEVILL"].isin(_tv)&df_pp["LIBECATE"].isin(_tp)]
+            _hp=_hd.pivot_table(index="LIBEVILL",columns="LIBECATE",values="NUMEPOLI_P" if "NUMEPOLI_P" in _hd.columns else df_pp.columns[0],aggfunc="count",fill_value=0)
+            if not _hp.empty:
+                fig_heat=px.imshow(_hp,color_continuous_scale=[[0,"white"],[0.4,BLUEL],[0.7,GOLD],[1,GREEN]],text_auto=True,aspect="auto")
+                fig_heat.update_traces(textfont_size=10)
+                fig_heat.update_layout(height=530,margin=dict(l=70,r=20,t=55,b=60),
+                    title=dict(text=f"🔥 Heatmap Villes × Produits · {label_yr}",font=dict(size=13,color=NAVY),x=0.01),
+                    xaxis=dict(tickfont=dict(size=9)),yaxis=dict(tickfont=dict(size=11)))
+                st.plotly_chart(fig_heat,use_container_width=True)
+
+        # == TOP COMMERCIAUX ==
+        st.markdown("---")
+        sth(f"🏆 Top 15 Commerciaux",f"CA ENCAISSÉ · {label_yr}")
         if df_pp is not None and "NOM_APP" in df_pp.columns:
-            tc = df_pp.groupby(["NOM_APP","CODEAPPO"] if "CODEAPPO" in df_pp.columns else ["NOM_APP"]).agg(
-                Polices=("NOM_APP","count"),
+            _tc=df_pp[df_pp["NOM_APP"].astype(str).str.strip()!=""].groupby("NOM_APP").agg(
+                nb=("NUMEPOLI_P","count") if "NUMEPOLI_P" in df_pp.columns else ("NOM_APP","count"),
                 CA=("MONTENCA","sum") if "MONTENCA" in df_pp.columns else ("NOM_APP","count"),
-            ).reset_index().sort_values("Polices",ascending=False).head(10)
-            medals = ["🥇","🥈","🥉"] + [""]*7
-            tc.insert(0,"Rang",[f"{medals[i]} {i+1}" for i in range(len(tc))])
-            tc["CA"] = tc["CA"].apply(fmt)
-            tc.columns = [c if c not in ["NOM_APP","CODEAPPO"] else ("Nom apporteur" if c=="NOM_APP" else "Code") for c in tc.columns]
-            st.dataframe(tc, use_container_width=True, hide_index=True)
-        else:
-            tc_rows = []
-            medals = ["🥇","🥈","🥉"] + [""] * 7
-            for i,(nom,code,nb_c) in enumerate(PR["top_comm"]):
-                tc_rows.append({"Rang":f"{medals[i]} {i+1}","Nom":nom,"Code":code,"Polices":f"{nb_c:,}"})
-            st.dataframe(pd.DataFrame(tc_rows), use_container_width=True, hide_index=True)
+                actifs=("ETAT_POLICE",lambda x:(x=="ACTIF").sum()) if "ETAT_POLICE" in df_pp.columns else ("NOM_APP","count"),
+            ).reset_index().sort_values("CA",ascending=False).head(15)
+            _tc_s=_tc.sort_values("CA")
+            _col_tc=[GREEN if a/max(n,1)>0.35 else AMBER if a/max(n,1)>0.15 else RED
+                     for n,a in zip(_tc_s["nb"],_tc_s["actifs"])]
+            fig_tc=go.Figure(go.Bar(x=_tc_s["CA"],y=_tc_s["NOM_APP"].str[:30],orientation="h",
+                marker_color=_col_tc,
+                text=[f"{fmt(v)}  ({int(n)} pol.)" for v,n in zip(_tc_s["CA"],_tc_s["nb"])],
+                textposition="outside",textfont=dict(size=10,color="#2C3E50"),
+                hovertemplate="<b>%{y}</b><br>CA: %{x:,.0f} FCFA<extra></extra>"))
+            fig_tc.update_layout(yaxis=dict(tickfont=dict(size=10)))
+            chl(fig_tc,600,f"🏆 Top 15 apporteurs — CA (couleur=% actifs) · {label_yr}")
+            st.plotly_chart(fig_tc,use_container_width=True)
 
-        # ── Banques ───────────────────────────────────────────────────────────
-        sth("🏦 Domiciliation bancaire","PORTEFEUILLE")
+        # == BANQUES ==
+        st.markdown("---")
+        sth(f"🏦 Répartition bancaire",f"LIBEBANQ · {label_yr}")
         if df_pp is not None and "LIBEBANQ" in df_pp.columns:
-            bb = df_pp["LIBEBANQ"].dropna().astype(str).value_counts().head(10).to_dict()
-            banks = bb if bb else PR["banques"]
+            _bb=df_pp["LIBEBANQ"].dropna().astype(str).value_counts().head(12)
+            _bnames=_bb.index.tolist(); _bvals=_bb.values.tolist()
         else:
-            banks = PR["banques"]
-        fig_b = px.pie(values=list(banks.values()), names=list(banks.keys()),
-            hole=0.42, color_discrete_sequence=[NAVY,BLUEL,BLUE,TEAL,GREEN,GOLD,AMBER,RED])
-        fig_b.update_traces(textinfo="percent+label", textfont_size=10)
-        chl(fig_b,300,f"🏦 Répartition par banque · {label_yr}")
-        st.plotly_chart(fig_b, use_container_width=True)
+            _bb_d={"BOA":7504,"DCSCA (ex CAFAB)":3899,"ECOBANK BENIN":2939,"CCP":1417,
+                   "UBA BENIN":1284,"BAB":1186,"NSIA BANQUE":1109,"TP":949,"ORABANK":800,"BCP":600}
+            _bnames=list(_bb_d.keys()); _bvals=list(_bb_d.values())
+        _b_s=sorted(zip(_bnames,_bvals),key=lambda x:x[1])
+        fig_bank=go.Figure(go.Bar(x=[v for _,v in _b_s],y=[k[:25] for k,_ in _b_s],orientation="h",
+            marker=dict(color=[v for _,v in _b_s],colorscale=[[0,BLUEL],[1,NAVY]],showscale=False),
+            text=[f"{v:,}" for _,v in _b_s],textposition="outside",textfont=dict(size=11,color="#2C3E50")))
+        fig_bank.update_layout(yaxis=dict(tickfont=dict(size=11)))
+        chl(fig_bank,510,f"🏦 Banques — distribution polices · {label_yr}")
+        st.plotly_chart(fig_bank,use_container_width=True)
 
-
-    # ─────────────── ONGLET 2 : BIA LIVE ─────────────────────────────────────
     with tab_bia:
         sth("📝 KPIs BIA — Actualisés en temps réel (ttl=0)","LIVE ⟳")
         alert(f"Les KPIs BIA se rechargent à chaque validation. Dernière actualisation : {datetime.now().strftime('%H:%M:%S')}","info")
@@ -2925,9 +3748,9 @@ elif "Accueil" in nav:
         with r2:
             kpi("✅ Taux rétention",f"{PR['tx_actif']:.1f}%","polices actives","green" if PR['tx_actif']>50 else "red","")
         with r3:
-            kpi("💰 CA portefeuille",fmt(PR['ca_total']),"encaissements totaux","gold","")
+            kpi("💰 Montant encaissé",fmt(PR['ca_total']),"encaissements (MONTENCA)","gold","")
         with r4:
-            kpi("💳 CA actifs",fmt(PR['ca_actifs']),"polices actives seulement","teal","")
+            kpi("💳 Encaissé actifs",fmt(PR['ca_actifs']),"polices actives seulement","teal","")
 
         alert(f"""
         <b>Risques identifiés :</b><br>
@@ -2951,7 +3774,7 @@ elif "Accueil" in nav:
         fig_r.update_traces(textposition='outside')
         fig_r.add_vline(x=25, line_dash="dash", line_color=AMBER, annotation_text="Seuil alerte 25%")
         fig_r.add_vline(x=50, line_dash="dash", line_color=RED, annotation_text="Seuil critique 50%")
-        chl(fig_r,380,"📉 Taux de résiliation par produit — ROUGE = critique")
+        chl(fig_r,530,"📉 Taux de résiliation par produit — ROUGE = critique")
         st.plotly_chart(fig_r, use_container_width=True)
 
     # ─────────────── ONGLET 4 : IMPORT EXCEL ─────────────────────────────────
@@ -2970,28 +3793,85 @@ elif "Accueil" in nav:
         with xcol2:
             st.markdown("<br>", unsafe_allow_html=True)
             if pf_file:
-                if st.button("🔄 Importer & actualiser", use_container_width=True, key="btn_pf_v14"):
+                # ── Mode import : REMPLACER ou AJOUTER ───────────────────────────
+                import_mode = st.radio(
+                    "Mode d'import",
+                    ["🔄 Remplacer (nouvelle base complète)",
+                     "➕ Ajouter (nouvelles polices uniquement)"],
+                    horizontal=True, key="pf_import_mode",
+                    help="Remplacer : efface et recharge. Ajouter : fusionne avec l'ancienne base.")
+
+                if st.button("📥 Importer & Actualiser TOUS les indicateurs",
+                             use_container_width=True, key="btn_pf_v14", type="primary"):
+                    _import_ok = False
+                    _import_msg = ""
+                    _import_err = ""
                     try:
-                        with st.spinner("Chargement en cours…"):
+                        with st.spinner("⏳ Lecture du fichier Excel (peut prendre 30–60 s pour >100 Mo)…"):
+                            # ── Lecture robuste via fichier temporaire ────────
                             try:
-                                df_pf = pd.read_excel(pf_file, sheet_name="Sheet 1")
+                                df_pf_raw = _read_excel_robust(pf_file, sheet_name="Sheet 1")
                             except Exception:
-                                df_pf = pd.read_excel(pf_file)
-                        # Sauvegarder en cache DISQUE — survit aux déconnexions
-                        save_portefeuille_cache(df_pf, {
-                            "filename": getattr(pf_file, "name", "portefeuille.xlsx"),
-                            "imported_by": st.session_state.get("user", {}).get("nom", "—"),
-                        })
-                        st.session_state["portefeuille_ext"] = df_pf
-                        st.session_state["pf_loaded_from_cache"] = False
-                        st.success(
-                            f"✅ Portefeuille importé et sauvegardé : {len(df_pf):,} polices"
-                            f" · {len(df_pf.columns)} colonnes."
-                            f" La base reste disponible apres deconnexion."
-                            f" Supprimez-la manuellement si besoin.")
-                        st.rerun()
+                                df_pf_raw = _read_excel_robust(pf_file, sheet_name=0)
+                            _gc_stdlib.collect()
+
+                        with st.spinner("⏳ Préparation et calcul des indicateurs…"):
+                            df_pf_prep = preparer_portefeuille(df_pf_raw)
+                            del df_pf_raw; _gc_stdlib.collect()
+
+                            meta_info = {
+                                "filename": getattr(pf_file, "name", "portefeuille.xlsx"),
+                                "imported_by": st.session_state.get("user", {}).get("nom", "—"),
+                                "mode": "remplace" if "Remplacer" in import_mode else "ajout",
+                            }
+                            if "Remplacer" in import_mode:
+                                save_portefeuille_cache(df_pf_prep, meta_info)
+                                df_final = df_pf_prep
+                                msg_mode = f"🔄 Base remplacée : **{len(df_final):,} polices**"
+                            else:
+                                _pf_old = _load_base(_PF_CACHE)
+                                nb_avant = len(_pf_old) if _pf_old is not None else 0
+                                del _pf_old; _gc_stdlib.collect()
+                                save_portefeuille_merge(df_pf_prep, meta_info)
+                                df_final = load_portefeuille_cache()
+                                nb_ajout = (len(df_final) - nb_avant) if df_final is not None else 0
+                                msg_mode = f"➕ Base fusionnée : **{max(nb_ajout,0):,} nouvelles polices** · Total : **{len(df_final):,}**"
+
+                            _new_ts = datetime.now().timestamp()
+                            st.session_state["portefeuille_ext"]     = df_final
+                            st.session_state["_pf_version_ts"]       = _new_ts
+                            st.session_state["pf_loaded_from_cache"] = False
+                            st.session_state["kpis_pf"] = calc_kpis_portefeuille(df_final)
+
+                            df_ca_sess = st.session_state.get("ca_ext")
+                            if df_ca_sess is not None:
+                                st.session_state["portefeuille_ext"] = joindre_ca_portefeuille(
+                                    df_final, df_ca_sess)
+                            # ⚠️ PAS de cache_data.clear() ici — évite le crash DOM
+                            _import_ok = True
+                            kpis = st.session_state["kpis_pf"]
+                            nb_ann = df_pf_prep["ANNEE_SOUS"].nunique() if "ANNEE_SOUS" in df_pf_prep.columns else 0
+                            _import_msg = (
+                                f"{msg_mode}\n\n"
+                                f"📅 **{nb_ann} années** de souscription | "
+                                f"✅ **{kpis.get('nb_actif',0):,} actifs** | "
+                                f"💰 **{fmt(kpis.get('ca_tot',0))}** MONTENCA | "
+                                f"👤 **{kpis.get('nb_comm',0):,} commerciaux**\n\n"
+                                f"🔄 Tous les onglets sont mis à jour automatiquement.")
                     except Exception as e_pf:
-                        st.error(f"❌ Erreur import : {str(e_pf)}")
+                        _import_err = str(e_pf)
+
+                    # Afficher résultat APRÈS le spinner, AVANT tout rerun
+                    if _import_ok:
+                        st.success(_import_msg)
+                        # ⚠️ rerun UNIQUEMENT après affichage du succès (évite removeChild)
+                        st.session_state["_pf_needs_rerun"] = True
+                    if _import_err:
+                        st.error(f"❌ Erreur import portefeuille : {_import_err}")
+
+            # Rerun différé — déclenché au prochain cycle Streamlit
+            if st.session_state.pop("_pf_needs_rerun", False):
+                st.rerun()
 
         # ── Statut du portefeuille chargé ─────────────────────────────────
         if "portefeuille_ext" in st.session_state and st.session_state["portefeuille_ext"] is not None:
@@ -3026,13 +3906,484 @@ elif "Accueil" in nav:
                 st.markdown("<br>", unsafe_allow_html=True)
                 col_del1, col_del2 = st.columns([3,1])
                 with col_del2:
-                    if st.button("🗑️ Supprimer la base", key="btn_pf_delete",
+                    if st.button("🗑️ Supprimer le portefeuille", key="btn_pf_delete",
                                  help="Supprime la base du cache disque. Les KPIs reviendront au snapshot statique."):
                         delete_portefeuille_cache()
                         st.session_state["portefeuille_ext"] = None
-                        st.session_state["pf_loaded_from_cache"] = False
-                        st.success("✅ Base supprimée. Importez un nouveau fichier pour réactiver les KPIs dynamiques.")
+                        st.session_state["_pf_version_ts"]  = 0.0
+                        st.session_state["kpis_pf"] = {}
+                        st.cache_data.clear()
+                        st.success("✅ Portefeuille supprimé.")
                         st.rerun()
+
+    # ── IMPORT BASE CA ────────────────────────────────────────────────────────
+    kpis_ca = st.session_state.get("kpis_ca", {})
+    with st.expander(
+        f"📊 Base CA — Chiffre d'Affaires ({('✅ ' + str(kpis_ca.get('nb_quittances',0)) + ' quittances') if kpis_ca else '❌ Non chargée'})",
+        expanded=(st.session_state.get("ca_ext") is None)):
+
+        ca_meta = get_ca_meta()
+        if ca_meta:
+            st.markdown(
+                f"<div style='background:#E8F8EE;border-left:4px solid #1A7A4A;border-radius:0 8px 8px 0;"
+                f"padding:9px 13px;font-size:11.5px;margin-bottom:8px;'>"
+                f"✅ <b>Base CA connectée</b> · {ca_meta.get('rows',0):,} quittances · "
+                f"Fichier : {ca_meta.get('filename','—')} · "
+                f"CA total : <b>{fmt(kpis_ca.get('ca_total',0))}</b> FCFA</div>",
+                unsafe_allow_html=True)
+
+        st.markdown(
+            "<div style='font-size:11.5px;color:#5A6478;margin-bottom:8px;'>"
+            "📌 Colonnes utilisées : <b>CHIFAFFA</b> (Encaissements) · <b>DATECOMP</b> (filtre temporel) · "
+            "<b>CODEAPPO</b> (commercial) · <b>NUMEPOLI</b> + <b>CODEINTE</b> (lien avec portefeuille)<br>"
+            "✅ Mode <b>Ajouter</b> : cumule plusieurs exercices. Mode <b>Remplacer</b> : recharge tout.</div>",
+            unsafe_allow_html=True)
+
+        ca_col1, ca_col2, ca_col3 = st.columns([3,1.6,1])
+        with ca_col1:
+            ca_file = st.file_uploader(
+                "📂 Base CA (.xlsx) — colonnes CHIFAFFA, DATECOMP, CODEAPPO, NUMEPOLI",
+                type=["xlsx","xls"], key="ca_upload_v32",
+                help="Fichier CA_2021.xlsx ou autre exercice. DATECOMP = date de comptabilisation.")
+        with ca_col2:
+            st.markdown("<br>", unsafe_allow_html=True)
+            ca_import_mode = st.radio(
+                "Mode d'import CA",
+                ["🔄 Remplacer (tout écraser)", "➕ Ajouter (fusionner)"],
+                horizontal=True, key="ca_import_mode_v34",
+                help="Ajouter : accumule plusieurs exercices CA dans une seule base.")
+        with ca_col3:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if ca_file and st.button("📥 Importer la base CA",
+                                      use_container_width=True, key="btn_ca_import", type="primary"):
+                _ca_ok = False; _ca_msg = ""; _ca_err = ""
+                try:
+                    with st.spinner("⏳ Lecture du fichier CA (peut prendre 30–60 s pour >90 Mo)…"):
+                        df_ca_raw = _read_excel_robust(ca_file, sheet_name=0)
+                        _gc_stdlib.collect()
+
+                    with st.spinner("⏳ Préparation et indexation de la base CA…"):
+                        df_ca_prep = preparer_ca(df_ca_raw)
+                        del df_ca_raw; _gc_stdlib.collect()
+
+                        meta_ca = {
+                            "filename": getattr(ca_file, "name", "ca.xlsx"),
+                            "imported_by": st.session_state.get("user", {}).get("nom", "—"),
+                            "mode": "remplace" if "Remplacer" in ca_import_mode else "ajout",
+                        }
+                        if "Ajouter" in ca_import_mode:
+                            df_ca_merged, nb_ajout = save_ca_merge(df_ca_prep, meta_ca)
+                            df_ca_final = df_ca_merged if df_ca_merged is not None else df_ca_prep
+                            _ca_mode_lbl = f"➕ Fusion CA : **{nb_ajout:,} nouvelles lignes** · Total : **{len(df_ca_final):,}**"
+                        else:
+                            save_ca_cache(df_ca_prep, meta_ca)
+                            df_ca_final = df_ca_prep
+                            _ca_mode_lbl = f"🔄 Base CA remplacée : **{len(df_ca_final):,} quittances**"
+
+                        _ca_ts = datetime.now().timestamp()
+                        st.session_state["ca_ext"]         = df_ca_final
+                        st.session_state["_ca_version_ts"] = _ca_ts
+                        # Réinitialiser le sélecteur d'années au prochain rerun
+                        if "ca_yr_active" in st.session_state:
+                            del st.session_state["ca_yr_active"]
+                        kpis_ca_new = calc_kpis_ca(df_ca_final)
+                        st.session_state["kpis_ca"] = kpis_ca_new
+
+                        df_pf_s = st.session_state.get("portefeuille_ext")
+                        if df_pf_s is not None:
+                            st.session_state["portefeuille_ext"] = joindre_ca_portefeuille(
+                                df_pf_s, df_ca_final)
+                        # ⚠️ PAS de cache_data.clear() ici — évite le crash DOM
+                        _ca_ok = True
+                        annees_ca = kpis_ca_new.get("annees", [])
+                        _ca_msg = (
+                            f"{_ca_mode_lbl}\n\n"
+                            f"💰 Total Encaissements (CHIFAFFA) : **{fmt(kpis_ca_new.get('ca_total',0))}** FCFA\n\n"
+                            f"📅 Exercice(s) : **{', '.join(map(str, annees_ca))}**\n\n"
+                            f"👤 **{kpis_ca_new.get('nb_comm_ca',0)}** commerciaux (CODEAPPO)")
+                except Exception as e_ca:
+                    _ca_err = str(e_ca)
+
+                if _ca_ok:
+                    st.success(_ca_msg)
+                    st.session_state["_ca_needs_rerun"] = True
+                if _ca_err:
+                    st.error(f"❌ Erreur import CA : {_ca_err}")
+
+            if st.session_state.pop("_ca_needs_rerun", False):
+                st.rerun()
+
+        if st.session_state.get("ca_ext") is not None:
+            if st.button("🗑️ Supprimer la base CA", key="btn_ca_del"):
+                delete_ca_cache()
+                st.session_state["ca_ext"] = None
+                st.session_state["_ca_version_ts"] = 0.0
+                st.session_state["kpis_ca"] = {}
+                st.cache_data.clear()
+                st.success("Base CA supprimée."); st.rerun()
+
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # PANNEAU INDICATEURS CA — HORS EXPANDER pour réactivité immédiate
+    # Pattern expert : on_change=st.rerun → recalcul sans changer d'onglet
+    # ══════════════════════════════════════════════════════════════════════════
+    _ca_imp = st.session_state.get("ca_ext")
+    if _ca_imp is not None and not _ca_imp.empty and "DATECOMP" in _ca_imp.columns:
+
+        st.markdown("---")
+        st.markdown(
+            "<div style='font-size:14px;font-weight:900;color:#003366;margin-bottom:4px;'>"
+            "📊 Tableau de bord CA — Sélectionnez les années à analyser</div>"
+            "<div style='font-size:11px;color:#5A6478;margin-bottom:10px;'>"
+            "Les indicateurs se recalculent <b>instantanément</b> à chaque sélection.</div>",
+            unsafe_allow_html=True)
+
+        # ── Extraire années depuis DATECOMP (parsing direct, robuste) ─────────
+        _dts_all = pd.to_datetime(_ca_imp["DATECOMP"], dayfirst=True, errors="coerce") if "DATECOMP" in _ca_imp.columns else pd.Series(dtype="datetime64[ns]")
+        # ⚠️ Utiliser ANNEE_COMP (pré-calculée, fiable) pour les années dispo
+        if "ANNEE_COMP" in _ca_imp.columns:
+            _yr_series = pd.to_numeric(_ca_imp["ANNEE_COMP"], errors="coerce")
+            _annees_dispo = sorted([int(y) for y in _yr_series.dropna().unique() if 2000<=int(y)<=2099], reverse=True)
+        else:
+            _annees_dispo = sorted([int(y) for y in _dts_all.dt.year.dropna().unique()], reverse=True)
+
+        if not _annees_dispo:
+            alert("Aucune date DATECOMP valide dans la base CA.", "warn")
+        else:
+            # ── Initialiser session_state la première fois ────────────────────
+            if "ca_yr_active" not in st.session_state or \
+               not isinstance(st.session_state["ca_yr_active"], list):
+                st.session_state["ca_yr_active"] = _annees_dispo[:]
+
+            # ── Callback : écrit dans session_state ET force rerun immédiat ───
+            def _on_ca_yr_change():
+                raw = st.session_state.get("_ca_yr_widget", [])
+                st.session_state["ca_yr_active"] = [int(y) for y in raw] if raw else _annees_dispo[:]
+
+            # ── Sélecteur — placé DIRECTEMENT dans tab_imp (pas dans expander) ─
+            _col_sel, _col_info = st.columns([3, 1])
+            with _col_sel:
+                st.multiselect(
+                    f"📅 Exercice(s) CA disponibles — {len(_annees_dispo)} an(s) dans la base",
+                    options=_annees_dispo,
+                    default=st.session_state["ca_yr_active"],
+                    key="_ca_yr_widget",
+                    on_change=_on_ca_yr_change,
+                    format_func=str,
+                    help="Sélection immédiate — pas besoin de changer d'onglet")
+            with _col_info:
+                _sel_now = st.session_state.get("ca_yr_active", _annees_dispo)
+                st.markdown(
+                    f"<div style='background:#003366;border-radius:8px;padding:8px 12px;"
+                    f"text-align:center;margin-top:4px;'>"
+                    f"<div style='color:#E8C84A;font-size:18px;font-weight:900;'>"
+                    f"{len(_sel_now)}</div>"
+                    f"<div style='color:rgba(255,255,255,.7);font-size:10px;'>exercice(s)</div>"
+                    f"</div>", unsafe_allow_html=True)
+
+            # ── Années actives depuis session_state ───────────────────────────
+            _yr_actifs = st.session_state.get("ca_yr_active", _annees_dispo)
+            _yr_actifs = [int(y) for y in _yr_actifs if y in _annees_dispo] or _annees_dispo[:]
+
+            # ── Filtre direct sur ANNEE_COMP (pas re-parsing DATECOMP) ──────────
+            if "ANNEE_COMP" in _ca_imp.columns:
+                _yr_all = pd.to_numeric(_ca_imp["ANNEE_COMP"], errors="coerce")
+                _mask = _yr_all.isin(_yr_actifs)
+            else:
+                _mask = _dts_all.dt.year.isin(_yr_actifs)
+            _ca_f = _ca_imp[_mask.values].copy()
+            _lbl  = ", ".join(str(y) for y in sorted(_yr_actifs, reverse=True))
+
+            if _ca_f.empty:
+                alert(f"Aucune donnée CA pour : {_lbl}", "warn")
+            else:
+                # ── KPIs calculés sur la sélection courante ───────────────────
+                _ca_tot   = float(_ca_f["CHIFAFFA"].sum()) if "CHIFAFFA" in _ca_f.columns else 0.0
+                _nb_q     = len(_ca_f)
+                _nb_pol   = _ca_f["POLICE_KEY"].nunique() if "POLICE_KEY" in _ca_f.columns else 0
+                _nb_comm  = _ca_f["CODEAPPO"].nunique() if "CODEAPPO" in _ca_f.columns else 0
+                _comm_tot = float(_ca_f["COMMAPPO"].sum()) if "COMMAPPO" in _ca_f.columns else 0.0
+
+                # ── BLOC VÉRIFICATION COMPTABLE ───────────────────────────────
+                _ca_tot_all = float(_ca_imp["CHIFAFFA"].sum()) if "CHIFAFFA" in _ca_imp.columns else 0.0
+                _nb_ex = _ca_imp["ANNEE_COMP"].nunique() if "ANNEE_COMP" in _ca_imp.columns else "?"
+                # Construire la décomposition par année
+                _decomp_html = ""
+                if "CHIFAFFA" in _ca_imp.columns:
+                    for _ay in sorted(_annees_dispo, reverse=True)[:6]:
+                        # Utiliser ANNEE_COMP pour filtrer — pas DATECOMP
+                        if "ANNEE_COMP" in _ca_imp.columns:
+                            _msk_ay = (pd.to_numeric(_ca_imp["ANNEE_COMP"], errors="coerce") == _ay).values
+                        else:
+                            _msk_ay = (_dts_all.dt.year == _ay).values
+                        _tot_ay = float(_ca_imp[_msk_ay]["CHIFAFFA"].sum())
+                        _nb_ay  = int(_msk_ay.sum())
+                        _decomp_html += (f'<div style="font-size:10px;padding:2px 0;">'
+                                        f'<b>{_ay}</b> : <span style="color:#003366;font-weight:700;">'
+                                        f'{_tot_ay:,.0f} FCFA</span>'
+                                        f' <span style="color:#5A6478;">({_nb_ay:,} quitt.)</span></div>')
+                st.markdown(
+                    f'<div style="background:#F0F7FF;border:2px solid #0072CE;border-radius:10px;'
+                    f'padding:10px 16px;margin:8px 0;font-size:11.5px;">'
+                    f'<div style="font-weight:800;color:#003366;margin-bottom:6px;">'
+                    f'✅ VÉRIFICATION COMPTABLE — Comparer avec SOUS.TOTAL(9;...) dans Excel</div>'
+                    f'<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;">'
+                    f'<div style="background:white;border-radius:8px;padding:8px;border-left:4px solid #C9A227;">'
+                    f'<div style="color:#5A6478;font-size:10px;">📋 BASE COMPLÈTE (toutes années)</div>'
+                    f'<div style="font-size:1.05rem;font-weight:900;color:#003366;">{_ca_tot_all:,.0f} FCFA</div>'
+                    f'<div style="font-size:9px;color:#5A6478;">{len(_ca_imp):,} quittances · {_nb_ex} exercice(s)</div>'
+                    f'</div>'
+                    f'<div style="background:white;border-radius:8px;padding:8px;border-left:4px solid #0072CE;">'
+                    f'<div style="color:#5A6478;font-size:10px;">📅 SÉLECTION : {_lbl}</div>'
+                    f'<div style="font-size:1.05rem;font-weight:900;color:#003366;">{_ca_tot:,.0f} FCFA</div>'
+                    f'<div style="font-size:9px;color:#5A6478;">{_nb_q:,} quittances · {_nb_comm} commerciaux</div>'
+                    f'</div>'
+                    f'<div style="background:white;border-radius:8px;padding:8px;border-left:4px solid #2ECC71;">'
+                    f'<div style="color:#5A6478;font-size:10px;font-weight:700;margin-bottom:3px;">📊 DÉCOMPOSITION PAR ANNÉE</div>'
+                    f'{_decomp_html}'
+                    f'</div>'
+                    f'</div></div>',
+                    unsafe_allow_html=True)
+                _tx_comm  = _comm_tot / max(_ca_tot, 1) * 100
+                _ticket   = _ca_tot / max(_nb_q, 1)
+                _nb_mois  = _ca_f["YYYYMM_COMP"].nunique() if "YYYYMM_COMP" in _ca_f.columns else max(len(_yr_actifs)*12, 1)
+                _ca_mois  = _ca_tot / max(_nb_mois, 1)
+                _ca_pol   = _ca_tot / max(_nb_pol, 1)
+
+                # Bandeau résumé
+                st.markdown(f"""
+                <div style="background:linear-gradient(135deg,#003366,#004D99);
+                     border-radius:12px;padding:1rem 1.5rem;margin:8px 0 14px;
+                     border-left:6px solid #C9A227;box-shadow:0 4px 16px rgba(0,51,102,.2);">
+                  <div style="display:flex;justify-content:space-between;align-items:center;
+                       flex-wrap:wrap;gap:1rem;">
+                    <div>
+                      <div style="color:#E8C84A;font-size:9px;font-weight:800;
+                           text-transform:uppercase;letter-spacing:.14em;margin-bottom:3px;">
+                        CA ENCAISSÉ (CHIFAFFA) · DATECOMP · EXERCICE(S) {_lbl}</div>
+                      <div style="color:white;font-size:1.1rem;font-weight:900;margin-bottom:3px;">
+                        📅 {_lbl} · {_nb_q:,} quittances · {_nb_pol:,} polices · {_nb_comm} commerciaux</div>
+                      <div style="color:rgba(255,255,255,.65);font-size:11px;">
+                        Ticket moyen : <b style="color:#4DFFE0;">{fmt(_ticket)}</b> FCFA
+                        &nbsp;·&nbsp; CA/mois : <b style="color:#4DFFE0;">{fmt(_ca_mois)}</b> FCFA
+                        {'&nbsp;·&nbsp; Tx commission : <b style="color:#4DFFE0;">' + f"{_tx_comm:.2f}%" + '</b>' if _comm_tot > 0 else ''}
+                      </div>
+                    </div>
+                    <div style="text-align:right;">
+                      <div style="font-size:1.8rem;font-weight:900;color:#E8C84A;">{fmt(_ca_tot)}</div>
+                      <div style="font-size:10px;color:rgba(255,255,255,.65);">Total Encaissements (FCFA)</div>
+                    </div>
+                  </div>
+                </div>""", unsafe_allow_html=True)
+
+                # KPIs en grille
+                _c1,_c2,_c3,_c4,_c5,_c6 = st.columns(6)
+                with _c1: kpi("💰 Total Encaissements",      fmt(_ca_tot),        _lbl,               "gold",  "")
+                with _c2: kpi("🧾 Quittances",    f"{_nb_q:,}",        "lignes CA",         "",      "")
+                with _c3: kpi("📋 Polices",        f"{_nb_pol:,}",      "POLICE_KEY uniques","teal",  "")
+                with _c4: kpi("👤 Commerciaux",    f"{_nb_comm}",       "CODEAPPO distincts","",      "")
+                with _c5: kpi("🎫 Ticket moyen",   fmt(_ticket),        "par quittance",     "gold",  "")
+                with _c6: kpi("📈 CA/mois moy.",   fmt(_ca_mois),       f"{_nb_mois} mois",  "teal",  "")
+
+                if _comm_tot > 0:
+                    _c7,_c8,_c9,_c10 = st.columns(4)
+                    with _c7: kpi("💼 Commissions",  fmt(_comm_tot),   "COMMAPPO",          "teal","")
+                    with _c8: kpi("📐 Tx commission", f"{_tx_comm:.2f}%","moyen pondéré",   "",   "")
+                    with _c9: kpi("💎 CA/police",     fmt(_ca_pol),     "par police unique", "gold","")
+                    with _c10: kpi("📊 Exercices",    str(len(_yr_actifs)),"sélectionnés",  "",   "")
+
+                # ── Graphiques réactifs ───────────────────────────────────────
+                _dts_f = pd.to_datetime(_ca_f["DATECOMP"], dayfirst=True, errors="coerce")
+
+                if len(_yr_actifs) > 1:
+                    # Multi-années : CA par année + évolution mensuelle
+                    _gv1, _gv2 = st.columns(2)
+                    with _gv1:
+                        _by_yr = _ca_f.copy()
+                        _by_yr["_ANNEE"] = _dts_f.values
+                        _by_yr["_ANNEE"] = pd.to_datetime(_by_yr["_ANNEE"], errors="coerce").dt.year
+                        _yr_agg = _by_yr.groupby("_ANNEE").agg(
+                            ca=("CHIFAFFA","sum"), nb=("CHIFAFFA","count")).reset_index()
+                        _yr_agg = _yr_agg.sort_values("_ANNEE")
+                        _yr_agg["ca_fmt"] = _yr_agg["ca"].apply(fmt)
+                        _cols_b = [GREEN if i == _yr_agg["ca"].idxmax() else BLUEL
+                                   for i in _yr_agg.index]
+                        fig_by_yr = go.Figure(go.Bar(
+                            x=_yr_agg["_ANNEE"].astype(str), y=_yr_agg["ca"],
+                            marker_color=_cols_b,
+                            text=_yr_agg["ca_fmt"], textposition="outside",
+                            textfont=dict(size=11, color=NAVY),
+                            hovertemplate="Année %{x}<br>CA : %{y:,.0f} FCFA<extra></extra>"))
+                        fig_by_yr.update_layout(
+                            xaxis=dict(type="category", tickfont=dict(size=12, color=NAVY)),
+                            margin=dict(l=10,r=10,t=40,b=10))
+                        chl(fig_by_yr, 380, f"📊 CA par exercice · {_lbl}")
+                        st.plotly_chart(fig_by_yr, use_container_width=True)
+                    with _gv2:
+                        if "YYYYMM_COMP" in _ca_f.columns:
+                            _evo = _ca_f.groupby("YYYYMM_COMP")["CHIFAFFA"].sum().reset_index()
+                            _evo = _evo.sort_values("YYYYMM_COMP")
+                            _evo["cumul"] = _evo["CHIFAFFA"].cumsum()
+                            fig_ev = make_subplots(specs=[[{"secondary_y":True}]])
+                            fig_ev.add_trace(go.Bar(
+                                x=_evo["YYYYMM_COMP"], y=_evo["CHIFAFFA"],
+                                name="CA mensuel", marker_color=BLUEL, opacity=0.8),
+                                secondary_y=False)
+                            fig_ev.add_trace(go.Scatter(
+                                x=_evo["YYYYMM_COMP"], y=_evo["cumul"],
+                                name="Cumul", line=dict(color=GOLD, width=2.5),
+                                mode="lines+markers"), secondary_y=True)
+                            fig_ev.update_yaxes(title_text="CA mensuel", secondary_y=False)
+                            fig_ev.update_yaxes(title_text="Cumul", secondary_y=True, showgrid=False)
+                            fig_ev.update_layout(hovermode="x unified")
+                            chl(fig_ev, 380, f"📈 CA mensuel + cumul · {_lbl}")
+                            st.plotly_chart(fig_ev, use_container_width=True)
+                else:
+                    # Une année : graphique mensuel détaillé
+                    if "YYYYMM_COMP" in _ca_f.columns:
+                        _evo1 = _ca_f.groupby("YYYYMM_COMP")["CHIFAFFA"].agg(
+                            ca="sum", nb="count").reset_index().sort_values("YYYYMM_COMP")
+                        fig_ev1 = make_subplots(specs=[[{"secondary_y":True}]])
+                        fig_ev1.add_trace(go.Bar(
+                            x=_evo1["YYYYMM_COMP"], y=_evo1["ca"],
+                            name="💰 CA mensuel", marker_color=GOLD, opacity=0.85,
+                            text=[fmt(v) for v in _evo1["ca"]], textposition="outside"),
+                            secondary_y=False)
+                        fig_ev1.add_trace(go.Scatter(
+                            x=_evo1["YYYYMM_COMP"], y=_evo1["nb"],
+                            name="🧾 Quittances", line=dict(color=NAVY, width=2.5),
+                            mode="lines+markers"), secondary_y=True)
+                        fig_ev1.update_yaxes(title_text="CA mensuel (FCFA)", secondary_y=False)
+                        fig_ev1.update_yaxes(title_text="Quittances", secondary_y=True, showgrid=False)
+                        fig_ev1.update_layout(hovermode="x unified")
+                        chl(fig_ev1, 420, f"📅 CA mensuel — Exercice {_yr_actifs[0]}")
+                        st.plotly_chart(fig_ev1, use_container_width=True)
+
+                # ── Top commerciaux + répartition partenaires ─────────────────
+                if "CODEAPPO" in _ca_f.columns:
+                    _gt1, _gt2 = st.columns(2)
+                    with _gt1:
+                        _top5 = _ca_f.groupby("CODEAPPO")["CHIFAFFA"].sum()\
+                                      .sort_values(ascending=False).head(6)
+                        fig_t5 = go.Figure(go.Bar(
+                            y=_top5.index.astype(str), x=_top5.values, orientation="h",
+                            marker=dict(color=_top5.values,
+                                colorscale=[[0,BLUEL],[1,NAVY]], showscale=False),
+                            text=[fmt(v) for v in _top5.values], textposition="outside",
+                            textfont=dict(size=10, color=NAVY)))
+                        fig_t5.update_layout(yaxis=dict(autorange="reversed",tickfont=dict(size=10)))
+                        chl(fig_t5, 340, f"🏆 Top 6 commerciaux (CODEAPPO) · {_lbl}")
+                        st.plotly_chart(fig_t5, use_container_width=True)
+                    with _gt2:
+                        _ca_f["_IS_PART"] = _ca_f["CODEAPPO"].apply(
+                            lambda x: is_partenaire_code(
+                                str(x).strip().replace(".0","")) if pd.notna(x) else False)
+                        _ca_part_v = float(_ca_f[_ca_f["_IS_PART"]]["CHIFAFFA"].sum())
+                        _ca_int_v  = float(_ca_f[~_ca_f["_IS_PART"]]["CHIFAFFA"].sum())
+                        if _ca_part_v + _ca_int_v > 0:
+                            fig_mix = go.Figure(go.Pie(
+                                labels=["Partenaires Fin. (3 chiffres)","Réseau interne"],
+                                values=[_ca_part_v, _ca_int_v], hole=0.48,
+                                marker=dict(colors=[GOLD, NAVY]),
+                                textinfo="percent+value+label", textfont_size=11))
+                            chl(fig_mix, 340, f"🥧 Partenaires vs Interne · {_lbl}")
+                            st.plotly_chart(fig_mix, use_container_width=True)
+
+    # ── IMPORT BASE PRESTATIONS / SINISTRES ───────────────────────────────────
+    kpis_sin = st.session_state.get("kpis_sin", {})
+    with st.expander(
+        f"⚠️ Base Prestations/Sinistres ({('✅ ' + str(kpis_sin.get('nb_dossiers',0)) + ' dossiers') if kpis_sin else '❌ Non chargée'})",
+        expanded=(st.session_state.get("sin_ext") is None)):
+
+        sin_meta_info = get_sin_meta()
+        if sin_meta_info:
+            st.markdown(
+                f"<div style='background:#FFF3E0;border-left:4px solid #E67E22;border-radius:0 8px 8px 0;"
+                f"padding:9px 13px;font-size:11.5px;margin-bottom:8px;'>"
+                f"✅ <b>Base Prestations connectée</b> · {sin_meta_info.get('rows',0):,} dossiers · "
+                f"Fichier : {sin_meta_info.get('filename','—')} · "
+                f"Total réglé : <b>{fmt(kpis_sin.get('total_regle',0))}</b> FCFA</div>",
+                unsafe_allow_html=True)
+
+        st.markdown(
+            "<div style='font-size:11.5px;color:#5A6478;margin-bottom:8px;'>"
+            "📌 Colonnes clés : <b>Réglement Total</b> · <b>SAP au 31/12/2025</b> · "
+            "<b>Nature Sinistre</b> · <b>Sort Sinistre</b> · "
+            "<b>Int police + No Police</b> (lien avec portefeuille)</div>",
+            unsafe_allow_html=True)
+
+        sin_col1, sin_col2 = st.columns([3,1])
+        with sin_col1:
+            sin_file = st.file_uploader(
+                "📂 Base Prestations (.xlsx) — feuille 'Liste'",
+                type=["xlsx","xls"], key="sin_upload_v32",
+                help="Fichier Prestations_au_31122025.xlsx — feuille 'Liste'")
+        with sin_col2:
+            st.markdown("<br>", unsafe_allow_html=True)
+            sin_import_mode = st.radio(
+                "Mode import Prestations",
+                ["🔄 Remplacer", "➕ Ajouter"],
+                horizontal=True, key="sin_import_mode_v34",
+                help="Ajouter : cumule plusieurs exercices de sinistres.")
+            if sin_file and st.button("📥 Importer Prestations",
+                                       use_container_width=True, key="btn_sin_import2", type="primary"):
+                _sin_ok = False; _sin_msg = ""; _sin_err = ""
+                try:
+                    with st.spinner("⏳ Lecture du fichier Prestations (peut prendre 30–60 s pour >90 Mo)…"):
+                        df_sin_raw = _read_excel_sheet_safe(sin_file, preferred_sheet="Liste")
+                        _gc_stdlib.collect()
+
+                    with st.spinner("⏳ Préparation de la base Prestations…"):
+                        df_sin_prep = preparer_sin(df_sin_raw)
+                        del df_sin_raw; _gc_stdlib.collect()
+
+                        meta_sin = {
+                            "filename": getattr(sin_file, "name", "prestations.xlsx"),
+                            "imported_by": st.session_state.get("user", {}).get("nom", "—"),
+                            "mode": "remplace" if "Remplacer" in sin_import_mode else "ajout",
+                        }
+                        if "Ajouter" in sin_import_mode:
+                            df_sin_merged, nb_ajout_sin = save_sin_merge(df_sin_prep, meta_sin)
+                            df_sin_final = df_sin_merged if df_sin_merged is not None else df_sin_prep
+                            _sin_mode_lbl = f"➕ Fusion Prestations : **{nb_ajout_sin:,} dossiers** · Total : **{len(df_sin_final):,}**"
+                        else:
+                            save_sin_cache(df_sin_prep, meta_sin)
+                            df_sin_final = df_sin_prep
+                            _sin_mode_lbl = f"🔄 Base Prestations remplacée : **{len(df_sin_final):,} dossiers**"
+
+                        _sin_ts = datetime.now().timestamp()
+                        st.session_state["sin_ext"]         = df_sin_final
+                        st.session_state["_sin_version_ts"] = _sin_ts
+                        kpis_sin_new = calc_kpis_sin(df_sin_final)
+                        st.session_state["kpis_sin"] = kpis_sin_new
+                        # ⚠️ PAS de cache_data.clear() ici — évite le crash DOM
+                        _sin_ok = True
+                        _sin_msg = (
+                            f"{_sin_mode_lbl}\n\n"
+                            f"💰 Total réglé : **{fmt(kpis_sin_new.get('total_regle',0))}** FCFA\n\n"
+                            f"✅ Clos : **{kpis_sin_new.get('nb_clos',0):,}** | "
+                            f"🔄 Ouverts : **{kpis_sin_new.get('nb_ouverts',0):,}**\n\n"
+                            f"📌 SAP : **{fmt(kpis_sin_new.get('sap',0))}** FCFA")
+                except Exception as e_sin:
+                    _sin_err = str(e_sin)
+
+                if _sin_ok:
+                    st.success(_sin_msg)
+                    st.session_state["_sin_needs_rerun"] = True
+                if _sin_err:
+                    st.error(f"❌ Erreur import Prestations : {_sin_err}")
+
+            if st.session_state.pop("_sin_needs_rerun", False):
+                st.rerun()
+
+        if st.session_state.get("sin_ext") is not None:
+            if st.button("🗑️ Supprimer base Prestations", key="btn_sin_del2"):
+                delete_sin_cache()
+                st.session_state["sin_ext"] = None
+                st.session_state["_sin_version_ts"] = 0.0
+                st.session_state["kpis_sin"] = {}
+                st.cache_data.clear()
+                st.success("Base Prestations supprimée."); st.rerun()
                 with col_del1:
                     st.info("💡 La base reste disponible après déconnexion. Utilisez **Supprimer** pour la retirer définitivement.")
 
@@ -3045,7 +4396,7 @@ elif "Accueil" in nav:
         alert(f"🟡 Taux de résiliation élevé : {tx_resil_pr:.1f}% — Surveillance renforcée.","warn")
     else:
         alert(f"🟢 Taux de résiliation maîtrisé : {tx_resil_pr:.1f}%.","good")
-    alert(f"💰 CA portefeuille {fmt(PR['ca_total'])} · {PR['total']:,} polices · {PR['actif']:,} actives · {PR['nb_comm']:,} commerciaux","good")
+    alert(f"💰 Montant encaissé {fmt(PR['ca_total'])} · {PR['total']:,} polices · {PR['actif']:,} actives · {PR['nb_comm']:,} commerciaux","good")
     alert("📑 CIMA 2024 : Vérifier provisions de gestion et participation bénéficiaire avant clôture.","info")
 
 
@@ -3080,7 +4431,8 @@ elif "Performances" in nav:
         prod_par_comm = nb_contrats/max(nb_comm,1)
         ca_par_comm   = ca_total/max(nb_comm,1)
         tx_actif      = nb_actifs/max(nb_contrats,1)*100
-        tx_resil      = nb_resilies/max(nb_contrats,1)*100
+        _nb_ina=int((df_f["ETAT_POLICE"]=="INACTIF").sum()) if "ETAT_POLICE" in df_f.columns else 0
+        tx_resil = nb_resilies/max(nb_contrats-_nb_ina,1)*100  # CIMA
 
         # Comparaison année précédente (si filtre = une seule année)
         ca_prev = None; growth_pct = None
@@ -3122,6 +4474,7 @@ elif "Performances" in nav:
         if "ETAT_POLICE" in df_f.columns:
             agg_dict["actifs"]   = ("ETAT_POLICE", lambda x:(x=="ACTIF").sum())
             agg_dict["resilies"] = ("ETAT_POLICE", lambda x:(x=="RESILIE").sum())
+            agg_dict["inactifs"] = ("ETAT_POLICE", lambda x:(x=="INACTIF").sum())
         if "NOM_ASSU" in df_f.columns: agg_dict["clients"] = ("NOM_ASSU","nunique")
         if "COTI_PERIODIQUE" in df_f.columns: agg_dict["coti_total"] = ("COTI_PERIODIQUE","sum")
 
@@ -3133,7 +4486,8 @@ elif "Performances" in nav:
         if "actifs" not in perf.columns: perf["actifs"] = perf["nb"]
         if "resilies" not in perf.columns: perf["resilies"] = 0
         perf["tx_actif"]  = (perf["actifs"]/perf["nb"].clip(1)*100).round(1)
-        perf["tx_resil"]  = (perf["resilies"]/perf["nb"].clip(1)*100).round(1)
+        if "inactifs" not in perf.columns: perf["inactifs"]=0
+        perf["tx_resil"]=(perf["resilies"]/(perf["nb"]-perf["inactifs"]).clip(1)*100).round(1)
         perf["ticket"]    = (perf["ca"]/perf["nb"].clip(1)).round(0)
         # Objectif simulé : 5M FCFA / mois × nb mois sur la période
         nb_mois_p = max(1, df_f["DATESOUS_DT"].dt.to_period("M").nunique())
@@ -3166,7 +4520,7 @@ elif "Performances" in nav:
                 marker=dict(symbol="diamond-open",size=9,color=RED))
             fig.update_xaxes(tickangle=-40)
             fig.update_yaxes(title_text="CA (FCFA)")
-            chl(fig,460,f"💰 CA réalisé vs Objectif — {nb_mois_p} mois actifs")
+            chl(fig,520,f"💰 CA réalisé vs Objectif — {nb_mois_p} mois actifs")
             st.plotly_chart(fig,use_container_width=True)
 
             # Distribution des taux de réalisation
@@ -3261,7 +4615,7 @@ elif "Performances" in nav:
                 line=dict(color=RED,width=2,dash="dot"), mode="lines", secondary_y=True)
             fig.update_yaxes(title_text="Nb contrats", secondary_y=False)
             fig.update_yaxes(title_text="CA (FCFA)", secondary_y=True, showgrid=False)
-            chl(fig,400,f"📅 Souscriptions mensuelles + CA cumulé ({yr_label(yr_p)})")
+            chl(fig,510,f"📅 Souscriptions mensuelles + CA cumulé ({yr_label(yr_p)})")
             st.plotly_chart(fig, use_container_width=True)
 
         # ── TAB 4 : MIX PRODUITS ──────────────────────────────────────────────
@@ -3287,7 +4641,7 @@ elif "Performances" in nav:
                     pd5b.columns = ["LIBECATE","val"]
                     fig_pi = px.pie(pd5b, values="val", names="LIBECATE", hole=0.42,
                         color_discrete_sequence=[GOLD,BLUEL,GREEN,RED,TEAL,AMBER,NAVY,"#a78bfa"])
-                    fig_pi.update_traces(textinfo="percent+label", textfont_size=10)
+                    fig_pi.update_traces(textinfo="percent+label", textfont_size=12)
                     fig_pi.update_layout(height=400)
                     st.plotly_chart(fig_pi, use_container_width=True)
 
@@ -3348,7 +4702,7 @@ elif "Performances" in nav:
             text=[f"{a:.0f}%" for a in perf['att']],textposition='outside')
         fig.add_scatter(x=perf['commercial'],y=perf['obj_p'],name="🎯 Objectif",mode='markers+lines',
             line=dict(color=RED,dash='dash',width=2),marker=dict(symbol='diamond-open',size=10,color=RED))
-        chl(fig,420,"💰 CA vs Objectif"); st.plotly_chart(fig,use_container_width=True)
+        chl(fig,530,"💰 CA vs Objectif"); st.plotly_chart(fig,use_container_width=True)
 
         sth("📋 Scoreboard","Agents")
         disp_cols=[c for c in ['commercial','agence','region','nb','ca','att'] if c in perf.columns]
@@ -3568,7 +4922,7 @@ elif "Classement" in nav:
                 hovertemplate="<b>%{y}</b><br>CA : %{x:,.0f} FCFA<br>Contrats : %{customdata[0]}<br>Actifs : %{customdata[1]:.0f}%<br>Score : %{customdata[2]:.0f}/100<extra></extra>"
             ))
             chl(fig_r, 520, f"🏆 TOP 13 Commerciaux — CA ({yr_label(yr_cl)})")
-            fig_r.update_layout(yaxis=dict(tickfont=dict(size=10)))
+            fig_r.update_layout(yaxis=dict(tickfont=dict(size=11)))
             st.plotly_chart(fig_r, use_container_width=True)
 
         with c2:
@@ -3717,7 +5071,7 @@ elif "Classement" in nav:
                 fig.update_layout(height=380, margin=dict(l=10,r=20,t=40,b=10),
                     title=dict(text=label, font=dict(size=13, color=NAVY)),
                     xaxis=dict(showgrid=True, gridcolor="#eee"),
-                    yaxis=dict(tickfont=dict(size=10)),
+                    yaxis=dict(tickfont=dict(size=11)),
                     plot_bgcolor="white", paper_bgcolor="white")
                 return fig
 
@@ -3896,7 +5250,7 @@ elif "Représentation BIA" in nav:
         cotis_moy  = pf_f["COTI_PERIODIQUE"].dropna().mean() if "COTI_PERIODIQUE" in pf_f.columns else 0
         nb_agents  = pf_f["NOM_APP"].nunique() if "NOM_APP" in pf_f.columns else 0
         tx_ret     = nb_actif/max(nb_total,1)*100
-        tx_res     = nb_resil/max(nb_total,1)*100
+        tx_res = calc_tx_resil(pf_f)
     else:
         nb_total=nb_actif=nb_resil=nb_inactif=ca_total=nb_agents=0; cotis_moy=0; tx_ret=tx_res=0
 
@@ -3945,7 +5299,7 @@ elif "Représentation BIA" in nav:
                 colors_e = {"ACTIF":GREEN,"RESILIE":RED,"INACTIF":AMBER,"ECHU":"#5A6478","SUSPENDU":GOLD}
                 fig_e = px.pie(etat_cnt, values="Nb", names="État", hole=0.45,
                     color="État", color_discrete_map=colors_e)
-                fig_e.update_traces(textinfo="percent+value", textfont_size=11)
+                fig_e.update_traces(textinfo="percent+value", textfont_size=12)
                 chl(fig_e, 320, "📊 Répartition par état des polices")
                 st.plotly_chart(fig_e, use_container_width=True)
             with c2:
@@ -3954,7 +5308,7 @@ elif "Représentation BIA" in nav:
                 fig_cat = px.bar(cat_cnt, x="Nb", y="Catégorie", orientation="h",
                     color="Nb", color_continuous_scale=[[0,BLUEL],[1,NAVY]], text="Nb")
                 fig_cat.update_traces(textposition="outside")
-                fig_cat.update_layout(coloraxis_showscale=False, yaxis=dict(tickfont=dict(size=9)))
+                fig_cat.update_layout(coloraxis_showscale=False, yaxis=dict(tickfont=dict(size=11)))
                 chl(fig_cat, 320, "🛒 Contrats par catégorie de produit")
                 st.plotly_chart(fig_cat, use_container_width=True)
             with c3:
@@ -3963,7 +5317,7 @@ elif "Représentation BIA" in nav:
                     sex_cnt.columns = ["Sexe","Nb"]
                     fig_sex = px.pie(sex_cnt, values="Nb", names="Sexe", hole=0.45,
                         color_discrete_sequence=[NAVY,GOLD])
-                    fig_sex.update_traces(textinfo="percent+label", textfont_size=11)
+                    fig_sex.update_traces(textinfo="percent+label", textfont_size=12)
                     chl(fig_sex, 320, "👥 Répartition par sexe des assurés")
                     st.plotly_chart(fig_sex, use_container_width=True)
 
@@ -3988,7 +5342,7 @@ elif "Représentation BIA" in nav:
                         color="CA", color_continuous_scale=[[0,GOLD],[1,NAVY]],
                         text="CA_fmt")
                     fig_ca_cat.update_traces(textposition="outside")
-                    fig_ca_cat.update_layout(coloraxis_showscale=False, yaxis=dict(tickfont=dict(size=9)))
+                    fig_ca_cat.update_layout(coloraxis_showscale=False, yaxis=dict(tickfont=dict(size=11)))
                     chl(fig_ca_cat, 300, "💰 Encaissements par catégorie (MONTENCA)")
                     st.plotly_chart(fig_ca_cat, use_container_width=True)
 
@@ -4073,7 +5427,7 @@ elif "Représentation BIA" in nav:
                     textposition="outside", textfont=dict(size=9),
                     hovertemplate="<b>%{y}</b><br>CA : %{x:,.0f} FCFA<extra></extra>"))
                 chl(fig_ag, 480, "💰 Top 15 apporteurs — CA (couleur = % actifs)")
-                fig_ag.update_layout(yaxis=dict(tickfont=dict(size=9)))
+                fig_ag.update_layout(yaxis=dict(tickfont=dict(size=11)))
                 st.plotly_chart(fig_ag, use_container_width=True)
             with c2:
                 top15_nb = agents.head(15).sort_values("nb")
@@ -4083,7 +5437,7 @@ elif "Représentation BIA" in nav:
                     text=top15_nb["nb"], textposition="outside",
                     hovertemplate="<b>%{y}</b><br>Contrats : %{x}<extra></extra>"))
                 chl(fig_nb, 480, "📋 Top 15 apporteurs — Nombre de contrats")
-                fig_nb.update_layout(yaxis=dict(tickfont=dict(size=9)))
+                fig_nb.update_layout(yaxis=dict(tickfont=dict(size=11)))
                 st.plotly_chart(fig_nb, use_container_width=True)
 
             # Tableau agents
@@ -4120,7 +5474,7 @@ elif "Représentation BIA" in nav:
                 fig_v = px.bar(vill_cnt, x="Nb", y="Ville", orientation="h",
                     color="Nb", color_continuous_scale=[[0,TEAL],[1,NAVY]], text="Nb")
                 fig_v.update_traces(textposition="outside")
-                fig_v.update_layout(coloraxis_showscale=False, yaxis=dict(tickfont=dict(size=9)))
+                fig_v.update_layout(coloraxis_showscale=False, yaxis=dict(tickfont=dict(size=11)))
                 chl(fig_v, 300, "📍 Assurés par ville (Top 12)")
                 st.plotly_chart(fig_v, use_container_width=True)
             with c3:
@@ -4129,7 +5483,7 @@ elif "Représentation BIA" in nav:
                 sx_c.columns = ["Sexe","Nb"]
                 fig_sx = px.pie(sx_c, values="Nb", names="Sexe", hole=0.48,
                     color_discrete_sequence=[NAVY,GOLD])
-                fig_sx.update_traces(textinfo="percent+label+value", textfont_size=11)
+                fig_sx.update_traces(textinfo="percent+label+value", textfont_size=12)
                 chl(fig_sx, 300, "👥 Répartition hommes / femmes")
                 st.plotly_chart(fig_sx, use_container_width=True)
 
@@ -4174,7 +5528,7 @@ elif "Représentation BIA" in nav:
     with tabs[5]:
         sth("⚠️ Surveillance des Risques — AFG Assurances Bénin Vie", "RISK MANAGEMENT CIMA")
         if pf_f is not None:
-            tx_res_r  = nb_resil/max(nb_total,1)*100
+            tx_res_r = calc_tx_resil(pf_f)
             tx_ina_r  = nb_inactif/max(nb_total,1)*100
             tx_act_r  = nb_actif/max(nb_total,1)*100
             ca_moy_ct = ca_total/max(nb_total,1)
@@ -4241,7 +5595,7 @@ elif "Représentation BIA" in nav:
                 fig_st = px.pie(stat_cnt, values="Nb", names="Statut", hole=0.45,
                     color="Statut",
                     color_discrete_map={"Validé":GREEN,"Brouillon":AMBER,"En cours":BLUEL,"Annulé":RED})
-                fig_st.update_traces(textinfo="percent+label", textfont_size=11)
+                fig_st.update_traces(textinfo="percent+label", textfont_size=12)
                 chl(fig_st, 300, "📊 BIA par statut")
                 st.plotly_chart(fig_st, use_container_width=True)
             with c2:
@@ -4326,7 +5680,7 @@ elif "Représentation BIA" in nav:
                 color_discrete_map={"Validé":GREEN,"Brouillon":AMBER,
                     "En cours":BLUEL,"Annulé":RED,"Suspendu":DGRAY,
                     "En attente de documents":GOLD})
-            fig_st.update_traces(textinfo="percent+label", textfont_size=11)
+            fig_st.update_traces(textinfo="percent+label", textfont_size=12)
             chl(fig_st, 300, "📊 Répartition des BIA par statut")
             st.plotly_chart(fig_st, use_container_width=True)
         with c2:
@@ -4349,7 +5703,7 @@ elif "Représentation BIA" in nav:
                 colors_g_bia = [GROUPE_COLORS.get(g,NAVY) for g in grp_cnt["Groupe"]]
                 fig_gp = px.pie(grp_cnt, values="Nb", names="Groupe", hole=0.45,
                     color_discrete_sequence=colors_g_bia)
-                fig_gp.update_traces(textinfo="percent+label", textfont_size=10)
+                fig_gp.update_traces(textinfo="percent+label", textfont_size=12)
                 chl(fig_gp, 300, "🏷️ BIA par groupe officiel AFG")
                 st.plotly_chart(fig_gp, use_container_width=True)
 
@@ -4372,7 +5726,7 @@ elif "Représentation BIA" in nav:
                 mode_cnt.columns = ["Mode","Nb"]
                 fig_mode = px.pie(mode_cnt, values="Nb", names="Mode", hole=0.42,
                     color_discrete_sequence=[GOLD,BLUEL,GREEN,AMBER,TEAL])
-                fig_mode.update_traces(textinfo="percent+label", textfont_size=10)
+                fig_mode.update_traces(textinfo="percent+label", textfont_size=12)
                 chl(fig_mode, 280, "💳 Mode de règlement BIA")
                 st.plotly_chart(fig_mode, use_container_width=True)
 
@@ -4410,7 +5764,7 @@ elif "Représentation BIA" in nav:
                 tit_cnt.columns = ["Civilité","Nb"]
                 fig_tit = px.pie(tit_cnt, values="Nb", names="Civilité", hole=0.45,
                     color_discrete_sequence=[NAVY,GOLD,BLUEL,DGRAY])
-                fig_tit.update_traces(textinfo="percent+label", textfont_size=11)
+                fig_tit.update_traces(textinfo="percent+label", textfont_size=12)
                 chl(fig_tit, 260, "👤 Répartition par civilité (M./Mme/Mlle)")
                 st.plotly_chart(fig_tit, use_container_width=True)
             # Professions Top 10
@@ -4524,1232 +5878,1577 @@ elif "Représentation BIA" in nav:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# PAGE — PRODUITS (18 produits + stats + 3 groupes)
+# PAGE — PRODUITS (données réelles portefeuille Excel — filtre DATESOUS)
+# LIBECATE = nom du produit | MONTENCA = CA | ETAT_POLICE = état | DATESOUS = date
 # ═══════════════════════════════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE PRODUITS v40 — CHIFAFFA (CA) · LIBECATE · Indicateurs portefeuille
+# ══════════════════════════════════════════════════════════════════════════════
 elif "Produits" in nav:
-    dp=q("""SELECT p.*,
-        COUNT(ct.id) as nb,
-        COALESCE(SUM(ct.prime_annuelle+ct.prime_unique),0) as ca,
-        COALESCE(AVG(ct.prime_annuelle+ct.prime_unique),0) as moy,
-        SUM(CASE WHEN ct.statut='actif' THEN 1 ELSE 0 END) as nb_actif,
-        SUM(CASE WHEN ct.statut='résilié' THEN 1 ELSE 0 END) as nb_resilie,
-        SUM(CASE WHEN ct.statut='suspendu' THEN 1 ELSE 0 END) as nb_suspendu,
-        COALESCE(SUM(ct.capital_assure),0) as cap_total
-        FROM produits p LEFT JOIN contrats ct ON ct.produit_id=p.id WHERE p.actif=1
-        GROUP BY p.id ORDER BY p.groupe, p.categorie, p.nom""")
+    _pf  = st.session_state.get("portefeuille_ext")
+    _ca  = st.session_state.get("ca_ext")
+    _has_pf = (_pf is not None) and (not _pf.empty)
+    _has_ca = (_ca is not None) and (not _ca.empty)
 
-    yr_prod=year_selector("yr_prod")
-    df_all=q(BASE.replace(f"'{d0s}' AND '{d1s}'","'2010-01-01' AND '2099-12-31'"))
-    if not df_all.empty:
-        df_all=filter_by_year(df_all,yr_prod,"date_souscription")
-        stats_p=get_stats_produits(df_all)
+    st.markdown(f"""
+    <div style="background:linear-gradient(135deg,#003366,#004D99);border-radius:14px;
+         padding:1.2rem 1.8rem;margin-bottom:1rem;border-left:6px solid #C9A227;">
+      <div style="color:#E8C84A;font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.15em;">
+        AFG Assurances Bénin Vie — Analyse Produits v40</div>
+      <div style="color:white;font-size:1.2rem;font-weight:900;">🛒 Produits — CA (CHIFAFFA) · Taux actif/résil/échu</div>
+      <div style="color:rgba(255,255,255,.65);font-size:11px;">
+        {'✅ CA : ' + f"{len(_ca):,}" + ' quittances' if _has_ca else '⚠️ Base CA non chargée'}
+        &nbsp;·&nbsp;
+        {'✅ Portefeuille : ' + f"{len(_pf):,}" + ' polices' if _has_pf else '⚠️ Portefeuille non chargé'}
+      </div>
+    </div>""", unsafe_allow_html=True)
+
+    if not _has_ca and not _has_pf:
+        alert("📥 Importez la <b>base CA</b> et/ou le <b>portefeuille</b> depuis <b>Accueil</b>.", "warn")
+        st.stop()
+
+    # ── Sélecteur période ─────────────────────────────────────────────────────
+    if _has_ca:
+        _sel_p = period_selector("prod_v40", "📅 Période DATECOMP", df_ca=_ca)
+        _ca_f  = filter_by_period(_ca, _sel_p, date_col="DATECOMP")
+        _lbl_p = _sel_p.get("label", "Toutes périodes")
+        _ca_tot_p = float(_ca_f["CHIFAFFA"].sum()) if not _ca_f.empty and "CHIFAFFA" in _ca_f.columns else 0.0
     else:
-        stats_p=pd.DataFrame()
+        _ca_f = pd.DataFrame(); _lbl_p = "Portefeuille"; _ca_tot_p = 0.0
 
-    c1,c2,c3,c4=st.columns(4)
-    with c1: kpi("18 Produits officiels",str(len(dp)),"catalogue CIMA","gold","🛒")
-    with c2: kpi("💰 CA total",fmt(dp['ca'].sum()),"toute période","","")
-    with c3: kpi("📋 Contrats vendus",f"{int(dp['nb'].sum()):,}","toute période","","")
-    with c4: kpi("❌ Résiliés total",f"{int(dp['nb_resilie'].sum()):,}","","red","")
+    # ── Construction agrégat par LIBECATE ─────────────────────────────────────
+    if _has_pf and "LIBECATE" in _pf.columns:
+        pf_grp = _pf.groupby("LIBECATE").agg(
+            pf_pol   =("POLICE_KEY",  "nunique") if "POLICE_KEY" in _pf.columns else ("LIBECATE","count"),
+            pf_actif =("ETAT_POLICE", lambda x: (x=="ACTIF").sum())   if "ETAT_POLICE" in _pf.columns else ("LIBECATE","count"),
+            pf_resil =("ETAT_POLICE", lambda x: (x=="RESILIE").sum()) if "ETAT_POLICE" in _pf.columns else ("LIBECATE","count"),
+            pf_echu  =("ETAT_POLICE", lambda x: (x=="ECHU").sum())    if "ETAT_POLICE" in _pf.columns else ("LIBECATE","count"),
+            pf_inact =("ETAT_POLICE", lambda x: (x=="INACTIF").sum()) if "ETAT_POLICE" in _pf.columns else ("LIBECATE","count"),
+            pf_comm  =("CODEAPPO",    "nunique") if "CODEAPPO" in _pf.columns else ("LIBECATE","count"),
+            pf_villes=("LIBEVILL",    "nunique") if "LIBEVILL" in _pf.columns else ("LIBECATE","count"),
+        ).reset_index()
 
-    # Onglets par GROUPE (3 groupes officiels)
-    tg1,tg2,tg3,tg4=st.tabs([
-        "🛡️  Groupe 1 — Décès & Vie",
-        "💰  Groupe 2 — Épargne & Capitalisation",
-        "🔄  Groupe 3 — Contrat Mixte",
-        "📊  Vue globale"
+        # Jointure CA → LIBECATE via POLICE_KEY
+        if _has_ca and not _ca_f.empty and "POLICE_KEY" in _pf.columns and "POLICE_KEY" in _ca_f.columns:
+            _pf_map = _pf[["POLICE_KEY","LIBECATE"]].drop_duplicates("POLICE_KEY")
+            _ca_join = _ca_f.merge(_pf_map, on="POLICE_KEY", how="left")
+            _ca_join["LIBECATE"] = _ca_join["LIBECATE"].astype(object).fillna("Non classé").astype(str)
+            ca_grp = _ca_join.groupby("LIBECATE").agg(
+                ca        =("CHIFAFFA","sum"),
+                nb_quitt  =("CHIFAFFA","count"),
+                nb_pol_ca =("POLICE_KEY","nunique"),
+            ).reset_index()
+            _prod_df = pf_grp.merge(ca_grp, on="LIBECATE", how="outer")
+            _prod_df["ca"] = _prod_df["ca"].fillna(0)
+            _prod_df["nb_quitt"] = _prod_df["nb_quitt"].fillna(0).astype(int)
+        else:
+            _prod_df = pf_grp.copy()
+            ca_col = "MONTENCA" if "MONTENCA" in _pf.columns else None
+            _prod_df["ca"] = _pf.groupby("LIBECATE")[ca_col].sum().reindex(_prod_df["LIBECATE"]).values if ca_col else 0
+            _prod_df["nb_quitt"] = _prod_df["pf_pol"]
+            _ca_tot_p = float(_prod_df["ca"].sum())
+
+        for c in ["pf_pol","pf_actif","pf_resil","pf_echu","pf_inact","pf_comm","pf_villes"]:
+            _prod_df[c] = _prod_df[c].fillna(0).astype(float)
+        _prod_df["tx_actif"] = (_prod_df["pf_actif"] / _prod_df["pf_pol"].clip(1) * 100).round(1)
+        _prod_df["tx_resil"] = (_prod_df["pf_resil"] / (_prod_df["pf_pol"]-_prod_df["pf_inact"]).clip(1) * 100).round(1)
+        _prod_df["tx_echu"]  = (_prod_df["pf_echu"]  / _prod_df["pf_pol"].clip(1) * 100).round(1)
+        _prod_df["tx_inact"] = (_prod_df["pf_inact"] / _prod_df["pf_pol"].clip(1) * 100).round(1)
+        _prod_df["ca_pol"]   = (_prod_df["ca"] / _prod_df["pf_pol"].clip(1)).round(0)
+        _prod_df = _prod_df.sort_values("ca", ascending=False).reset_index(drop=True)
+    else:
+        alert("📥 Importez le <b>portefeuille</b> pour voir les produits.", "warn"); st.stop()
+
+    if _prod_df.empty:
+        alert("Aucun produit trouvé.", "warn"); st.stop()
+
+    # ── KPIs globaux ──────────────────────────────────────────────────────────
+    _pol_tot = int(_prod_df["pf_pol"].sum())
+    _act_tot = int(_prod_df["pf_actif"].sum())
+    _res_tot = int(_prod_df["pf_resil"].sum())
+    _ech_tot = int(_prod_df["pf_echu"].sum())
+    _ina_tot = int(_prod_df["pf_inact"].sum())
+    _tx_act_g = _act_tot / max(_pol_tot, 1) * 100
+    _tx_res_g = _res_tot / max(_pol_tot - _ina_tot, 1) * 100
+
+    st.caption(f"📌 Période : **{_lbl_p}** · {len(_prod_df)} produits · {_pol_tot:,} polices")
+    _p1,_p2,_p3,_p4,_p5,_p6,_p7 = st.columns(7)
+    with _p1: kpi("🛒 Produits",  str(len(_prod_df)),       "catégories",        "gold","")
+    with _p2: kpi("💰 CA total",   fmt(_ca_tot_p),           "CHIFAFFA encaissé", "gold","")
+    with _p3: kpi("📋 Polices",    f"{_pol_tot:,}",          "portefeuille",      "",   "")
+    with _p4: kpi("✅ Actives",    f"{_act_tot:,}",          f"{_tx_act_g:.1f}%", "green","")
+    with _p5: kpi("📉 Résiliées",  f"{_res_tot:,}",          f"{_tx_res_g:.1f}%", "red" if _tx_res_g>25 else "amber","")
+    with _p6: kpi("⌛ Échues",     f"{_ech_tot:,}",          f"{_ech_tot/max(_pol_tot,1)*100:.1f}%","amber","")
+    with _p7: kpi("😴 Inactives",  f"{_ina_tot:,}",          f"{_ina_tot/max(_pol_tot,1)*100:.1f}%","","")
+
+    if _tx_res_g > 50:   alert(f"🔴 <b>Taux de résiliation critique : {_tx_res_g:.1f}%</b> — Plan d'action requis.","danger")
+    elif _tx_res_g > 25: alert(f"🟡 Taux de résiliation {_tx_res_g:.1f}% — Au-dessus du seuil CIMA.","warn")
+    else:                alert(f"🟢 Taux de résiliation {_tx_res_g:.1f}% — Dans les normes.","good")
+
+    st.markdown("---")
+    _tp1,_tp2,_tp3,_tp4 = st.tabs(["📊 Vue d'ensemble","📈 Évolution","🔍 Fiche produit","📋 Tableau"])
+
+    with _tp1:
+        sth(f"CA & Indicateurs — {_lbl_p}","LIBECATE × ÉTATS")
+        _g1,_g2 = st.columns(2)
+        with _g1:
+            _ds = _prod_df.sort_values("ca")
+            fig_ca_p = go.Figure(go.Bar(
+                x=_ds["ca"], y=_ds["LIBECATE"].str[:35], orientation="h",
+                marker_color=[GREEN if r>=35 else AMBER if r>=15 else RED for r in _ds["tx_actif"]],
+                text=[fmt(v) for v in _ds["ca"]], textposition="outside",
+                hovertemplate="<b>%{y}</b><br>CA : %{x:,.0f} FCFA<extra></extra>"))
+            chl(fig_ca_p, 520, f"💰 CA encaissé par produit · {_lbl_p}")
+            st.plotly_chart(fig_ca_p, use_container_width=True)
+        with _g2:
+            _ds2 = _prod_df.head(10)
+            fig_stk = go.Figure()
+            for _lbl_st, _col_st, _clr_st in [("✅ Actifs","pf_actif",GREEN),("📉 Résiliés","pf_resil",RED),("⌛ Échus","pf_echu","#E67E22"),("😴 Inactifs","pf_inact",AMBER)]:
+                if _col_st in _ds2.columns:
+                    fig_stk.add_trace(go.Bar(name=_lbl_st, y=_ds2["LIBECATE"].str[:28], x=_ds2[_col_st],
+                        orientation="h", marker_color=_clr_st,
+                        text=_ds2[_col_st].astype(int).astype(str), textposition="inside", textfont=dict(size=9,color="white")))
+            fig_stk.update_layout(barmode="stack", yaxis=dict(tickfont=dict(size=9),autorange="reversed"))
+            chl(fig_stk, 520, f"📊 États polices · {_lbl_p}")
+            st.plotly_chart(fig_stk, use_container_width=True)
+
+        _g3,_g4,_g5 = st.columns(3)
+        for _col_taux, _lbl_taux, _fn_c, _ttl_taux, _gcol in [
+            ("tx_resil","% Résil.",lambda r: RED if r>=66 else AMBER if r>=40 else GREEN,"📉 Taux résiliation",_g3),
+            ("tx_actif","% Actifs",lambda r: GREEN if r>=50 else AMBER if r>=25 else RED,"✅ Taux activité",_g4),
+            ("tx_echu", "% Échus", lambda r: AMBER if r>=10 else BLUEL,"⌛ Taux échéance",_g5),
+        ]:
+            _dfg = _prod_df.sort_values(_col_taux, ascending=False)
+            _fig_g = go.Figure(go.Bar(
+                y=_dfg["LIBECATE"].str[:28], x=_dfg[_col_taux], orientation="h",
+                marker_color=[_fn_c(r) for r in _dfg[_col_taux]],
+                text=[f"{r:.1f}%" for r in _dfg[_col_taux]], textposition="outside"))
+            _fig_g.add_vline(x=_prod_df[_col_taux].mean(), line_dash="dash", line_color=NAVY,
+                annotation_text=f"Moy. {_prod_df[_col_taux].mean():.1f}%", annotation_font_size=9)
+            _fig_g.update_layout(yaxis=dict(tickfont=dict(size=9),autorange="reversed"))
+            chl(_fig_g, 440, _ttl_taux)
+            _gcol.plotly_chart(_fig_g, use_container_width=True)
+
+    with _tp2:
+        sth(f"📈 Évolution CA mensuelle — {_lbl_p}","DATECOMP × LIBECATE")
+        if _has_ca and "YYYYMM_COMP" in _ca.columns and _has_pf and "POLICE_KEY" in _pf.columns:
+            _pf_map2 = _pf[["POLICE_KEY","LIBECATE"]].drop_duplicates("POLICE_KEY")
+            _ca_evo = _ca.merge(_pf_map2, on="POLICE_KEY", how="left")
+            _ca_evo["LIBECATE"] = _ca_evo["LIBECATE"].astype(object).fillna("Non classé").astype(str)
+            _top8 = _prod_df.head(8)["LIBECATE"].tolist()
+            _ca_top = _ca_evo[_ca_evo["LIBECATE"].isin(_top8)]
+            _evo_m = _ca_top.groupby(["YYYYMM_COMP","LIBECATE"])["CHIFAFFA"].sum().reset_index().sort_values("YYYYMM_COMP")
+            fig_ev_p = px.line(_evo_m, x="YYYYMM_COMP", y="CHIFAFFA", color="LIBECATE",
+                markers=True, labels={"YYYYMM_COMP":"Mois","CHIFAFFA":"CA (FCFA)","LIBECATE":"Produit"})
+            fig_ev_p.update_layout(legend=dict(font=dict(size=9),orientation="h",y=-0.3))
+            chl(fig_ev_p, 500, "📈 CA mensuel — Top 8 produits (toutes dates)")
+            st.plotly_chart(fig_ev_p, use_container_width=True)
+        else:
+            alert("Chargez la base CA avec DATECOMP pour voir l'évolution temporelle.","info")
+
+    with _tp3:
+        sth("🔍 Fiche produit","DÉTAIL COMPLET")
+        _prod_sel = st.selectbox("🛒 Produit", ["— Choisir —"] + _prod_df["LIBECATE"].tolist(), key="prod_sel_v40")
+        if _prod_sel != "— Choisir —":
+            _rp = _prod_df[_prod_df["LIBECATE"]==_prod_sel].iloc[0]
+            st.markdown(f"""
+            <div style="background:linear-gradient(135deg,#003366,#004D99);border-radius:12px;
+                 padding:1rem 1.5rem;margin:8px 0 12px;border-left:5px solid #C9A227;">
+              <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:1rem;">
+                <div>
+                  <div style="color:#E8C84A;font-size:9px;font-weight:800;text-transform:uppercase;">FICHE PRODUIT · {_lbl_p}</div>
+                  <div style="color:white;font-size:1.2rem;font-weight:900;">{_prod_sel}</div>
+                </div>
+                <div style="text-align:right;">
+                  <div style="font-size:1.5rem;font-weight:900;color:#E8C84A;">{fmt(_rp['ca'])}</div>
+                  <div style="font-size:10px;color:rgba(255,255,255,.65);">{_rp['ca']/_ca_tot_p*100:.2f}% du CA total</div>
+                </div>
+              </div>
+            </div>""", unsafe_allow_html=True)
+            _fk = st.columns(6)
+            with _fk[0]: kpi("📋 Polices",    f"{int(_rp['pf_pol']):,}", "","","")
+            with _fk[1]: kpi("✅ Actives",    f"{int(_rp['pf_actif']):,}", f"{_rp['tx_actif']:.1f}%","green","")
+            with _fk[2]: kpi("📉 Résiliées",  f"{int(_rp['pf_resil']):,}", f"{_rp['tx_resil']:.1f}%","red","")
+            with _fk[3]: kpi("⌛ Échues",     f"{int(_rp['pf_echu']):,}",  f"{_rp['tx_echu']:.1f}%","amber","")
+            with _fk[4]: kpi("👤 Commerciaux",f"{int(_rp['pf_comm'])}","","teal","")
+            with _fk[5]: kpi("🏙️ Villes",    f"{int(_rp['pf_villes'])}","","","")
+
+    with _tp4:
+        sth("📋 Tableau complet","EXPORT")
+        _disp_p = _prod_df.copy()
+        _disp_p.insert(0,"Rang",range(1,len(_disp_p)+1))
+        for _c,_lbl_c in [("ca","CA encaissé"),("pf_pol","Polices"),("pf_actif","Actives"),
+                           ("pf_resil","Résiliées"),("pf_echu","Échues"),("pf_inact","Inactives"),
+                           ("tx_actif","% Actifs"),("tx_resil","% Résil."),("tx_echu","% Échus")]:
+            if _c in _disp_p.columns:
+                if _c.startswith("tx"): _disp_p[_c] = _disp_p[_c].apply(lambda x: f"{x:.1f}%")
+                elif _c == "ca": _disp_p[_c] = _disp_p[_c].apply(fmt)
+                else: _disp_p[_c] = _disp_p[_c].apply(lambda x: f"{int(x):,}")
+        _disp_p = _disp_p.rename(columns={"LIBECATE":"Produit","ca":"CA encaissé","pf_pol":"Polices",
+            "pf_actif":"Actives","pf_resil":"Résiliées","pf_echu":"Échues","pf_inact":"Inactives",
+            "tx_actif":"% Actifs","tx_resil":"% Résil.","tx_echu":"% Échus"})
+        _cols_show = [c for c in ["Rang","Produit","CA encaissé","Polices","Actives","Résiliées",
+                                   "Échues","Inactives","% Actifs","% Résil.","% Échus"] if c in _disp_p.columns]
+        st.dataframe(_disp_p[_cols_show], use_container_width=True, hide_index=True, height=500)
+        _buf_p = io.BytesIO()
+        with pd.ExcelWriter(_buf_p, engine="openpyxl") as _wx:
+            _disp_p[_cols_show].to_excel(_wx, index=False, sheet_name="Produits")
+        st.download_button(f"⬇️ Exporter · {_lbl_p}", data=_buf_p.getvalue(),
+            file_name=f"AFG_Produits_{_lbl_p.replace(' ','_')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE COMMERCIAUX v40 — CHIFAFFA (CA) · DATECOMP · Liaison portefeuille
+# ══════════════════════════════════════════════════════════════════════════════
+elif "Commerciaux" in nav:
+    _pf_c  = st.session_state.get("portefeuille_ext")
+    _ca_c  = st.session_state.get("ca_ext")
+    _has_ca_c = (_ca_c is not None) and (not _ca_c.empty)
+    _has_pf_c = (_pf_c is not None) and (not _pf_c.empty)
+
+    st.markdown(f"""
+    <div style="background:linear-gradient(135deg,#003366,#004D99);border-radius:14px;
+         padding:1.2rem 1.8rem;margin-bottom:1rem;border-left:6px solid #C9A227;">
+      <div style="color:#E8C44A;font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.15em;">
+        AFG VIE — Commerciaux v41</div>
+      <div style="color:white;font-size:1.2rem;font-weight:900;">
+        👥 Commerciaux — Encaissements (CHIFAFFA) · Filtre DATECOMP</div>
+      <div style="color:rgba(255,255,255,.65);font-size:11px;">
+        {'✅ CA : ' + f"{len(_ca_c):,}" + ' quittances' if _has_ca_c else '⚠️ Base CA non chargée'}
+        &nbsp;·&nbsp;
+        {'✅ Portefeuille : ' + f"{len(_pf_c):,}" + ' polices' if _has_pf_c else '⚠️ Portefeuille non chargé'}
+      </div>
+    </div>""", unsafe_allow_html=True)
+
+    if not _has_ca_c:
+        alert("📥 Importez la <b>base CA</b> depuis <b>Accueil</b>.","warn"); st.stop()
+
+    # ── Filtre période ─────────────────────────────────────────────────────────
+    _sel_c  = period_selector("comm_v41","📅 Période DATECOMP", df_ca=_ca_c)
+    _ca_cf  = filter_by_period(_ca_c, _sel_c, date_col="DATECOMP")
+    _lbl_c  = _sel_c.get("label","Toutes périodes")
+    if _ca_cf.empty:
+        alert(f"Aucune donnée CA pour {_lbl_c}.","warn"); st.stop()
+
+    _ca_cf = _ca_cf.copy()
+
+    # ── TOTAL DE RÉFÉRENCE EXACT ───────────────────────────────────────────────
+    # Calculé directement sur le DataFrame filtré — jamais sur un agrégat
+    # C'est ce nombre qui doit correspondre à SOUS.TOTAL(9;U:U) dans Excel
+    _ca_ref_tot = float(_ca_cf["CHIFAFFA"].sum()) if "CHIFAFFA" in _ca_cf.columns else 0.0
+    _nb_ref_tot = len(_ca_cf)
+
+    # ── Normalisation CODEAPPO 100% vectorisée ────────────────────────────────
+    if "CODEAPPO" in _ca_cf.columns:
+        _appo = _ca_cf["CODEAPPO"].astype(str).str.strip()
+        _appo = _appo.str.replace(r"\.0$", "", regex=True)  # "200.0" → "200"
+        _appo = _appo.str.upper()
+        _appo = _appo.replace({"NAN":"","NONE":"","NAT":"","<NA>":"","":" "})
+        _ca_cf["_CAN"] = _appo.str.strip().replace({"":"SANS CODE"," ":"SANS CODE"})
+    else:
+        _ca_cf["_CAN"] = "SANS CODE"
+
+    # ── Agrégat COMPLET — aucune ligne perdue ─────────────────────────────────
+    _agg_dict_c = {
+        "ca":   ("CHIFAFFA","sum"),
+        "nb_q": ("CHIFAFFA","count"),
+    }
+    if "POLICE_KEY" in _ca_cf.columns: _agg_dict_c["nb_pol"] = ("POLICE_KEY","nunique")
+    if "COMMAPPO"   in _ca_cf.columns: _agg_dict_c["comm"]   = ("COMMAPPO","sum")
+    if "PRIMNETT"   in _ca_cf.columns: _agg_dict_c["prim"]   = ("PRIMNETT","sum")
+
+    _agg_c = _ca_cf.groupby("_CAN").agg(**_agg_dict_c).reset_index()
+    if "nb_pol" not in _agg_c.columns: _agg_c["nb_pol"] = _agg_c["nb_q"]
+    if "comm"   not in _agg_c.columns: _agg_c["comm"]   = 0.0
+    _agg_c = _agg_c.sort_values("ca", ascending=False).reset_index(drop=True)
+
+    # ── Vérification intégrité ─────────────────────────────────────────────────
+    _ca_verif_c = float(_agg_c["ca"].sum())
+    _ecart_c    = abs(_ca_verif_c - _ca_ref_tot)
+
+    # ── Enrichissement noms depuis portefeuille ────────────────────────────────
+    _pf_map_c = {}
+    if _has_pf_c and "CODEAPPO" in _pf_c.columns:
+        _pft = _pf_c.copy()
+        _appo_pf = _pft["CODEAPPO"].astype(str).str.strip()
+        _appo_pf = _appo_pf.str.replace(r"\.0$","",regex=True).str.upper()
+        _appo_pf = _appo_pf.replace({"NAN":"","NONE":"","NAT":"","<NA>":""})
+        _appo_pf = _appo_pf.str.strip().replace({"":"SANS CODE"})
+        _pft["_CAN"] = _appo_pf
+        for _code, _grp in _pft.groupby("_CAN"):
+            if not _code: continue
+            _nom_v = f"Apporteur {_code}"
+            if "NOM_APP" in _grp.columns:
+                _vv = _grp["NOM_APP"].dropna().astype(str).str.strip()
+                _vv = _vv[_vv.str.len() > 0]
+                if not _vv.empty: _nom_v = _vv.iloc[0]
+            _pf_map_c[_code] = {
+                "nom": _nom_v,
+                "nb_p": len(_grp),
+                "act": int((_grp["ETAT_POLICE"]=="ACTIF").sum())   if "ETAT_POLICE" in _grp.columns else 0,
+                "res": int((_grp["ETAT_POLICE"]=="RESILIE").sum()) if "ETAT_POLICE" in _grp.columns else 0,
+                "ina": int((_grp["ETAT_POLICE"]=="INACTIF").sum()) if "ETAT_POLICE" in _grp.columns else 0,
+                "vil": int(_grp["LIBEVILL"].nunique()) if "LIBEVILL" in _grp.columns else 0,
+                "cli": int(_grp["NOM_ASSU"].nunique()) if "NOM_ASSU" in _grp.columns else 0,
+            }
+
+    def _gi(code, key, default=0): return _pf_map_c.get(code, {}).get(key, default)
+
+    _agg_c["nom"]    = _agg_c["_CAN"].apply(lambda c: _gi(c,"nom", "— Sans code apporteur —" if c=="SANS CODE" else f"Apporteur {c}"))
+    _agg_c["nb_pf"]  = _agg_c["_CAN"].apply(lambda c: _gi(c,"nb_p",0))
+    _agg_c["act"]    = _agg_c["_CAN"].apply(lambda c: _gi(c,"act",0))
+    _agg_c["res"]    = _agg_c["_CAN"].apply(lambda c: _gi(c,"res",0))
+    _ina_serie       = _agg_c["_CAN"].apply(lambda c: _gi(c,"ina",0))
+    _agg_c["tx_a"]   = (_agg_c["act"] / _agg_c["nb_pf"].clip(1) * 100).round(1)
+    _agg_c["tx_r"]   = (_agg_c["res"] / (_agg_c["nb_pf"] - _ina_serie).clip(1) * 100).round(1)
+    _agg_c["vil"]    = _agg_c["_CAN"].apply(lambda c: _gi(c,"vil",0))
+    _agg_c["ticket"] = (_agg_c["ca"] / _agg_c["nb_q"].clip(1)).round(0)
+
+    # ── Bloc vérification comptable ────────────────────────────────────────────
+    _ca_c_all_tot = float(_ca_c["CHIFAFFA"].sum()) if "CHIFAFFA" in _ca_c.columns else 0.0
+    _annees_ca_c  = sorted([int(y) for y in _ca_c["ANNEE_COMP"].dropna().unique()] if "ANNEE_COMP" in _ca_c.columns else [], reverse=True)
+    _decomp_cc    = ""
+    _dts_ca_c = pd.to_datetime(_ca_c["DATECOMP"], dayfirst=True, errors="coerce") if "DATECOMP" in _ca_c.columns else pd.Series(dtype="datetime64[ns]")
+    for _ay in _annees_ca_c[:6]:
+        # Utiliser ANNEE_COMP (pré-calculée) pour filtrer — pas DATECOMP
+        if "ANNEE_COMP" in _ca_c.columns:
+            _msk = (pd.to_numeric(_ca_c["ANNEE_COMP"], errors="coerce") == _ay).values
+        else:
+            _msk = (_dts_ca_c.dt.year == _ay).values
+        _t   = float(_ca_c.loc[_msk, "CHIFAFFA"].sum()) if "CHIFAFFA" in _ca_c.columns else 0.0
+        _n   = int(_msk.sum())
+        _decomp_cc += (f'<div style="font-size:10px;padding:1px 0;">'
+                      f'<b>{_ay}</b> : <span style="color:#003366;font-weight:700;">{_t:,.0f} FCFA</span>'
+                      f' <span style="color:#5A6478;">({_n:,} quitt.)</span></div>')
+
+    _verif_msg = (f'<div style="color:{"green" if _ecart_c<1 else "red"};font-size:9px;">'
+                 f'{"✅ Total vérifié — zéro écart entre agrégat et somme brute" if _ecart_c<1 else "⚠️ Écart " + f"{_ecart_c:,.0f} FCFA"}'
+                 f'</div>')
+
+    st.markdown(
+        f'<div style="background:#FFF8E1;border:2px solid #C9A227;border-radius:10px;'
+        f'padding:10px 16px;margin:8px 0 14px;">'
+        f'<div style="font-weight:800;color:#003366;font-size:12px;margin-bottom:6px;">'
+        f'✅ VÉRIFICATION COMPTABLE — Encaissements CHIFAFFA (comparer avec SOUS.TOTAL dans Excel)</div>'
+        f'<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;">'
+        f'<div style="background:white;border-radius:8px;padding:8px;border-left:4px solid #C9A227;">'
+        f'<div style="color:#5A6478;font-size:10px;">📋 BASE CA COMPLÈTE</div>'
+        f'<div style="font-size:1.1rem;font-weight:900;color:#003366;">{_ca_c_all_tot:,.0f} FCFA</div>'
+        f'<div style="font-size:9px;color:#5A6478;">{len(_ca_c):,} quittances · {len(_annees_ca_c)} exercice(s)</div>'
+        f'</div>'
+        f'<div style="background:white;border-radius:8px;padding:8px;border-left:4px solid #0072CE;">'
+        f'<div style="color:#5A6478;font-size:10px;">📅 PÉRIODE : {_lbl_c}</div>'
+        f'<div style="font-size:1.1rem;font-weight:900;color:#003366;">{_ca_ref_tot:,.0f} FCFA</div>'
+        f'<div style="font-size:9px;color:#5A6478;">{_nb_ref_tot:,} quittances · {len(_agg_c)} commerciaux</div>'
+        f'{_verif_msg}</div>'
+        f'<div style="background:white;border-radius:8px;padding:8px;border-left:4px solid #2ECC71;">'
+        f'<div style="color:#5A6478;font-size:10px;font-weight:700;margin-bottom:3px;">📊 PAR EXERCICE</div>'
+        f'{_decomp_cc}</div></div></div>',
+        unsafe_allow_html=True)
+
+    # ── KPIs ──────────────────────────────────────────────────────────────────
+    st.caption(f"📌 Période : **{_lbl_c}** · {len(_agg_c)} commerciaux · "
+               f"Total exact : **{_ca_ref_tot:,.0f} FCFA**")
+    _ck1,_ck2,_ck3,_ck4,_ck5,_ck6 = st.columns(6)
+    with _ck1: kpi("💰 Encaissements",  f"{_ca_ref_tot:,.0f}",  _lbl_c,               "gold","")
+    with _ck2: kpi("👤 Commerciaux",    str(len(_agg_c)),        "CODEAPPO distincts", "teal","")
+    with _ck3: kpi("🧾 Quittances",     f"{_nb_ref_tot:,}",      "lignes CA",          "","")
+    with _ck4: kpi("💎 Ticket moyen",   fmt(_ca_ref_tot/max(_nb_ref_tot,1)),"par quittance","gold","")
+    with _ck5: kpi("🥇 Best encaisseur",fmt(_agg_c.iloc[0]["ca"]) if len(_agg_c)>0 else "—",
+                   str(_agg_c.iloc[0]["nom"])[:25] if len(_agg_c)>0 else "","green","")
+    with _ck6: kpi("💼 Commissions",    fmt(float(_agg_c["comm"].sum())),"COMMAPPO","teal","")
+
+    st.markdown("---")
+    _tc1,_tc2,_tc3,_tc4 = st.tabs(["🏆 Classement","📈 Évolution","🔍 Fiche","📋 Tableau"])
+
+    with _tc1:
+        sth(f"🏆 Classement encaissements — {_lbl_c}","CHIFAFFA PAR COMMERCIAL")
+        # Afficher aussi le % du total de la période
+        _top20 = _agg_c.head(20).copy()
+        _top20["_lbl"] = _top20["nom"].str[:28] + " (" + _top20["_CAN"] + ")"
+        _top20["_pct"] = (_top20["ca"] / max(_ca_ref_tot,1) * 100).round(2)
+        _top20["_txt"] = _top20.apply(
+            lambda r: f"{r['ca']:,.0f} FCFA  ({r['_pct']:.1f}%  ·  {int(r['nb_q']):,} quitt.)", axis=1)
+        fig_cl_c = go.Figure(go.Bar(
+            x=_top20["ca"], y=_top20["_lbl"], orientation="h",
+            marker_color=[GREEN if r>=40 else AMBER if r>=20 else RED for r in _top20["tx_a"]],
+            text=_top20["_txt"], textposition="outside",
+            textfont=dict(size=9,color=NAVY),
+            hovertemplate="<b>%{y}</b><br>CA : %{x:,.0f} FCFA<extra></extra>"))
+        fig_cl_c.update_layout(yaxis=dict(autorange="reversed",tickfont=dict(size=9)))
+        chl(fig_cl_c,560,f"💰 Top 20 commerciaux · {_lbl_c}")
+        st.plotly_chart(fig_cl_c, use_container_width=True)
+
+        # Podium Top 3
+        if len(_agg_c) >= 1:
+            st.markdown("---"); sth("🥇 Podium Top 3","ENCAISSEMENTS")
+            _pod = st.columns(3)
+            for _ri,_ci,_med,_bg,_bd in [(0,1,"🥇","#FFFDE7","#DAA520"),(1,0,"🥈","#F5F5F5","#9E9E9E"),(2,2,"🥉","#FBE9E7","#BF360C")]:
+                if _ri < len(_agg_c):
+                    _rp = _agg_c.iloc[_ri]
+                    with _pod[_ci]:
+                        st.markdown(f"""
+                        <div style="background:{_bg};border:2.5px solid {_bd};border-radius:14px;
+                             padding:1.2rem .8rem;text-align:center;min-height:190px;">
+                          <div style="font-size:2.5rem;">{_med}</div>
+                          <div style="font-size:11px;font-weight:900;color:{NAVY};">{str(_rp['nom'])[:35]}</div>
+                          <div style="font-size:10px;color:#5A6478;">Code : <b>{_rp['_CAN']}</b></div>
+                          <div style="font-size:1.1rem;font-weight:900;color:{NAVY};margin:6px 0;">
+                            {_rp['ca']:,.0f} FCFA</div>
+                          <div style="font-size:10px;color:#5A6478;">
+                            {int(_rp['nb_q']):,} quittances · {_rp['ca']/_ca_ref_tot*100:.1f}% du total</div>
+                        </div>""", unsafe_allow_html=True)
+
+    with _tc2:
+        sth(f"📈 Évolution mensuelle — {_lbl_c}","DATECOMP")
+        if "YYYYMM_COMP" in _ca_cf.columns:
+            # Top 10 hors "SANS CODE"
+            _top10_c = _agg_c[_agg_c["_CAN"]!="SANS CODE"].head(10)["_CAN"].tolist()
+            _nom_top  = {r["_CAN"]:r["nom"] for _,r in _agg_c[_agg_c["_CAN"]!="SANS CODE"].head(10).iterrows()}
+            _evo_c    = _ca_cf[_ca_cf["_CAN"].isin(_top10_c)].copy()
+            _evo_c["_NOM"] = _evo_c["_CAN"].map(_nom_top).fillna(_evo_c["_CAN"])
+            _evo_m    = _evo_c.groupby(["YYYYMM_COMP","_NOM"])["CHIFAFFA"].sum().reset_index().sort_values("YYYYMM_COMP")
+            fig_ev_c  = px.line(_evo_m, x="YYYYMM_COMP", y="CHIFAFFA", color="_NOM", markers=True,
+                labels={"YYYYMM_COMP":"Mois","CHIFAFFA":"Encaissements (FCFA)","_NOM":"Commercial"})
+            fig_ev_c.update_layout(legend=dict(font=dict(size=8),orientation="h",y=-0.3))
+            chl(fig_ev_c, 480, f"📈 Encaissements mensuels Top 10 · {_lbl_c}")
+            st.plotly_chart(fig_ev_c, use_container_width=True)
+        else:
+            alert("YYYYMM_COMP non disponible.","info")
+
+    with _tc3:
+        sth("🔍 Fiche commerciale","LIAISON CA × PORTEFEUILLE")
+        _opts_c = [f"{r['_CAN']} — {r['nom'][:35]} · {r['ca']:,.0f} FCFA" for _,r in _agg_c.iterrows()]
+        _sel_cm = st.selectbox(f"👤 Commercial ({len(_agg_c)} dans CA)",
+                               ["— Sélectionner —"]+_opts_c, key="comm_fiche_v41")
+        if _sel_cm != "— Sélectionner —":
+            _idx    = _opts_c.index(_sel_cm)
+            _rc     = _agg_c.iloc[_idx]
+            _code_c = _rc["_CAN"]
+            _inf_c  = _pf_map_c.get(_code_c, {})
+            st.markdown(f"""
+            <div style="background:linear-gradient(135deg,#003366,#004D99);border-radius:12px;
+                 padding:1rem 1.5rem;margin:8px 0 12px;border-left:5px solid #C9A227;">
+              <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:1rem;">
+                <div>
+                  <div style="color:#E8C84A;font-size:9px;font-weight:800;text-transform:uppercase;">
+                    FICHE · {_lbl_c}</div>
+                  <div style="color:white;font-size:1.2rem;font-weight:900;">{_rc['nom']}</div>
+                  <div style="color:rgba(255,255,255,.7);font-size:11px;">
+                    Code : <b style="color:#4DFFE0;font-family:monospace;">{_code_c}</b>
+                    · Rang #{_idx+1}/{len(_agg_c)}
+                    · {_rc['ca']/_ca_ref_tot*100:.2f}% du CA {_lbl_c}</div>
+                </div>
+                <div style="text-align:right;">
+                  <div style="font-size:1.5rem;font-weight:900;color:#E8C84A;">{_rc['ca']:,.0f} FCFA</div>
+                  <div style="font-size:10px;color:rgba(255,255,255,.65);">{int(_rc['nb_q']):,} quittances</div>
+                </div>
+              </div>
+            </div>""", unsafe_allow_html=True)
+            _fkc = st.columns(6)
+            with _fkc[0]: kpi("💰 Encaissements",f"{_rc['ca']:,.0f}",_lbl_c,"gold","")
+            with _fkc[1]: kpi("🧾 Quittances",f"{int(_rc['nb_q']):,}","","","")
+            with _fkc[2]: kpi("🎫 Ticket moyen",fmt(_rc['ticket']),"","teal","")
+            with _fkc[3]: kpi("📋 Polices pf",f"{_inf_c.get('nb_p',0):,}","portefeuille","","")
+            with _fkc[4]: kpi("✅ Actives",f"{_inf_c.get('act',0):,}",f"{_rc['tx_a']:.1f}%","green","")
+            with _fkc[5]: kpi("🏙️ Villes",f"{_inf_c.get('vil',0)}","","teal","")
+            if "YYYYMM_COMP" in _ca_cf.columns:
+                _ca_one = _ca_cf[_ca_cf["_CAN"]==_code_c]
+                if not _ca_one.empty:
+                    _ev1 = _ca_one.groupby("YYYYMM_COMP")["CHIFAFFA"].agg(ca="sum",nb="count").reset_index().sort_values("YYYYMM_COMP")
+                    fig_one = make_subplots(specs=[[{"secondary_y":True}]])
+                    fig_one.add_trace(go.Bar(x=_ev1["YYYYMM_COMP"],y=_ev1["ca"],name="💰 Encaissements",
+                        marker_color=GOLD,opacity=.85,
+                        text=[f"{v:,.0f}" for v in _ev1["ca"]],textposition="outside"),secondary_y=False)
+                    fig_one.add_trace(go.Scatter(x=_ev1["YYYYMM_COMP"],y=_ev1["nb"],name="🧾 Quitt.",
+                        line=dict(color=NAVY,width=2.5),mode="lines+markers"),secondary_y=True)
+                    fig_one.update_yaxes(title_text="Encaissements (FCFA)",secondary_y=False)
+                    fig_one.update_yaxes(title_text="Quittances",secondary_y=True,showgrid=False)
+                    chl(fig_one,420,f"📅 Mensuel — {_rc['nom'][:30]}")
+                    st.plotly_chart(fig_one, use_container_width=True)
+
+    with _tc4:
+        sth("📋 Tableau complet","EXPORT — MONTANTS EXACTS")
+        _disp_c = _agg_c[[c for c in ["_CAN","nom","ca","nb_q","nb_pf","act","tx_a","tx_r","vil","comm","ticket"] if c in _agg_c.columns]].copy()
+        _disp_c.insert(0,"Rang",range(1,len(_disp_c)+1))
+        _disp_c.rename(columns={"_CAN":"Code","nom":"Commercial","ca":"Encaissements (FCFA)",
+            "nb_q":"Quittances","nb_pf":"Polices PF","act":"Actives",
+            "tx_a":"% Actifs","tx_r":"% Résil.","vil":"Villes",
+            "comm":"Commissions","ticket":"Ticket moyen"}, inplace=True)
+        # Montants exacts (pas de fmt arrondi)
+        if "Encaissements (FCFA)" in _disp_c.columns:
+            _disp_c["Encaissements (FCFA)"] = _disp_c["Encaissements (FCFA)"].apply(lambda x: f"{x:,.0f}")
+        if "Commissions" in _disp_c.columns:
+            _disp_c["Commissions"] = _disp_c["Commissions"].apply(lambda x: f"{x:,.0f}")
+        if "Ticket moyen" in _disp_c.columns:
+            _disp_c["Ticket moyen"] = _disp_c["Ticket moyen"].apply(lambda x: f"{x:,.0f}")
+        for _c in ["% Actifs","% Résil."]:
+            if _c in _disp_c.columns: _disp_c[_c] = _disp_c[_c].apply(lambda x: f"{x:.1f}%")
+        _cols_c = [c for c in ["Rang","Code","Commercial","Encaissements (FCFA)","Quittances","Polices PF",
+                                "Actives","% Actifs","% Résil.","Villes","Commissions","Ticket moyen"] if c in _disp_c.columns]
+        st.dataframe(_disp_c[_cols_c], use_container_width=True, hide_index=True, height=500)
+
+        # Ligne totale de contrôle
+        st.markdown(
+            f'<div style="background:#E8F5E9;border:1px solid #2ECC71;border-radius:8px;'
+            f'padding:8px 16px;font-size:11.5px;margin-top:6px;">'
+            f'<b>TOTAL CONTRÔLE</b> : <span style="font-size:1.1rem;font-weight:900;color:#003366;">'
+            f'{_ca_ref_tot:,.0f} FCFA</span>'
+            f' · {_nb_ref_tot:,} quittances'
+            f' · {"✅ Conforme avec la base CA" if _ecart_c < 1 else f"⚠️ Écart {_ecart_c:,.0f} FCFA"}'
+            f'</div>', unsafe_allow_html=True)
+
+        _buf_c = io.BytesIO()
+        with pd.ExcelWriter(_buf_c, engine="openpyxl") as _wx2:
+            _disp_c[_cols_c].to_excel(_wx2, index=False, sheet_name="Commerciaux")
+            # Feuille contrôle
+            pd.DataFrame({
+                "Indicateur":["Total encaissements","Nb quittances","Nb commerciaux","Période"],
+                "Valeur":[f"{_ca_ref_tot:,.0f}",f"{_nb_ref_tot:,}",str(len(_agg_c)),_lbl_c]
+            }).to_excel(_wx2, index=False, sheet_name="Contrôle")
+        st.download_button(f"⬇️ Exporter Commerciaux · {_lbl_c}", data=_buf_c.getvalue(),
+            file_name=f"AFG_Commerciaux_{_lbl_c.replace(' ','_')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True)
+
+elif "Clients" in nav:
+    _pf_cli = st.session_state.get("portefeuille_ext")
+    _yr_cli = year_selector("yr_clients_v40","📅 Filtrer par année de souscription (DATESOUS)")
+
+    sth("👥 Clients — Analyse du portefeuille assurés","DATESOUS · NOM_ASSU")
+
+    if _pf_cli is None or _pf_cli.empty:
+        alert("📥 Importez le <b>portefeuille</b> depuis <b>Accueil</b> pour activer cette page.","warn"); st.stop()
+
+    _df_cli = filter_pf_by_year(_pf_cli.copy(), _yr_cli)
+    st.caption(f"📌 Période : **{yr_label(_yr_cli)}** · {len(_df_cli):,} polices")
+
+    _nb_cli = _df_cli["NOM_ASSU"].nunique() if "NOM_ASSU" in _df_cli.columns else len(_df_cli)
+    _nb_act = int((_df_cli["ETAT_POLICE"]=="ACTIF").sum()) if "ETAT_POLICE" in _df_cli.columns else 0
+    _nb_res = int((_df_cli["ETAT_POLICE"]=="RESILIE").sum()) if "ETAT_POLICE" in _df_cli.columns else 0
+    _nb_vil = _df_cli["LIBEVILL"].nunique() if "LIBEVILL" in _df_cli.columns else 0
+    _ca_cli = float(_df_cli["MONTENCA"].sum()) if "MONTENCA" in _df_cli.columns else 0.0
+
+    _cl1,_cl2,_cl3,_cl4,_cl5 = st.columns(5)
+    with _cl1: kpi("👥 Clients",    f"{_nb_cli:,}",  "assurés uniques","teal","")
+    with _cl2: kpi("📋 Polices",   f"{len(_df_cli):,}","","","")
+    with _cl3: kpi("✅ Actives",   f"{_nb_act:,}",   f"{_nb_act/max(len(_df_cli),1)*100:.1f}%","green","")
+    with _cl4: kpi("📉 Résiliées", f"{_nb_res:,}",   f"{_nb_res/max(len(_df_cli),1)*100:.1f}%","red","")
+    with _cl5: kpi("🏙️ Villes",   f"{_nb_vil}",     "couvertes","teal","")
+
+    _g1c,_g2c = st.columns(2)
+    with _g1c:
+        if "LIBECATE" in _df_cli.columns:
+            _cat_c = _df_cli["LIBECATE"].value_counts().head(10)
+            fig_cat_c = go.Figure(go.Bar(y=_cat_c.index,x=_cat_c.values,orientation="h",
+                marker=dict(color=_cat_c.values,colorscale=[[0,BLUEL],[1,NAVY]],showscale=False),
+                text=_cat_c.values.astype(str),textposition="outside"))
+            fig_cat_c.update_layout(yaxis=dict(autorange="reversed",tickfont=dict(size=9)))
+            chl(fig_cat_c,420,"🛒 Top produits clients")
+            st.plotly_chart(fig_cat_c, use_container_width=True)
+    with _g2c:
+        if "LIBEVILL" in _df_cli.columns:
+            _vil_c = _df_cli["LIBEVILL"].value_counts().head(12)
+            fig_vil_c = go.Figure(go.Bar(y=_vil_c.index,x=_vil_c.values,orientation="h",
+                marker=dict(color=_vil_c.values,colorscale=[[0,TEAL],[1,NAVY]],showscale=False),
+                text=_vil_c.values.astype(str),textposition="outside"))
+            fig_vil_c.update_layout(yaxis=dict(autorange="reversed",tickfont=dict(size=9)))
+            chl(fig_vil_c,420,"📍 Top villes clients")
+            st.plotly_chart(fig_vil_c, use_container_width=True)
+
+    if "ETAT_POLICE" in _df_cli.columns:
+        _et_c = _df_cli["ETAT_POLICE"].value_counts().reset_index()
+        _et_c.columns = ["État","Nb"]
+        _col_map_c = {"ACTIF":GREEN,"RESILIE":RED,"INACTIF":AMBER,"ECHU":"#E67E22","SUSPENDU":GOLD}
+        fig_et_c = go.Figure(go.Pie(labels=_et_c["État"],values=_et_c["Nb"],hole=0.44,
+            marker=dict(colors=[_col_map_c.get(e,"#5A6478") for e in _et_c["État"]]),
+            textinfo="percent+label+value",textfont_size=11))
+        chl(fig_et_c,450,f"📊 Répartition états — {yr_label(_yr_cli)}")
+        st.plotly_chart(fig_et_c, use_container_width=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE SINISTRES v40
+# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE SINISTRES v41 — KPIs actuariels & gestion sinistres professionnelle
+# Indicateurs : SAP, S/P, délais, fréquence, gravité, Burning Cost, IBNR
+# ══════════════════════════════════════════════════════════════════════════════
+elif "Sinistres" in nav:
+
+    _df_sin = st.session_state.get("sin_ext")
+    _pf_sin = st.session_state.get("portefeuille_ext")
+    _ca_sin = st.session_state.get("ca_ext")
+
+    # ── Bannière ──────────────────────────────────────────────────────────────
+    st.markdown(f"""
+    <div style="background:linear-gradient(135deg,#4A0000,#8B0000);border-radius:14px;
+         padding:1.2rem 1.8rem;margin-bottom:1rem;border-left:6px solid #FF6B6B;
+         box-shadow:0 6px 24px rgba(139,0,0,.25);">
+      <div style="color:#FFB3B3;font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.15em;">
+        AFG Assurances Bénin Vie — Gestion Sinistres v41</div>
+      <div style="color:white;font-size:1.2rem;font-weight:900;">
+        🏥 Prestations & Sinistres — Analyse Actuarielle</div>
+      <div style="color:rgba(255,255,255,.65);font-size:11px;">
+        {'✅ Prestations : ' + f"{len(_df_sin):,}" + ' dossiers' if _df_sin is not None and not _df_sin.empty else '⚠️ Base Prestations non chargée'}
+        &nbsp;·&nbsp;
+        {'✅ Portefeuille : ' + f"{len(_pf_sin):,}" + ' polices' if _pf_sin is not None and not _pf_sin.empty else '⚠️ Portefeuille non chargé'}
+        &nbsp;·&nbsp;
+        {'✅ Base CA chargée' if _ca_sin is not None and not _ca_sin.empty else '⚠️ CA non chargé'}
+      </div>
+    </div>""", unsafe_allow_html=True)
+
+    if _df_sin is None or _df_sin.empty:
+        alert("📥 Importez la base <b>Prestations</b> depuis <b>Accueil → Import Excel Externe</b>.", "warn")
+        st.stop()
+
+    # ── Sélecteur période ─────────────────────────────────────────────────────
+    _yr_sin = year_selector("yr_sin_v41", "📅 Exercice sinistre (Date Survenance)")
+    _lbl_sin = yr_label(_yr_sin)
+
+    # Filtrage robuste
+    if _yr_sin and _yr_sin != "Toutes":
+        _yrs_int_sin = [int(y) for y in (_yr_sin if isinstance(_yr_sin, list) else [_yr_sin]) if str(y).isdigit()]
+        _col_yr_sin = next((c for c in ["Date Survenance_ANNEE","Date Déclaration_ANNEE","Date Comptabilisation_ANNEE"] if c in _df_sin.columns), None)
+        if _col_yr_sin and _yrs_int_sin:
+            _df_sf = _df_sin[pd.to_numeric(_df_sin[_col_yr_sin], errors="coerce").isin(_yrs_int_sin)].copy()
+        else:
+            _df_sf = _df_sin.copy()
+    else:
+        _df_sf = _df_sin.copy()
+
+    _nb_sin = len(_df_sf)
+    if _nb_sin == 0:
+        alert(f"Aucun dossier pour {_lbl_sin}.", "warn"); st.stop()
+
+    st.caption(f"📌 Période : **{_lbl_sin}** · **{_nb_sin:,}** dossiers sur {len(_df_sin):,} total")
+
+    # ── Calculs actuariels ────────────────────────────────────────────────────
+    _regl_tot  = float(_df_sf["REGL_PRINC"].sum()) if "REGL_PRINC" in _df_sf.columns else 0.0
+    _has_stat  = "Statut" in _df_sf.columns
+    _nb_clos   = int((_df_sf["Statut"] == "CLOS").sum())   if _has_stat else 0
+    _nb_ouv    = int((_df_sf["Statut"] == "OUVERT").sum()) if _has_stat else 0
+    _nb_rej    = int((_df_sf["Statut"] == "REJETE").sum()) if _has_stat else 0
+    _nb_autres = _nb_sin - _nb_clos - _nb_ouv - _nb_rej
+
+    # SAP (Sinistres À Payer) = provisions sur dossiers ouverts
+    _sap = float(_df_sf[_df_sf["Statut"] == "OUVERT"]["REGL_PRINC"].sum()) if _has_stat and "REGL_PRINC" in _df_sf.columns else 0.0
+    # Coût moyen sinistre réglé
+    _cout_moy = _regl_tot / max(_nb_clos, 1)
+    # Gravité = coût moyen par sinistre déclaré
+    _gravite  = _regl_tot / max(_nb_sin, 1)
+    # Taux de clôture
+    _tx_clos  = _nb_clos / max(_nb_sin, 1) * 100
+    # Taux de rejet
+    _tx_rej   = _nb_rej / max(_nb_sin, 1) * 100
+
+    # Ratio S/P = sinistres/primes (si CA disponible)
+    _ca_sin_tot = float(_ca_sin["CHIFAFFA"].sum()) if _ca_sin is not None and not _ca_sin.empty and "CHIFAFFA" in _ca_sin.columns else 0.0
+    _sp_ratio   = _regl_tot / max(_ca_sin_tot, 1) * 100 if _ca_sin_tot > 0 else None
+
+    # Burning Cost = coût sinistres / nb polices * 1000 (pour 1000 assurés)
+    _nb_pol_sin = len(_pf_sin) if _pf_sin is not None and not _pf_sin.empty else 0
+    _burning_cost = _regl_tot / max(_nb_pol_sin, 1) * 1000 if _nb_pol_sin > 0 else None
+
+    # Fréquence sinistres = nb sinistres / nb polices * 100
+    _freq_sin = _nb_sin / max(_nb_pol_sin, 1) * 100 if _nb_pol_sin > 0 else None
+
+    # Délai de règlement (jours)
+    _delai_moyen = None
+    if "Date Survenance" in _df_sf.columns and "Date validation" in _df_sf.columns:
+        _d_surv = pd.to_datetime(_df_sf["Date Survenance"], dayfirst=True, errors="coerce")
+        _d_val  = pd.to_datetime(_df_sf["Date validation"], dayfirst=True, errors="coerce")
+        _delais = (_d_val - _d_surv).dt.days.dropna()
+        _delais = _delais[_delais >= 0]
+        if not _delais.empty:
+            _delai_moyen = float(_delais.mean())
+
+    # Délai déclaration
+    _delai_decl = None
+    if "Date Survenance" in _df_sf.columns and "Date Déclaration" in _df_sf.columns:
+        _d_surv2 = pd.to_datetime(_df_sf["Date Survenance"], dayfirst=True, errors="coerce")
+        _d_decl  = pd.to_datetime(_df_sf["Date Déclaration"], dayfirst=True, errors="coerce")
+        _d2 = (_d_decl - _d_surv2).dt.days.dropna()
+        _d2 = _d2[(_d2 >= 0) & (_d2 <= 3650)]
+        if not _d2.empty:
+            _delai_decl = float(_d2.mean())
+
+    # ── KPIs Ligne 1 — Volume et financiers ───────────────────────────────────
+    st.markdown("---")
+    st.markdown("<div style='font-size:12px;font-weight:800;color:#8B0000;margin-bottom:8px;'>📊 INDICATEURS FINANCIERS & VOLUME</div>", unsafe_allow_html=True)
+    _k1,_k2,_k3,_k4,_k5,_k6 = st.columns(6)
+    with _k1: kpi("📂 Dossiers",        f"{_nb_sin:,}",         _lbl_sin,              "",       "")
+    with _k2: kpi("💰 Total réglé",      fmt(_regl_tot),         "FCFA versés",         "gold",   "")
+    with _k3: kpi("📌 SAP",             fmt(_sap),               "provisions ouvertes", "red",    "")
+    with _k4: kpi("💎 Coût moyen",       fmt(_cout_moy),         "par dossier clos",    "teal",   "")
+    with _k5: kpi("⚖️ Gravité moy.",    fmt(_gravite),           "coût/sinistre décl.", "amber",  "")
+    with _k6:
+        if _sp_ratio is not None:
+            _sp_c = "red" if _sp_ratio > 80 else ("amber" if _sp_ratio > 60 else "green")
+            kpi("📐 Ratio S/P", f"{_sp_ratio:.1f}%", "sinistres/primes CA", _sp_c, "")
+        else:
+            kpi("📐 Ratio S/P", "—", "chargez la base CA", "", "")
+
+    # ── KPIs Ligne 2 — Gestion et qualité ────────────────────────────────────
+    st.markdown("<div style='font-size:12px;font-weight:800;color:#8B0000;margin:12px 0 8px;'>🎯 INDICATEURS DE GESTION & PERFORMANCE</div>", unsafe_allow_html=True)
+    _k7,_k8,_k9,_k10,_k11,_k12 = st.columns(6)
+    with _k7: kpi("✅ Dossiers clos",    f"{_nb_clos:,}",        f"{_tx_clos:.1f}%",    "green",  "")
+    with _k8: kpi("🔄 Ouverts (SAP)",   f"{_nb_ouv:,}",          f"{_nb_ouv/max(_nb_sin,1)*100:.1f}%","amber","")
+    with _k9: kpi("❌ Rejetés",          f"{_nb_rej:,}",          f"{_tx_rej:.1f}%",     "red" if _tx_rej>15 else "","")
+    with _k10:
+        if _delai_moyen is not None:
+            _d_c = "green" if _delai_moyen<30 else ("amber" if _delai_moyen<60 else "red")
+            kpi("⏱️ Délai règlement", f"{_delai_moyen:.0f}j", "survenance→validation", _d_c, "")
+        else:
+            kpi("⏱️ Délai règlement", "—", "données absentes", "", "")
+    with _k11:
+        if _delai_decl is not None:
+            kpi("📋 Délai déclaration", f"{_delai_decl:.0f}j", "survenance→déclaration", "teal", "")
+        else:
+            kpi("📋 Délai déclaration", "—", "données absentes", "", "")
+    with _k12:
+        if _burning_cost is not None:
+            kpi("🔥 Burning Cost", fmt(_burning_cost), "pour 1 000 polices", "red" if _burning_cost>500000 else "amber", "")
+        else:
+            kpi("🔥 Burning Cost", "—", "chargez le portefeuille", "", "")
+
+    # ── KPIs Ligne 3 — Actuariels avancés ────────────────────────────────────
+    st.markdown("<div style='font-size:12px;font-weight:800;color:#8B0000;margin:12px 0 8px;'>🔬 INDICATEURS ACTUARIELS AVANCÉS</div>", unsafe_allow_html=True)
+    _k13,_k14,_k15,_k16,_k17,_k18 = st.columns(6)
+    with _k13:
+        if _freq_sin is not None:
+            kpi("📊 Fréquence sinistres", f"{_freq_sin:.2f}%", "sin./polices × 100", "amber" if _freq_sin>5 else "teal", "")
+        else:
+            kpi("📊 Fréquence sinistres", "—", "chargez le portefeuille", "", "")
+    with _k14:
+        # IBNR estimé simplifié (Sinistres survenus non déclarés) = 5-10% du SAP
+        _ibnr_est = _sap * 0.07
+        kpi("🔍 IBNR estimé", fmt(_ibnr_est), "7% du SAP (provision)", "red", "")
+    with _k15:
+        # Charge sinistre ultime = réglé + SAP + IBNR
+        _charge_ultime = _regl_tot + _sap + _sap * 0.07
+        kpi("📈 Charge ultime", fmt(_charge_ultime), "réglé+SAP+IBNR", "gold", "")
+    with _k16:
+        # Taux de sinistralité nette = charge ultime / CA
+        _tx_sini = _charge_ultime / max(_ca_sin_tot, 1) * 100 if _ca_sin_tot > 0 else None
+        if _tx_sini is not None:
+            kpi("🎯 Tx sinistralité nette", f"{_tx_sini:.1f}%", "charge ultime/CA", "red" if _tx_sini>80 else "amber", "")
+        else:
+            kpi("🎯 Tx sinistralité nette", "—", "chargez la base CA", "", "")
+    with _k17:
+        # Dossiers en instance > 90 jours (délai excessif CIMA)
+        _old_dossiers = 0
+        if "Date Déclaration" in _df_sf.columns and _has_stat:
+            _d_decl_all = pd.to_datetime(_df_sf["Date Déclaration"], dayfirst=True, errors="coerce")
+            _age = (pd.Timestamp.today() - _d_decl_all).dt.days
+            _old_dossiers = int((_age >= 90).sum())
+        kpi("⚠️ En instance >90j", f"{_old_dossiers:,}",
+            f"{_old_dossiers/max(_nb_ouv,1)*100:.0f}% des ouverts",
+            "red" if _old_dossiers > 0 else "green", "")
+    with _k18:
+        # Taux de règlement CIMA (objectif <30 jours)
+        _tx_cima = 0.0
+        if _delai_moyen is not None:
+            _tx_cima_respect = min(_delai_moyen / 30 * 100, 100)
+            _cima_c = "green" if _delai_moyen <= 30 else ("amber" if _delai_moyen <= 60 else "red")
+            kpi("🏛️ Conformité CIMA", f"{'✅' if _delai_moyen<=30 else '⚠️'} {_delai_moyen:.0f}j",
+                "norme ≤30j règlement", _cima_c, "")
+        else:
+            kpi("🏛️ Conformité CIMA", "—", "norme ≤30j", "", "")
+
+    # ── Alertes actuarielles ──────────────────────────────────────────────────
+    if _sp_ratio is not None and _sp_ratio > 80:
+        alert(f"🔴 <b>Ratio S/P critique : {_sp_ratio:.1f}%</b> — La sinistralité dépasse 80% des primes encaissées. Révision tarifaire recommandée.", "danger")
+    if _old_dossiers > 0:
+        alert(f"⚠️ <b>{_old_dossiers:,} dossiers en instance depuis >90 jours</b> — Non-conformité CIMA potentielle.", "warn")
+    if _tx_rej > 20:
+        alert(f"🟡 Taux de rejet élevé : <b>{_tx_rej:.1f}%</b> — Vérifier les critères de prise en charge.", "warn")
+
+    st.markdown("---")
+
+    # ── Onglets d'analyse ─────────────────────────────────────────────────────
+    _ts1,_ts2,_ts3,_ts4,_ts5 = st.tabs([
+        "📊 Analyse par nature",
+        "📅 Évolution temporelle",
+        "🔬 Analyse délais",
+        "🗂️ Dossiers détail",
+        "📋 Tableau & Export"
     ])
 
-    def render_prod_stats(dp_g,tab):
-        with tab:
-            for _,row in dp_g.iterrows():
-                tx_r=row['nb_resilie']/max(row['nb'],1)*100
-                tx_col=RED if tx_r>20 else (AMBER if tx_r>10 else GREEN)
-                grp_badge=groupe_badge(row['code'])
-                st.markdown(f"""
-                <div class="prod-card">
-                  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:7px;">
-                    <div style="display:flex;align-items:center;gap:8px;">
-                      <span class="prod-code">{row['code']}</span>
-                      <span style="font-size:13.5px;font-weight:800;color:{NAVY};">{row['nom']}</span>
-                      {grp_badge}
-                    </div>
-                    <div style="text-align:right;font-size:11px;color:{DGRAY};">
-                      📋 {int(row['nb']):,} contrats · 💰 CA : {fmt(row['ca'])}
-                    </div>
-                  </div>
-                  <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-top:6px;">
-                    <div style="background:#E8F8EE;border-radius:7px;padding:7px;text-align:center;">
-                      <div style="font-size:1.1rem;font-weight:900;color:{GREEN};">{int(row['nb_actif']):,}</div>
-                      <div style="font-size:9px;color:#5A6478;">✅ Actifs</div>
-                    </div>
-                    <div style="background:#FDECEA;border-radius:7px;padding:7px;text-align:center;">
-                      <div style="font-size:1.1rem;font-weight:900;color:{RED};">{int(row['nb_resilie']):,}</div>
-                      <div style="font-size:9px;color:#5A6478;">❌ Résiliés</div>
-                    </div>
-                    <div style="background:#FFF8E1;border-radius:7px;padding:7px;text-align:center;">
-                      <div style="font-size:1.1rem;font-weight:900;color:{AMBER};">{int(row['nb_suspendu']):,}</div>
-                      <div style="font-size:9px;color:#5A6478;">⏸ Suspendus</div>
-                    </div>
-                    <div style="background:rgba(201,162,39,0.1);border-radius:7px;padding:7px;text-align:center;">
-                      <div style="font-size:1.1rem;font-weight:900;color:{GOLD};">{fmt(row['moy'])}</div>
-                      <div style="font-size:9px;color:#5A6478;">📅 Moy./contrat</div>
-                    </div>
-                    <div style="background:rgba(192,57,43,0.08);border-radius:7px;padding:7px;text-align:center;">
-                      <div style="font-size:1.1rem;font-weight:900;color:{tx_col};">{tx_r:.1f}%</div>
-                      <div style="font-size:9px;color:#5A6478;">📉 Tx résil.</div>
-                    </div>
-                  </div>
-                </div>""",unsafe_allow_html=True)
+    # ── Tab 1 : Analyse par nature ─────────────────────────────────────────────
+    with _ts1:
+        sth(f"📊 Sinistres par nature — {_lbl_sin}", "RÉPARTITION & COÛT")
+        if "NAT_NORM" in _df_sf.columns and "REGL_PRINC" in _df_sf.columns:
+            _nat = _df_sf.groupby("NAT_NORM").agg(
+                nb       =("NAT_NORM",    "count"),
+                regl     =("REGL_PRINC",  "sum"),
+                cout_moy =("REGL_PRINC",  "mean"),
+                clos     =("Statut",      lambda x: (x=="CLOS").sum()) if _has_stat else ("NAT_NORM","count"),
+            ).reset_index().sort_values("regl", ascending=False)
+            _nat["NAT_NORM"] = _nat["NAT_NORM"].astype(str)
+            _nat["tx_clos"]  = (_nat["clos"] / _nat["nb"].clip(1) * 100).round(1)
 
-    dp_g1=dp[dp['groupe']=="Groupe 1 — Décès & Vie"]
-    dp_g2=dp[dp['groupe']=="Groupe 2 — Épargne & Capitalisation"]
-    dp_g3=dp[dp['groupe']=="Groupe 3 — Contrat Mixte"]
+            _tg1, _tg2 = st.columns(2)
+            with _tg1:
+                fig_nat_r = go.Figure(go.Bar(
+                    y=_nat["NAT_NORM"].str[:30], x=_nat["regl"], orientation="h",
+                    marker=dict(color=_nat["regl"],
+                        colorscale=[[0,"#FF6B6B"],[0.5,"#FF9F43"],[1,"#8B0000"]],showscale=False),
+                    text=[fmt(v) for v in _nat["regl"]], textposition="outside",
+                    hovertemplate="<b>%{y}</b><br>Réglé : %{x:,.0f} FCFA<br>Dossiers : %{customdata}<extra></extra>",
+                    customdata=_nat["nb"]))
+                fig_nat_r.update_layout(yaxis=dict(autorange="reversed", tickfont=dict(size=9)))
+                chl(fig_nat_r, 420, f"💰 Montants réglés par nature · {_lbl_sin}")
+                st.plotly_chart(fig_nat_r, use_container_width=True)
+            with _tg2:
+                fig_nat_p = go.Figure(go.Pie(
+                    labels=_nat["NAT_NORM"].str[:25],
+                    values=_nat["nb"], hole=0.44,
+                    textinfo="percent+label",
+                    hovertemplate="<b>%{label}</b><br>Dossiers : %{value:,}<br>Part : %{percent}<extra></extra>"))
+                chl(fig_nat_p, 420, f"📊 Répartition dossiers par nature · {_lbl_sin}")
+                st.plotly_chart(fig_nat_p, use_container_width=True)
 
-    render_prod_stats(dp_g1,tg1)
-    render_prod_stats(dp_g2,tg2)
-    render_prod_stats(dp_g3,tg3)
+            # Coût moyen et taux de clôture par nature
+            _tg3, _tg4 = st.columns(2)
+            with _tg3:
+                fig_cout = go.Figure(go.Bar(
+                    y=_nat["NAT_NORM"].str[:30], x=_nat["cout_moy"], orientation="h",
+                    marker_color=GOLD, text=[fmt(v) for v in _nat["cout_moy"]],
+                    textposition="outside"))
+                fig_cout.update_layout(yaxis=dict(autorange="reversed", tickfont=dict(size=9)))
+                chl(fig_cout, 380, "💎 Coût moyen par dossier")
+                st.plotly_chart(fig_cout, use_container_width=True)
+            with _tg4:
+                fig_clos = go.Figure(go.Bar(
+                    y=_nat["NAT_NORM"].str[:30], x=_nat["tx_clos"], orientation="h",
+                    marker_color=[GREEN if r>=80 else AMBER if r>=50 else RED for r in _nat["tx_clos"]],
+                    text=[f"{r:.1f}%" for r in _nat["tx_clos"]], textposition="outside"))
+                fig_clos.update_layout(yaxis=dict(autorange="reversed", tickfont=dict(size=9)))
+                chl(fig_clos, 380, "✅ Taux de clôture par nature (%)")
+                st.plotly_chart(fig_clos, use_container_width=True)
 
-    with tg4:
-        # Vue globale
-        c1,c2=st.columns(2)
-        with c1:
-            fig=px.bar(dp.sort_values('ca',ascending=True),x='ca',y='nom',orientation='h',
-                color='groupe',color_discrete_map=GROUPE_COLORS,text='nb',
-                title="💰 CA par produit (coloré par groupe)")
-            fig.update_traces(texttemplate='%{text:,} ct.',textposition='outside')
-            chl(fig,520,"💰 CA par produit — classé par groupe AFG"); st.plotly_chart(fig,use_container_width=True)
-        with c2:
-            dp2=dp[dp['nb_resilie']>0].copy()
-            dp2['tx_r']=dp2['nb_resilie']/dp2['nb'].clip(1)*100
-            fig=px.bar(dp2.sort_values('tx_r'),x='tx_r',y='nom',orientation='h',
-                color='tx_r',color_continuous_scale=[[0,GREEN],[0.3,AMBER],[1,RED]],
-                title="📉 Taux de résiliation par produit (%)")
-            fig.add_vline(x=10,line_dash="dash",line_color=RED,annotation_text="Seuil alerte 10%")
-            fig.update_traces(text=[f"{v:.1f}%" for v in dp2.sort_values('tx_r')['tx_r']],textposition='outside')
-            chl(fig,520,"📉 Taux de résiliation — rouge = alerte"); fig.update_layout(coloraxis_showscale=False)
-            st.plotly_chart(fig,use_container_width=True)
+            # Statuts par nature
+            if _has_stat:
+                _nat_stat = _df_sf.groupby(["NAT_NORM","Statut"]).size().unstack(fill_value=0).reset_index()
+                _nat_stat["NAT_NORM"] = _nat_stat["NAT_NORM"].astype(str)
+                fig_ns = go.Figure()
+                _stat_colors = {"CLOS":GREEN,"OUVERT":AMBER,"REJETE":RED}
+                for _stat_col in [c for c in ["CLOS","OUVERT","REJETE"] if c in _nat_stat.columns]:
+                    fig_ns.add_trace(go.Bar(
+                        name=_stat_col, y=_nat_stat["NAT_NORM"].str[:25],
+                        x=_nat_stat[_stat_col], orientation="h",
+                        marker_color=_stat_colors.get(_stat_col, BLUEL)))
+                fig_ns.update_layout(barmode="stack",
+                    yaxis=dict(autorange="reversed", tickfont=dict(size=9)))
+                chl(fig_ns, 400, f"📊 Statuts par nature · {_lbl_sin}")
+                st.plotly_chart(fig_ns, use_container_width=True)
 
+    # ── Tab 2 : Évolution temporelle ───────────────────────────────────────────
+    with _ts2:
+        sth("📅 Évolution temporelle des sinistres", "TENDANCES & SAISONNALITÉ")
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# PAGE — COMMERCIAUX (avec filtre multi-années + toutes informations)
-# ═══════════════════════════════════════════════════════════════════════════════
-elif "Commerciaux" in nav:
-    # ═══════════════════════════════════════════════════════════════════════════
-    # PAGE COMMERCIAUX — basée sur le portefeuille Excel (NOM_APP / CODEAPPO)
-    # NOM_APP   = nom + prénom de l'apporteur (commercial)
-    # CODEAPPO  = code unique de l'apporteur (=> mot de passe par défaut)
-    # ═══════════════════════════════════════════════════════════════════════════
-    pf_ext = st.session_state.get("portefeuille_ext", None)
+        _d_surv_all = pd.to_datetime(
+            _df_sin.get("Date Survenance", pd.Series()) if hasattr(_df_sin, "get") else _df_sin["Date Survenance"] if "Date Survenance" in _df_sin.columns else pd.Series(),
+            dayfirst=True, errors="coerce") if "Date Survenance" in _df_sin.columns else None
 
-    if pf_ext is None or "NOM_APP" not in pf_ext.columns or "CODEAPPO" not in pf_ext.columns:
-        alert("⚠️ Importez d'abord le portefeuille Excel (colonnes <b>NOM_APP</b> et <b>CODEAPPO</b> requises) "
-              "depuis la page Accueil.", "warn")
-        alert("📂 <b>Format attendu</b> : Sheet 1 — colonnes principales : "
-              "NOM_APP, CODEAPPO, NUMEPOLI_P, NOM_ASSU, ETAT_POLICE, LIBECATE, "
-              "MONTENCA, COTI_PERIODIQUE, LIBEVILL, DATESOUS.", "info")
-    else:
-        t1, t2, t3, t4 = st.tabs([
-            "📋 Fiche apporteur",
-            "🏆 Classement & scoring",
-            "🗺️ Géographie (LIBEVILL)",
-            "📥 Import / Export portefeuille",
-        ])
+        if "Date Survenance" in _df_sf.columns:
+            _df_sf_t = _df_sf.copy()
+            _d_s = pd.to_datetime(_df_sf_t["Date Survenance"], dayfirst=True, errors="coerce")
+            _df_sf_t["_ANNEE_SIN"] = _d_s.dt.year
+            _df_sf_t["_MOIS_SIN"]  = _d_s.dt.to_period("M").astype(str)
 
-        # ─────────── Pré-agrégat global apporteurs (depuis le portefeuille) ───
-        df_a = pf_ext.copy()
-        df_a["NOM_APP"]  = df_a["NOM_APP"].astype(str).str.strip()
-        df_a["CODEAPPO"] = df_a["CODEAPPO"].astype(str).str.strip()
-        df_a = df_a[(df_a["NOM_APP"]!="") & (df_a["CODEAPPO"]!="")]
-        if "DATESOUS" in df_a.columns:
-            df_a["ANNEE"] = pd.to_datetime(df_a["DATESOUS"], errors="coerce").dt.year
+            _tev1, _tev2 = st.columns(2)
+            with _tev1:
+                _ev_ann = _df_sf_t.groupby("_ANNEE_SIN").agg(
+                    nb=("_ANNEE_SIN","count"),
+                    regl=("REGL_PRINC","sum") if "REGL_PRINC" in _df_sf_t.columns else ("_ANNEE_SIN","count")
+                ).reset_index().sort_values("_ANNEE_SIN")
+                fig_ev_a = make_subplots(specs=[[{"secondary_y":True}]])
+                fig_ev_a.add_trace(go.Bar(x=_ev_ann["_ANNEE_SIN"].astype(str),
+                    y=_ev_ann["regl"], name="💰 Réglements", marker_color="#FF6B6B", opacity=0.85),
+                    secondary_y=False)
+                fig_ev_a.add_trace(go.Scatter(x=_ev_ann["_ANNEE_SIN"].astype(str),
+                    y=_ev_ann["nb"], name="📂 Dossiers",
+                    line=dict(color=NAVY,width=2.5), mode="lines+markers"), secondary_y=True)
+                fig_ev_a.update_yaxes(title_text="Montant réglé (FCFA)", secondary_y=False)
+                fig_ev_a.update_yaxes(title_text="Nb dossiers", secondary_y=True, showgrid=False)
+                chl(fig_ev_a, 420, "📅 Sinistres par année — Volume & Montants")
+                st.plotly_chart(fig_ev_a, use_container_width=True)
 
-        agg_global = df_a.groupby(["NOM_APP","CODEAPPO"]).agg(
-            polices=("NUMEPOLI_P","count") if "NUMEPOLI_P" in df_a.columns else ("NOM_APP","count"),
-            ca=("MONTENCA","sum") if "MONTENCA" in df_a.columns else ("NOM_APP","count"),
-            cotis=("COTI_PERIODIQUE","sum") if "COTI_PERIODIQUE" in df_a.columns else ("NOM_APP","count"),
-            actifs=("ETAT_POLICE", lambda x:(x=="ACTIF").sum()) if "ETAT_POLICE" in df_a.columns else ("NOM_APP","count"),
-            clients=("NOM_ASSU","nunique") if "NOM_ASSU" in df_a.columns else ("NOM_APP","count"),
-            villes=("LIBEVILL","nunique") if "LIBEVILL" in df_a.columns else ("NOM_APP","count"),
-            produits=("LIBECATE","nunique") if "LIBECATE" in df_a.columns else ("NOM_APP","count"),
-        ).reset_index()
-        agg_global["tx_actif"] = (agg_global["actifs"]/agg_global["polices"].clip(1)*100).round(1)
-        agg_global["score"] = (
-            (agg_global["ca"].clip(lower=0)/max(agg_global["ca"].max(),1)*50) +
-            (agg_global["polices"]/max(agg_global["polices"].max(),1)*30) +
-            (agg_global["tx_actif"]/100*20)
-        ).round(1)
-        agg_global = agg_global.sort_values("ca", ascending=False).reset_index(drop=True)
+            with _tev2:
+                _ev_mois = _df_sf_t.groupby("_MOIS_SIN").agg(
+                    nb=("_MOIS_SIN","count"),
+                    regl=("REGL_PRINC","sum") if "REGL_PRINC" in _df_sf_t.columns else ("_MOIS_SIN","count")
+                ).reset_index().sort_values("_MOIS_SIN")
+                fig_ev_m = go.Figure()
+                fig_ev_m.add_trace(go.Bar(x=_ev_mois["_MOIS_SIN"], y=_ev_mois["regl"],
+                    name="💰 Réglements", marker_color="#FF9F43", opacity=0.85))
+                fig_ev_m.add_trace(go.Scatter(x=_ev_mois["_MOIS_SIN"], y=_ev_mois["nb"],
+                    name="📂 Dossiers", line=dict(color="#8B0000",width=2), mode="lines+markers",
+                    yaxis="y2"))
+                fig_ev_m.update_layout(
+                    yaxis=dict(title="Montant réglé"),
+                    yaxis2=dict(title="Dossiers", overlaying="y", side="right", showgrid=False),
+                    hovermode="x unified")
+                chl(fig_ev_m, 420, "📅 Évolution mensuelle")
+                st.plotly_chart(fig_ev_m, use_container_width=True)
 
-        # ─────────── T1 : Fiche apporteur ─────────────────────────────────────
-        with t1:
-            sth("📋 Fiche détaillée — Apporteur AFG", "DONNÉES PORTEFEUILLE EXCEL")
-            f1, f2 = st.columns([2,1])
-            with f1:
-                opts = (agg_global["NOM_APP"] + "  [" + agg_global["CODEAPPO"] + "]").tolist()
-                sel = st.selectbox(f"👤 Sélectionnez un apporteur ({len(opts)} disponibles)",
-                                   opts, key="comm_fiche_sel")
-            with f2:
-                yr_fiche = year_selector("yr_fiche_comm", "📅 Période")
+            # Saisonnalité (mois)
+            _df_sf_t["_MOIS_NUM"] = _d_s.dt.month
+            _saison = _df_sf_t.groupby("_MOIS_NUM").agg(
+                nb=("_MOIS_NUM","count"),
+                regl=("REGL_PRINC","sum") if "REGL_PRINC" in _df_sf_t.columns else ("_MOIS_NUM","count")
+            ).reset_index()
+            _mois_noms = {1:"Jan",2:"Fév",3:"Mar",4:"Avr",5:"Mai",6:"Juin",
+                          7:"Juil",8:"Aoû",9:"Sep",10:"Oct",11:"Nov",12:"Déc"}
+            _saison["_NOM"] = _saison["_MOIS_NUM"].map(_mois_noms)
+            fig_sais = go.Figure(go.Bar(
+                x=_saison["_NOM"], y=_saison["nb"],
+                marker=dict(color=_saison["nb"],
+                    colorscale=[[0,"#FFE4E1"],[0.5,"#FF6B6B"],[1,"#8B0000"]],showscale=False),
+                text=_saison["nb"].astype(str), textposition="outside"))
+            chl(fig_sais, 380, "🌡️ Saisonnalité — Dossiers par mois (tous exercices)")
+            st.plotly_chart(fig_sais, use_container_width=True)
 
-            row_a = agg_global.iloc[opts.index(sel)]
-            sub = df_a[(df_a["NOM_APP"]==row_a["NOM_APP"]) & (df_a["CODEAPPO"]==row_a["CODEAPPO"])].copy()
-            if "DATESOUS" in sub.columns:
-                sub = filter_pf_by_year(sub, yr_fiche)
+    # ── Tab 3 : Analyse délais ─────────────────────────────────────────────────
+    with _ts3:
+        sth("🔬 Analyse des délais de traitement", "CONFORMITÉ CIMA & PERFORMANCE")
 
-            # KPIs apporteur
-            k1,k2,k3,k4,k5 = st.columns(5)
-            with k1:
-                st.markdown(f"""<div class="kpi-card" style="text-align:center;padding:1rem">
-                  <div style="font-size:2rem">👤</div>
-                  <div style="font-size:13px;font-weight:900;color:{NAVY};line-height:1.2">{row_a['NOM_APP']}</div>
-                  <div style="font-size:11px;color:{DGRAY};margin-top:4px">Code : <b>{row_a['CODEAPPO']}</b></div>
-                </div>""", unsafe_allow_html=True)
-            with k2: kpi("📋 Polices", f"{int(sub.shape[0]):,}", "sur la période", "", "")
-            with k3:
-                ca_p = sub["MONTENCA"].sum() if "MONTENCA" in sub.columns else 0
-                kpi("💰 Encaissements", fmt(ca_p), "MONTENCA", "gold", "")
-            with k4:
-                act = (sub["ETAT_POLICE"]=="ACTIF").sum() if "ETAT_POLICE" in sub.columns else 0
-                kpi("✅ Actives", f"{int(act):,}", f"{(act/max(sub.shape[0],1)*100):.1f}%", "green", "")
-            with k5:
-                cl = sub["NOM_ASSU"].nunique() if "NOM_ASSU" in sub.columns else 0
-                kpi("👥 Clients uniques", f"{int(cl):,}", "portefeuille", "teal", "")
+        _has_dates = all(c in _df_sf.columns for c in ["Date Survenance","Date Déclaration"])
+        if _has_dates:
+            _df_del = _df_sf.copy()
+            _d_surv3 = pd.to_datetime(_df_del["Date Survenance"], dayfirst=True, errors="coerce")
+            _d_decl3 = pd.to_datetime(_df_del["Date Déclaration"], dayfirst=True, errors="coerce")
+            _df_del["_delay_decl"] = (_d_decl3 - _d_surv3).dt.days
+            _df_del = _df_del[(_df_del["_delay_decl"] >= 0) & (_df_del["_delay_decl"] <= 3650)]
 
-            st.markdown("---")
+            if "Date validation" in _df_del.columns:
+                _d_val3 = pd.to_datetime(_df_del["Date validation"], dayfirst=True, errors="coerce")
+                _df_del["_delay_regl"] = (_d_val3 - _d_surv3).dt.days
+                _df_del["_delay_regl"] = _df_del["_delay_regl"].clip(lower=0)
 
-            # Évolution annuelle
-            cE1, cE2 = st.columns(2)
-            with cE1:
-                if "ANNEE" in sub.columns and "MONTENCA" in sub.columns:
-                    evo = sub.dropna(subset=["ANNEE"]).groupby("ANNEE").agg(
-                        nb=("NUMEPOLI_P","count"), ca=("MONTENCA","sum")).reset_index()
-                    evo = evo[evo["ANNEE"].between(1996,2026)]
-                    if not evo.empty:
-                        fig = make_subplots(specs=[[{"secondary_y":True}]])
-                        fig.add_bar(x=evo["ANNEE"], y=evo["nb"], name="📋 Polices",
-                                    marker_color=BLUEL, opacity=0.75)
-                        fig.add_scatter(x=evo["ANNEE"], y=evo["ca"], name="💰 CA",
-                                        line=dict(color=GOLD,width=3), mode="lines+markers")
-                        chl(fig, 320, f"📅 Activité annuelle — {row_a['NOM_APP']}")
-                        st.plotly_chart(fig, use_container_width=True)
-            with cE2:
-                if "LIBECATE" in sub.columns:
-                    cat = sub["LIBECATE"].value_counts().head(10).reset_index()
-                    cat.columns = ["Produit","Polices"]
-                    if not cat.empty:
-                        fig = px.bar(cat.sort_values("Polices"), x="Polices", y="Produit",
-                                     orientation="h", color="Polices",
-                                     color_continuous_scale=[[0,BLUEL],[1,GOLD]])
-                        chl(fig, 320, "🛒 Top produits vendus par l'apporteur")
-                        st.plotly_chart(fig, use_container_width=True)
+            _td1, _td2 = st.columns(2)
+            with _td1:
+                fig_del_d = go.Figure(go.Histogram(
+                    x=_df_del["_delay_decl"].dropna(),
+                    nbinsx=30, marker_color="#FF9F43", opacity=0.85))
+                fig_del_d.add_vline(x=_df_del["_delay_decl"].mean(),
+                    line_dash="dash", line_color=NAVY, line_width=2,
+                    annotation_text=f"Moy. {_df_del['_delay_decl'].mean():.0f}j",
+                    annotation_font_size=10)
+                fig_del_d.add_vline(x=30, line_dash="dot", line_color=RED, line_width=1.5,
+                    annotation_text="Norme CIMA 30j", annotation_font_size=9,
+                    annotation_font_color=RED)
+                chl(fig_del_d, 400, "📋 Distribution délai survenance → déclaration (jours)")
+                st.plotly_chart(fig_del_d, use_container_width=True)
+            with _td2:
+                if "_delay_regl" in _df_del.columns:
+                    _dr_clean = _df_del["_delay_regl"].dropna()
+                    fig_del_r = go.Figure(go.Histogram(
+                        x=_dr_clean, nbinsx=30, marker_color="#8B0000", opacity=0.85))
+                    fig_del_r.add_vline(x=_dr_clean.mean(),
+                        line_dash="dash", line_color=GOLD, line_width=2,
+                        annotation_text=f"Moy. {_dr_clean.mean():.0f}j",
+                        annotation_font_size=10)
+                    fig_del_r.add_vline(x=30, line_dash="dot", line_color=RED, line_width=1.5,
+                        annotation_text="Norme CIMA 30j", annotation_font_size=9)
+                    chl(fig_del_r, 400, "⏱️ Distribution délai survenance → règlement (jours)")
+                    st.plotly_chart(fig_del_r, use_container_width=True)
 
-            # Top villes de l'apporteur (LIBEVILL)
-            if "LIBEVILL" in sub.columns:
-                sth("🗺️ Villes d'intervention (LIBEVILL)", "GÉOGRAPHIE COMMERCIALE")
-                vl = sub["LIBEVILL"].value_counts().head(15).reset_index()
-                vl.columns = ["Ville","Polices"]
-                if not vl.empty:
-                    fig = px.bar(vl.sort_values("Polices"), x="Polices", y="Ville",
-                                 orientation="h", color="Polices",
-                                 color_continuous_scale=[[0,"#0d7a5f"],[1,GOLD]])
-                    chl(fig, 360, f"🏙️ Villes desservies — {row_a['NOM_APP']}")
-                    st.plotly_chart(fig, use_container_width=True)
+            # Catégories de délai
+            if "_delay_regl" in _df_del.columns:
+                _df_del["_cat_del"] = pd.cut(_df_del["_delay_regl"],
+                    bins=[0,30,60,90,180,float("inf")],
+                    labels=["≤30j (CIMA✅)","31-60j","61-90j","91-180j",">180j"])
+                _cat_del = _df_del["_cat_del"].value_counts().sort_index().reset_index()
+                _cat_del.columns = ["Catégorie","Nb"]
+                _colors_del = [GREEN, AMBER, "#FF9F43", RED, "#8B0000"]
+                fig_cat_del = go.Figure(go.Bar(
+                    x=_cat_del["Catégorie"].astype(str),
+                    y=_cat_del["Nb"],
+                    marker_color=_colors_del[:len(_cat_del)],
+                    text=_cat_del["Nb"].astype(str), textposition="outside"))
+                chl(fig_cat_del, 380, "🏛️ Répartition délais de règlement — Conformité CIMA")
+                st.plotly_chart(fig_cat_del, use_container_width=True)
+        else:
+            alert("Les colonnes Date Survenance et/ou Date Déclaration sont nécessaires pour l'analyse des délais.", "info")
 
-            # Détail des polices
-            sth("📜 Détail des polices de cet apporteur", f"{sub.shape[0]} contrats")
-            cols_show = [c for c in ["NUMEPOLI_P","NOM_ASSU","LIBECATE","ETAT_POLICE",
-                                     "MONTENCA","COTI_PERIODIQUE","LIBEVILL","DATESOUS"] if c in sub.columns]
-            sub_disp = sub[cols_show].copy()
-            if "DATESOUS" in sub_disp.columns:
-                sub_disp["DATESOUS"] = pd.to_datetime(sub_disp["DATESOUS"], errors="coerce").dt.strftime("%d/%m/%Y")
-            for c in ["MONTENCA","COTI_PERIODIQUE"]:
-                if c in sub_disp.columns: sub_disp[c] = sub_disp[c].apply(fmt)
-            st.dataframe(sub_disp.rename(columns={
-                "NUMEPOLI_P":"N° Police","NOM_ASSU":"Assuré","LIBECATE":"Catégorie",
-                "ETAT_POLICE":"État","MONTENCA":"Encaissement","COTI_PERIODIQUE":"Cotisation",
-                "LIBEVILL":"Ville","DATESOUS":"Date souscript."}),
-                use_container_width=True, hide_index=True, height=400)
+    # ── Tab 4 : Dossiers en instance ──────────────────────────────────────────
+    with _ts4:
+        sth("🗂️ Dossiers ouverts en instance", "SUIVI SAP & VIEILLISSEMENT")
 
-        # ─────────── T2 : Classement complet & scoring ────────────────────────
-        with t2:
-            sth("🏆 Scoring de tous les apporteurs", "PORTEFEUILLE OFFICIEL")
-            ag = agg_global.copy()
-            ag.insert(0,"Rang", range(1, len(ag)+1))
-            ag["CA"] = ag["ca"].apply(fmt)
-            ag["Cotisations"] = ag["cotis"].apply(fmt)
-            ag["%Actifs"] = ag["tx_actif"].apply(lambda x:f"{x:.1f}%")
-            ag["Score"] = ag["score"].apply(lambda x:f"{x:.0f}/100")
-            cols = ["Rang","NOM_APP","CODEAPPO","polices","actifs","clients","villes","produits","CA","Cotisations","%Actifs","Score"]
-            st.dataframe(ag[cols].rename(columns={
-                "NOM_APP":"Nom Apporteur","CODEAPPO":"Code","polices":"Polices",
-                "actifs":"Actives","clients":"Clients","villes":"Villes","produits":"Produits"}),
-                use_container_width=True, hide_index=True, height=560)
+        if _has_stat:
+            _df_ouv = _df_sf[_df_sf["Statut"] == "OUVERT"].copy()
+            if not _df_ouv.empty:
+                if "Date Déclaration" in _df_ouv.columns:
+                    _d_decl_ouv = pd.to_datetime(_df_ouv["Date Déclaration"], dayfirst=True, errors="coerce")
+                    _df_ouv["_age"] = (pd.Timestamp.today() - _d_decl_ouv).dt.days.clip(lower=0)
+                    _df_ouv["_urgence"] = pd.cut(_df_ouv["_age"],
+                        bins=[0,30,60,90,float("inf")],
+                        labels=["Récent (<30j)","Modéré (30-60j)","Urgent (60-90j)","Critique (>90j)"])
 
-            buf_c = io.BytesIO()
-            with pd.ExcelWriter(buf_c, engine="openpyxl") as wr:
-                ag[cols].to_excel(wr, index=False, sheet_name="Commerciaux_AFG")
-            st.download_button("⬇️ Exporter le scoring commerciaux (Excel)",
-                data=buf_c.getvalue(),
-                file_name=f"AFG_Commerciaux_Scoring_{date.today().isoformat()}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True)
+                    _urg = _df_ouv["_urgence"].value_counts().sort_index().reset_index()
+                    _urg.columns = ["Catégorie","Nb"]
+                    _urg_c = [GREEN, AMBER, "#FF9F43", RED]
+                    fig_urg = go.Figure(go.Bar(
+                        x=_urg["Catégorie"].astype(str), y=_urg["Nb"],
+                        marker_color=_urg_c[:len(_urg)],
+                        text=_urg["Nb"].astype(str), textposition="outside"))
+                    chl(fig_urg, 380, "⚠️ Vieillissement dossiers ouverts")
+                    st.plotly_chart(fig_urg, use_container_width=True)
 
-        # ─────────── T3 : Géographie commerciaux par LIBEVILL ─────────────────
-        with t3:
-            sth("🗺️ Répartition géographique des commerciaux (LIBEVILL)", "RÉSEAU AFG")
-            if "LIBEVILL" not in df_a.columns:
-                alert("Colonne LIBEVILL absente du portefeuille.","warn")
+                # Tableau dossiers en instance critiques
+                _cols_ouv = [c for c in ["No Sinistre","Nature Sinistre","Date Survenance",
+                    "Date Déclaration","REGL_PRINC","_age","_urgence"] if c in _df_ouv.columns]
+                _disp_ouv = _df_ouv.sort_values("_age", ascending=False).head(200)[_cols_ouv].copy() if "_age" in _df_ouv.columns else _df_ouv.head(200)[_cols_ouv].copy()
+                if "REGL_PRINC" in _disp_ouv.columns: _disp_ouv["REGL_PRINC"] = _disp_ouv["REGL_PRINC"].apply(fmt)
+                st.dataframe(_disp_ouv, use_container_width=True, hide_index=True, height=450)
             else:
-                geo = df_a.groupby("LIBEVILL").agg(
-                    nb_comm=("NOM_APP","nunique"),
-                    polices=("NUMEPOLI_P","count") if "NUMEPOLI_P" in df_a.columns else ("LIBEVILL","count"),
-                    ca=("MONTENCA","sum") if "MONTENCA" in df_a.columns else ("LIBEVILL","count"),
-                ).reset_index().sort_values("nb_comm", ascending=False)
-                geo = geo[geo["LIBEVILL"].astype(str).str.strip()!=""]
+                alert("Aucun dossier ouvert pour cette période.", "good")
+        else:
+            alert("Colonne 'Statut' nécessaire pour le suivi des dossiers en instance.", "info")
 
-                cG1, cG2 = st.columns(2)
-                with cG1:
-                    top_v = geo.head(15).sort_values("nb_comm")
-                    fig = px.bar(top_v, x="nb_comm", y="LIBEVILL", orientation="h",
-                                 color="nb_comm", color_continuous_scale=[[0,BLUEL],[1,GOLD]],
-                                 labels={"nb_comm":"Nb commerciaux","LIBEVILL":"Ville"})
-                    chl(fig, 460, "🏙️ Top 15 villes par nombre de commerciaux (NOM_APP)")
-                    st.plotly_chart(fig, use_container_width=True)
-                with cG2:
-                    geo_disp = geo.copy()
-                    geo_disp["CA"] = geo_disp["ca"].apply(fmt)
-                    st.dataframe(geo_disp[["LIBEVILL","nb_comm","polices","CA"]].rename(
-                        columns={"LIBEVILL":"Ville","nb_comm":"Commerciaux","polices":"Polices"}),
-                        use_container_width=True, hide_index=True, height=460)
+    # ── Tab 5 : Tableau complet & Export ──────────────────────────────────────
+    with _ts5:
+        sth(f"📋 Tableau complet — {_nb_sin:,} dossiers · {_lbl_sin}", "EXPORT EXCEL")
 
-                st.markdown("---")
-                sth("👥 Commerciaux d'une ville sélectionnée")
-                ville_pick = st.selectbox("🏙️ Ville",
-                    sorted(geo["LIBEVILL"].astype(str).unique().tolist()),
-                    key="comm_ville_pick")
-                sub_v = df_a[df_a["LIBEVILL"]==ville_pick]
-                comm_v = sub_v.groupby(["NOM_APP","CODEAPPO"]).agg(
-                    polices=("NUMEPOLI_P","count") if "NUMEPOLI_P" in sub_v.columns else ("NOM_APP","count"),
-                    ca=("MONTENCA","sum") if "MONTENCA" in sub_v.columns else ("NOM_APP","count"),
-                ).reset_index().sort_values("ca", ascending=False)
-                comm_v.insert(0,"Rang", range(1, len(comm_v)+1))
-                comm_v["CA"] = comm_v["ca"].apply(fmt)
-                st.dataframe(comm_v[["Rang","NOM_APP","CODEAPPO","polices","CA"]].rename(
-                    columns={"NOM_APP":"Nom Apporteur","CODEAPPO":"Code","polices":"Polices"}),
-                    use_container_width=True, hide_index=True, height=380)
-                st.caption(f"{len(comm_v)} commerciaux référencés à {ville_pick}.")
+        _cols_exp_s = [c for c in ["No Sinistre","Nature Sinistre","NAT_NORM","Statut",
+            "Date Survenance","Date Déclaration","Date validation","REGL_PRINC","POLICE_KEY"] if c in _df_sf.columns]
+        _disp_full = _df_sf[_cols_exp_s].copy()
+        if "REGL_PRINC" in _disp_full.columns: _disp_full["REGL_PRINC"] = _disp_full["REGL_PRINC"].apply(fmt)
+        st.dataframe(_disp_full, use_container_width=True, hide_index=True, height=500)
 
-        # ─────────── T4 : Import / Export portefeuille ────────────────────────
-        with t4:
-            sth("📥 Import du portefeuille AFG (NOM_APP / CODEAPPO)", "FORMAT OFFICIEL")
-            alert("""<b>Format attendu (Excel)</b> — feuille <b>Sheet 1</b> avec a minima les colonnes :
-            <b>NOM_APP</b> (nom + prénom apporteur), <b>CODEAPPO</b> (code apporteur),
-            <b>NUMEPOLI_P</b>, <b>NOM_ASSU</b>, <b>ETAT_POLICE</b>, <b>LIBECATE</b>,
-            <b>MONTENCA</b>, <b>COTI_PERIODIQUE</b>, <b>LIBEVILL</b>, <b>DATESOUS</b>.<br>
-            Le fichier remplace intégralement le portefeuille en mémoire.""","info")
+        # Synthèse actuarielle exportable
+        _synth_sin = {
+            "Indicateur": ["Nb dossiers","Total réglé (FCFA)","SAP (FCFA)","Coût moyen (FCFA)",
+                           "Gravité moyenne (FCFA)","Taux clôture","Taux rejet","Ratio S/P",
+                           "Burning Cost (/1000 polices)","Fréquence sinistres","IBNR estimé","Charge ultime"],
+            "Valeur": [f"{_nb_sin:,}", fmt(_regl_tot), fmt(_sap), fmt(_cout_moy),
+                       fmt(_gravite), f"{_tx_clos:.1f}%", f"{_tx_rej:.1f}%",
+                       f"{_sp_ratio:.1f}%" if _sp_ratio is not None else "—",
+                       fmt(_burning_cost) if _burning_cost is not None else "—",
+                       f"{_freq_sin:.2f}%" if _freq_sin is not None else "—",
+                       fmt(_sap * 0.07), fmt(_regl_tot + _sap * 1.07)],
+            "Période": [_lbl_sin] * 12
+        }
+        _df_synth_sin = pd.DataFrame(_synth_sin)
+        _buf_sin_exp = io.BytesIO()
+        with pd.ExcelWriter(_buf_sin_exp, engine="openpyxl") as _wx_sin_exp:
+            _df_sf[_cols_exp_s].to_excel(_wx_sin_exp, index=False, sheet_name="Dossiers")
+            _df_synth_sin.to_excel(_wx_sin_exp, index=False, sheet_name="Synthèse Actuarielle")
+        st.download_button(
+            f"⬇️ Exporter Sinistres + Synthèse Actuarielle · {_lbl_sin}",
+            data=_buf_sin_exp.getvalue(),
+            file_name=f"AFG_Sinistres_{_lbl_sin.replace(' ','_')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True)
 
-            up = st.file_uploader("📂 Importer le portefeuille (.xlsx)", type=["xlsx","xls"], key="comm_imp_pf")
-            if up is not None:
-                try:
-                    try:    df_new = pd.read_excel(up, sheet_name="Sheet 1")
-                    except: df_new = pd.read_excel(up)
-                    req = ["NOM_APP","CODEAPPO"]
-                    missing = [c for c in req if c not in df_new.columns]
-                    if missing:
-                        alert(f"❌ Colonnes manquantes : {', '.join(missing)}","danger")
-                    else:
-                        st.session_state["portefeuille_ext"] = df_new
-                        st.cache_data.clear()
-                        alert(f"✅ Portefeuille importé : <b>{len(df_new):,}</b> polices, "
-                              f"<b>{df_new['NOM_APP'].nunique()}</b> commerciaux uniques.","good")
-                        st.dataframe(df_new.head(10), use_container_width=True, hide_index=True)
-                except Exception as e:
-                    alert(f"Erreur lecture fichier : {e}","danger")
-
-            st.markdown("---")
-            sth("📤 Export du référentiel commerciaux (depuis le portefeuille)")
-            buf_x = io.BytesIO()
-            with pd.ExcelWriter(buf_x, engine="openpyxl") as wr:
-                agg_global.to_excel(wr, index=False, sheet_name="Commerciaux")
-            st.download_button("⬇️ Télécharger référentiel apporteurs (Excel)",
-                data=buf_x.getvalue(),
-                file_name=f"AFG_Apporteurs_{date.today().isoformat()}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# PAGE — CLIENTS (avec filtre multi-années + toutes informations)
-# ═══════════════════════════════════════════════════════════════════════════════
-elif "Clients" in nav:
-    yr_cli = year_selector("yr_clients", "📅 Filtrer les clients par année de souscription (DATESOUS)")
-    pf_ext_cli = st.session_state.get("portefeuille_ext", None)
-
-    # ── Si portefeuille Excel disponible : KPIs clients filtrés par DATESOUS
-    if pf_ext_cli is not None and "NOM_ASSU" in pf_ext_cli.columns:
-        df_cli = filter_pf_by_year(pf_ext_cli.copy(), yr_cli)
-        st.caption(f"📌 Source : portefeuille Excel · Période : **{yr_label(yr_cli)}** · {len(df_cli):,} polices")
-        if df_cli.empty:
-            alert(f"Aucun client pour {yr_label(yr_cli)}.","warn"); st.stop()
-
-        agg_cli = df_cli.groupby("NOM_ASSU").agg(
-            nb_ct=("NUMEPOLI_P","count") if "NUMEPOLI_P" in df_cli.columns else ("NOM_ASSU","count"),
-            ca=("MONTENCA","sum") if "MONTENCA" in df_cli.columns else ("NOM_ASSU","count"),
-        ).reset_index()
-        agg_cli = agg_cli[agg_cli["NOM_ASSU"].astype(str).str.strip()!=""]
-
-        nb_clients = len(agg_cli)
-        nb_assures = int((agg_cli["nb_ct"]>0).sum())
-        ca_tot_cli = float(agg_cli["ca"].sum())
-        ca_moy_cli = ca_tot_cli/max(nb_clients,1)
-        ct_moy = agg_cli["nb_ct"].mean() if nb_clients else 0
-
-        c1,c2,c3,c4=st.columns(4)
-        with c1: kpi("👥 Clients distincts",f"{nb_clients:,}",f"période {yr_label(yr_cli)}","gold","")
-        with c2: kpi("📋 Polices souscrites",f"{int(agg_cli['nb_ct'].sum()):,}",f"{ct_moy:.1f} / client","","")
-        with c3: kpi("💰 CA cumulé",fmt(ca_tot_cli),"encaissements","teal","")
-        with c4: kpi("💎 CA moyen / client",fmt(ca_moy_cli),"ARPU","gold","")
-
-        # Graphiques
-        c1,c2,c3=st.columns(3)
-        with c1:
-            if "SEXE_ASSU" in df_cli.columns:
-                gn = df_cli["SEXE_ASSU"].astype(str).str.upper().value_counts()
-                h = int(gn.get("M",0)+gn.get("MASCULIN",0))
-                f = int(gn.get("F",0)+gn.get("FEMININ",0)+gn.get("FÉMININ",0))
-                fig=px.pie(values=[h,f],names=["Hommes","Femmes"],hole=0.4,
-                    color_discrete_sequence=[BLUEL,GOLD])
-                chl(fig,290,f"👥 Genre — {yr_label(yr_cli)}"); st.plotly_chart(fig,use_container_width=True)
-        with c2:
-            if "LIBEVILL" in df_cli.columns:
-                bv = df_cli["LIBEVILL"].dropna().astype(str).value_counts().head(10).sort_values()
-                fig=go.Figure(go.Bar(x=bv.values,y=bv.index,orientation='h',
-                    marker_color=BLUEL,text=bv.values))
-                fig.update_traces(textposition='outside')
-                chl(fig,290,f"📍 Top 10 villes — {yr_label(yr_cli)}"); st.plotly_chart(fig,use_container_width=True)
-        with c3:
-            if "LIBECATE" in df_cli.columns:
-                bp = df_cli["LIBECATE"].dropna().astype(str).value_counts().head(8).sort_values()
-                fig=go.Figure(go.Bar(x=bp.values,y=bp.index,orientation='h',
-                    marker_color=GOLD,text=bp.values))
-                fig.update_traces(textposition='outside')
-                chl(fig,290,f"🛒 Produits — {yr_label(yr_cli)}"); st.plotly_chart(fig,use_container_width=True)
-
-        sth(f"🏆 Top 50 clients par CA — {yr_label(yr_cli)}")
-        top_cli = agg_cli.sort_values("ca",ascending=False).head(50).reset_index(drop=True)
-        top_cli.insert(0,"Rang",range(1,len(top_cli)+1))
-        top_cli["NOM_ASSU"] = top_cli["NOM_ASSU"].astype(str).str.title()
-        top_cli["CA"] = top_cli["ca"].apply(fmt)
-        st.dataframe(top_cli[["Rang","NOM_ASSU","nb_ct","CA"]].rename(
-            columns={"NOM_ASSU":"Client","nb_ct":"Polices"}),
-            use_container_width=True,hide_index=True,height=420)
-        st.stop()
-
-    # ── Fallback : BD interne (clients créés par BIA)
-    dc=q("SELECT cl.*,COUNT(ct.id) as nb_ct,COALESCE(SUM(ct.prime_annuelle+ct.prime_unique),0) as ca FROM clients cl LEFT JOIN contrats ct ON ct.client_id=cl.id GROUP BY cl.id ORDER BY ca DESC")
-    if dc.empty:
-        alert("Aucun client en base. Importez le portefeuille Excel depuis la page Accueil pour activer la vue clients filtrée par année.","info")
-        st.stop()
-    dc['date_naissance']=pd.to_datetime(dc['date_naissance'],errors='coerce')
-    dc['age']=dc['date_naissance'].apply(
-        lambda d: int((datetime.now()-d).days/365) if pd.notna(d) else 0)
-    st.caption(f"📌 Source : BD interne (le filtre par année s'active avec un portefeuille Excel importé)")
-    c1,c2,c3,c4=st.columns(4)
-    with c1: kpi("👥 Total clients",f"{len(dc):,}","","","")
-    with c2: kpi("✅ Clients assurés",str(int((dc['nb_ct']>0).sum())),"avec contrat","green","")
-    with c3: kpi("🎂 Âge moyen",f"{dc['age'][dc['age']>0].mean():.0f} ans" if (dc['age']>0).any() else "—","","","")
-    with c4: kpi("💵 Revenu moy.",fmt(dc['revenu_mensuel'].mean()) if 'revenu_mensuel' in dc.columns else "—","mensuel","teal","")
-    c1,c2,c3=st.columns(3)
-    with c1:
-        dc_age=dc[dc['age']>0]
-        if not dc_age.empty:
-            fig=px.histogram(dc_age,x='age',nbins=20,color_discrete_sequence=[NAVY])
-            chl(fig,270,"🎂 Distribution des âges des assurés"); st.plotly_chart(fig,use_container_width=True)
-    with c2:
-        if 'ville' in dc.columns:
-            bv=dc.groupby('ville')['id'].count().sort_values(ascending=True)
-            fig=go.Figure(go.Bar(x=bv.values,y=bv.index,orientation='h',marker_color=BLUEL,text=bv.values))
-            fig.update_traces(textposition='outside')
-            chl(fig,270,"📍 Clients par ville"); st.plotly_chart(fig,use_container_width=True)
-    with c3:
-        if 'profession' in dc.columns:
-            bp=dc.groupby('profession')['id'].count().sort_values(ascending=True).tail(8)
-            fig=go.Figure(go.Bar(x=bp.values,y=bp.index,orientation='h',marker_color=GOLD,text=bp.values))
-            fig.update_traces(textposition='outside')
-            chl(fig,270,"💼 Clients par profession"); st.plotly_chart(fig,use_container_width=True)
-    sth("📋 Portefeuille clients")
-    safe_cols=[c for c in ['code_client','nom','prenom','age','ville','profession','sexe','nb_ct','ca'] if c in dc.columns]
-    disp=dc[safe_cols].head(200).copy()
-    if 'ca' in disp.columns: disp['ca']=disp['ca'].apply(fmt)
-    st.dataframe(disp,use_container_width=True,height=400,hide_index=True)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# PAGE — SINISTRES
-# ═══════════════════════════════════════════════════════════════════════════════
-elif "Sinistres" in nav:
-    yr_sin = year_selector("yr_sin", "📅 Filtrer les sinistres par année (date_sinistre)")
-    try:
-        ds=q("SELECT s.*,ct.numero_contrat,ct.capital_assure,cl.nom||' '||cl.prenom as client,p.nom as produit,p.groupe FROM sinistres s JOIN contrats ct ON s.contrat_id=ct.id JOIN clients cl ON ct.client_id=cl.id JOIN produits p ON ct.produit_id=p.id ORDER BY s.date_sinistre DESC")
-    except Exception:
-        ds=pd.DataFrame()
-    if not ds.empty:
-        ds = filter_by_year(ds, yr_sin, date_col="date_sinistre")
-    st.caption(f"📌 Période : **{yr_label(yr_sin)}**")
-    if ds.empty:
-        alert("Aucun sinistre enregistré en base de données.","info")
-        sth("Ajouter un sinistre manuellement","SAISIE")
-        with st.form("add_sinistre"):
-            sc1,sc2,sc3=st.columns(3)
-            with sc1: sin_ct=st.text_input("N° Contrat")
-            with sc2: sin_type=st.selectbox("Type",["Décès","Invalidité","Maladie","Accident","Autre"])
-            with sc3: sin_date=st.date_input("Date sinistre",today)
-            sc4,sc5=st.columns(2)
-            with sc4: sin_rec=st.number_input("Montant réclamé",min_value=0,step=10000)
-            with sc5: sin_st=st.selectbox("Statut",["en_cours","réglé","rejeté"])
-            if st.form_submit_button("✅ Enregistrer le sinistre"):
-                alert("Pour enregistrer un sinistre, le contrat doit d'abord exister en base.","warn")
-        st.stop()
-    ec=ds[ds['statut']=='en_cours']
-    c1,c2,c3,c4,c5=st.columns(5)
-    with c1: kpi("⚠️ Total",str(len(ds)),"sinistres","","")
-    with c2: kpi("🔄 En cours",str(len(ec)),"à instruire","red" if len(ec)>5 else "","")
-    with c3: kpi("✅ Réglés",str(len(ds[ds['statut']=='réglé'])),"clos","green","")
-    with c4: kpi("💳 Réclamé",fmt(ds['montant_reclame'].sum()),"total","gold","")
-    with c5:
-        tr=ds['montant_regle'].sum()/max(ds['montant_reclame'].sum(),1)*100
-        kpi("📊 Taux règl.",f"{tr:.1f}%","","teal","")
-    c1,c2=st.columns(2)
-    with c1:
-        bt=ds.groupby('type_sinistre')['id'].count().reset_index()
-        fig=px.pie(bt,values='id',names='type_sinistre',hole=0.38,
-            color_discrete_sequence=[NAVY,RED,AMBER,TEAL,GREEN,GOLD])
-        chl(fig,300,"Types de sinistres déclarés"); st.plotly_chart(fig,use_container_width=True)
-    with c2:
-        bs=ds.groupby('statut').agg(nb=('id','count'),mt=('montant_reclame','sum')).reset_index()
-        fig=px.bar(bs,x='statut',y='mt',color='statut',text='nb',
-            color_discrete_map={'réglé':GREEN,'en_cours':AMBER,'rejeté':RED})
-        fig.update_traces(texttemplate='%{text} dossiers',textposition='outside')
-        chl(fig,300,"Montants réclamés par statut"); fig.update_layout(showlegend=False); st.plotly_chart(fig,use_container_width=True)
-    if len(ec)>0: alert(f"{len(ec)} sinistre(s) en cours — Délai CIMA : 10 jours ouvrés max.","warn")
-    sth("📋 Registre des sinistres")
-    disp=ds[['numero_contrat','client','produit','date_sinistre','type_sinistre','montant_reclame','montant_regle','statut']].copy()
-    for col in ['montant_reclame','montant_regle']: disp[col]=disp[col].apply(fmt)
-    disp.columns=['N° Contrat','Client','Produit','Date','Type','Réclamé','Réglé','Statut']
-    st.dataframe(disp,use_container_width=True,height=360,hide_index=True)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# PAGE — PRÉVISIONS ML
-# ═══════════════════════════════════════════════════════════════════════════════
 elif "Prévisions" in nav:
+    sth("🔮 Prévisions & Tendances","MODÈLE POLYNOMIAL")
     try:
         from sklearn.linear_model import LinearRegression
         from sklearn.preprocessing import PolynomialFeatures
         from sklearn.metrics import r2_score
+        _sklearn_ok = True
     except ImportError:
-        alert("scikit-learn requis. Exécutez : pip install scikit-learn","danger"); st.stop()
+        _sklearn_ok = False
+        alert("scikit-learn requis — ajoutez <b>scikit-learn</b> dans requirements.txt","danger"); st.stop()
 
-    yr_ml = year_selector("yr_ml", "📅 Filtrer la base d'entraînement par année (DATESOUS)")
-    pf_ext_ml = st.session_state.get("portefeuille_ext", None)
+    _pf_ml = st.session_state.get("portefeuille_ext")
+    _ca_ml = st.session_state.get("ca_ext")
 
-    # Préférer le portefeuille Excel filtré, sinon BD interne
-    if pf_ext_ml is not None and "DATESOUS" in pf_ext_ml.columns and "MONTENCA" in pf_ext_ml.columns:
-        pfm = filter_pf_by_year(pf_ext_ml.copy(), yr_ml)
-        pfm["mois"] = pd.to_datetime(pfm["DATESOUS"], errors="coerce").dt.strftime("%Y-%m")
-        dm = pfm.dropna(subset=["mois"]).groupby("mois").agg(
-            nb=("DATESOUS","count"), ca=("MONTENCA","sum")).reset_index().sort_values("mois")
-        st.caption(f"📌 Source : portefeuille Excel · Période : **{yr_label(yr_ml)}** · {len(pfm):,} polices")
+    if _pf_ml is None and _ca_ml is None:
+        alert("📥 Importez le <b>portefeuille</b> ou la <b>base CA</b> pour activer les prévisions.","warn"); st.stop()
+
+    # Source de données : CA mensuel ou polices par mois
+    if _ca_ml is not None and "YYYYMM_COMP" in _ca_ml.columns and "CHIFAFFA" in _ca_ml.columns:
+        _data_ml = _ca_ml.groupby("YYYYMM_COMP")["CHIFAFFA"].sum().reset_index().sort_values("YYYYMM_COMP")
+        _data_ml.columns = ["periode","valeur"]
+        _src_ml = "CA mensuel (CHIFAFFA)"
+    elif _pf_ml is not None and "ANNEE_SOUS" in _pf_ml.columns:
+        _data_ml = _pf_ml.groupby("ANNEE_SOUS").size().reset_index(name="valeur").sort_values("ANNEE_SOUS")
+        _data_ml.columns = ["periode","valeur"]
+        _src_ml = "Polices par année (DATESOUS)"
     else:
-        dm=q("SELECT strftime('%Y-%m',date_souscription) as mois,COUNT(*) as nb,SUM(prime_annuelle+prime_unique) as ca FROM contrats GROUP BY mois ORDER BY mois")
-        dm = filter_by_year(dm, yr_ml, date_col="mois") if not dm.empty else dm
-        st.caption(f"📌 Source : BD interne · Période : **{yr_label(yr_ml)}**")
-    if len(dm)<4: alert("Données insuffisantes pour la prévision (min. 4 mois). Élargissez la période.","warn"); st.stop()
-    dm['t']=range(len(dm)); X=dm[['t']].values; y=dm['ca'].values; yn=dm['nb'].values
-    c1,c2=st.columns([3,1])
-    with c1: h=st.slider("Horizon de prévision (mois)",1,12,6)
-    with c2: deg=st.radio("Degré poly.",[1,2,3],horizontal=True)
-    poly=PolynomialFeatures(degree=deg); Xp=poly.fit_transform(X)
-    reg=LinearRegression().fit(Xp,y); regn=LinearRegression().fit(Xp,yn)
-    r2=r2_score(y,reg.predict(Xp))
-    tf=np.arange(len(dm),len(dm)+h).reshape(-1,1)
-    pca=np.maximum(reg.predict(poly.transform(tf)),0)
-    pnb=np.maximum(regn.predict(poly.transform(tf)),0).astype(int)
-    lp=pd.Period(dm['mois'].iloc[-1],'M')
-    fm=[(lp+i+1).strftime('%Y-%m') for i in range(h)]
-    fig=go.Figure()
-    fig.add_scatter(x=dm['mois'],y=dm['ca'],name='📊 CA historique',line=dict(color=NAVY,width=2),mode='lines+markers',marker=dict(size=5))
-    fig.add_scatter(x=dm['mois'],y=reg.predict(Xp),name='📈 Tendance',line=dict(color=BLUEL,dash='dot',width=1.5))
-    fig.add_scatter(x=fm,y=pca,name='🔮 Prévision',line=dict(color=GOLD,dash='dash',width=3),mode='lines+markers',marker=dict(symbol='star',size=12,color=GOLD))
-    fig.add_vrect(x0=dm['mois'].iloc[-1],x1=fm[-1],fillcolor="rgba(201,162,39,0.06)",line_width=0,annotation_text="Zone prévision →")
-    chl(fig,400,f"🔮 Prévision CA sur {h} mois — R² = {r2:.3f}"); st.plotly_chart(fig,use_container_width=True)
-    c1,c2,c3=st.columns(3)
-    with c1: kpi("🔮 CA prévu total",fmt(pca.sum()),f"sur {h} mois","gold","")
-    with c2: kpi("📋 Contrats prévus",str(int(pnb.sum())),f"sur {h} mois","","")
-    with c3: kpi("📐 R² modèle",f"{r2:.3f}","qualité prévision","green" if r2>0.6 else "red","")
-    sth("📊 Tableau prévisionnel")
-    pd_df=pd.DataFrame({'Mois':fm,'CA prévu':[fmt(v) for v in pca],'Nb contrats':pnb.tolist(),'CA/contrat':[fmt(v) for v in pca/np.maximum(pnb,1)]})
-    st.dataframe(pd_df,use_container_width=True,hide_index=True)
+        alert("Données insuffisantes pour les prévisions.","warn"); st.stop()
 
+    if len(_data_ml) < 3:
+        alert("Au moins 3 périodes nécessaires pour les prévisions.","info"); st.stop()
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# PAGE — CARTE BÉNIN
-# ═══════════════════════════════════════════════════════════════════════════════
+    import numpy as _np_ml
+    _deg = st.slider("Degré du polynôme",1,4,2,key="ml_deg_v40")
+    _nh  = st.slider("Horizons à prévoir",1,12,6,key="ml_hz_v40")
+
+    _X  = _np_ml.arange(len(_data_ml)).reshape(-1,1)
+    _y  = _data_ml["valeur"].values
+    _poly = PolynomialFeatures(degree=_deg)
+    _Xp  = _poly.fit_transform(_X)
+    _reg = LinearRegression().fit(_Xp, _y)
+    _r2  = r2_score(_y, _reg.predict(_Xp))
+
+    _X_fut = _np_ml.arange(len(_data_ml), len(_data_ml)+_nh).reshape(-1,1)
+    _y_fut = _reg.predict(_poly.fit_transform(_X_fut))
+
+    _labels_hist = _data_ml["periode"].astype(str).tolist()
+    _labels_fut  = [f"H+{i+1}" for i in range(_nh)]
+
+    fig_ml = go.Figure()
+    fig_ml.add_trace(go.Scatter(x=_labels_hist, y=_y, name="Historique",
+        line=dict(color=NAVY,width=2.5), mode="lines+markers"))
+    fig_ml.add_trace(go.Scatter(x=_labels_hist, y=_reg.predict(_Xp).tolist(), name="Tendance",
+        line=dict(color=GOLD,width=2,dash="dot")))
+    fig_ml.add_trace(go.Scatter(x=_labels_fut, y=_y_fut.tolist(), name="Prévision",
+        line=dict(color=GREEN,width=2.5,dash="dash"), mode="lines+markers",
+        marker=dict(symbol="star",size=10)))
+    fig_ml.add_vrect(x0=_labels_hist[-1], x1=_labels_fut[-1] if _labels_fut else _labels_hist[-1],
+        fillcolor="rgba(0,200,100,0.05)", line_width=0, annotation_text="Zone prévision")
+    fig_ml.update_layout(hovermode="x unified",legend=dict(orientation="h"))
+    chl(fig_ml, 520, f"🔮 Prévision — {_src_ml} — Poly degré {_deg} — R²={_r2:.3f}")
+    st.plotly_chart(fig_ml, use_container_width=True)
+
+    _r1m,_r2m,_r3m = st.columns(3)
+    with _r1m: kpi("📐 R² modèle",f"{_r2:.4f}","qualité ajustement","green" if _r2>.85 else "amber","")
+    with _r2m: kpi("📈 Tendance H+1",fmt(max(_y_fut[0],0)),"prochaine période","gold","")
+    with _r3m: kpi("🔭 Tendance H+"+str(_nh),fmt(max(_y_fut[-1],0)),f"à {_nh} périodes","teal","")
+
+    _df_fut = pd.DataFrame({"Horizon":_labels_fut,"Prévision":[fmt(max(v,0)) for v in _y_fut]})
+    st.dataframe(_df_fut, use_container_width=True, hide_index=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE CARTE v40 — Carte géographique du portefeuille
+# ══════════════════════════════════════════════════════════════════════════════
 elif "Carte" in nav:
-    # ── Carte du Bénin basée sur LIBEVILL du portefeuille (NOM_APP / CODEAPPO)
-    COORDS = {
-        'COTONOU':[6.3703,2.3912], 'PORTO-NOVO':[6.4969,2.6289], 'PARAKOU':[9.337,2.628],
-        'BOHICON':[7.1789,2.0667], 'NATITINGOU':[10.3039,1.3806], 'ABOMEY-CALAVI':[6.4483,2.3522],
-        'CALAVI':[6.4483,2.3522], 'LOKOSSA':[6.6333,1.7167], 'OUIDAH':[6.3639,2.0885],
-        'ABOMEY':[7.1896,1.9911], 'KANDI':[11.1347,2.938], 'DJOUGOU':[9.7086,1.6664],
-        'SAVE':[8.0353,2.4856], 'SAVALOU':[7.9281,1.9756], 'POBE':[6.9803,2.6675],
-        'COVE':[7.2225,2.3408], 'DASSA':[7.7811,2.1836], 'DASSA-ZOUME':[7.7811,2.1836],
-        'COME':[6.4081,1.8836], 'KETOU':[7.3597,2.6047], 'NIKKI':[9.9403,3.2108],
-        'BANIKOARA':[11.2989,2.4392], 'MALANVILLE':[11.8633,3.3886], 'TANGUIETA':[10.6217,1.2697],
-        'BEMBEREKE':[10.2289,2.6664], 'AGBANGNIZOUN':[7.0883,1.9683], 'APLAHOUE':[6.9281,1.6800],
-        'ALLADA':[6.6650,2.1497], 'GRAND-POPO':[6.2789,1.8267],
+    sth("🗺️ Carte géographique — Portefeuille AFG","94 COMMUNES BÉNIN")
+    _pf_carte = st.session_state.get("portefeuille_ext")
+
+    # Coordonnées GPS 94 communes du Bénin (extrait)
+    CODEVILL_GPS = {
+        1:("COTONOU",6.3703,2.3912),       2:("BANIKOARA",11.2989,2.4392),
+        3:("GOGOUNOU",10.8333,2.8333),      4:("KANDI",11.1347,2.9380),
+        5:("KARIMAMA",12.0667,3.1833),      6:("MALANVILLE",11.8633,3.3886),
+        7:("SEGBANA",10.9333,3.5000),       8:("BOUKOUMBE",10.1833,1.1167),
+        9:("COBLY",10.4500,1.3667),         10:("KEROU",10.8167,2.1167),
+        11:("KOUANDE",10.3333,1.6833),      12:("MATERI",10.7000,1.0667),
+        13:("NATITINGOU",10.3039,1.3806),   14:("PEHUNCO",10.2333,1.5167),
+        15:("TANGUIETA",10.6217,1.2697),    16:("TOUCOUNTOUNA",10.4667,1.5000),
+        17:("ABOMEY-CALAVI",6.4483,2.3522), 18:("ALLADA",6.6650,2.1497),
+        19:("KPOMASSE",6.5833,2.0667),      20:("OUIDAH",6.3606,2.0877),
+        21:("SO-AVA",6.4833,2.4500),        22:("TOFFO",6.8333,2.0833),
+        23:("TORI-BOSSITO",6.5500,2.1500),  24:("ZE",6.7667,2.2833),
+        25:("ATHIEME",6.5833,1.6833),       26:("BOPA",6.5833,1.9833),
+        27:("COME",6.4000,1.8833),          28:("GRAND-POPO",6.2833,1.8333),
+        29:("HOUEYOGBE",6.7500,1.8500),     30:("LOKOSSA",6.6400,1.7200),
+        31:("ABOMEY",7.1833,1.9833),        32:("AGBANGNIZOUN",7.1000,2.0500),
+        33:("BOHICON",7.1769,2.0661),       34:("COVE",7.3167,2.3833),
+        35:("DJIDJA",7.3333,1.9167),        36:("OUINHI",7.0167,2.4833),
+        37:("ZAGNANADO",7.2333,2.3500),     38:("ZA-KPOTA",7.0667,2.2167),
+        39:("ZOGBODOMEY",7.0333,2.1500),    40:("APLAHOUE",6.9333,1.6833),
+        41:("DJAKOTOMEY",6.9000,1.7167),    42:("DOGBO",6.8000,1.7833),
+        43:("KLOUEKANME",7.0000,1.7500),    44:("LALO",6.9167,1.8833),
+        45:("TOVIKLIN",6.9333,1.8167),      46:("BANTE",8.4167,1.8833),
+        47:("DASSA-ZOUME",7.7500,2.1833),   48:("GLAZOUE",7.9833,2.1167),
+        49:("OUESSE",8.5000,2.3833),        50:("SAVE",8.0333,2.4833),
+        51:("SINENDE",10.0000,2.3833),      52:("ADJA-OUERE",6.8500,2.6833),
+        53:("ADJOHOUN",6.7000,2.5167),      54:("AGUEGUES",6.5167,2.5000),
+        55:("AKPRO-MISSERE",6.8167,2.6000), 56:("AVRANKOU",6.6833,2.6667),
+        57:("BONOU",6.9167,2.4833),         58:("DANGBO",6.6667,2.5667),
+        59:("PORTO-NOVO",6.4969,2.6289),    60:("SEME-KPODJI",6.3667,2.6333),
+        61:("BASSILA",9.0000,1.6667),       62:("COPARGO",9.8333,1.5167),
+        63:("DJOUGOU",9.7083,1.6694),       64:("OUAKE",9.7000,1.4000),
+        65:("BEMBEREKE",10.2333,2.6667),    66:("KALALE",10.3000,3.3667),
+        67:("N'DALI",9.8667,2.7167),        68:("NIKKI",9.9333,3.2167),
+        69:("PARAKOU",9.3372,2.6283),       70:("PERERE",10.1500,3.1167),
+        71:("SINENDE",10.0000,2.3833),      72:("TCHAOUROU",8.8833,2.6000),
+        73:("ADJARRA",6.5500,2.7167),       74:("AKPRO-MISSERE",6.8167,2.6000),
+        75:("IFANGNI",6.6500,2.7500),       76:("KETOU",7.3500,2.6167),
+        77:("POBE",6.9833,2.6667),          78:("SAKETE",6.7333,2.6333),
+        79:("AGOUNA",7.9000,1.9333),        80:("BASSILA",9.0000,1.6667),
+        81:("PENESSOULOU",9.0667,1.8167),   82:("TCHOUROU",8.8667,2.5833),
+        83:("ABOMEY",7.1833,1.9833),        84:("MATERI",10.7000,1.0667),
+        85:("KOUANDE",10.3333,1.6833),      86:("BEMBEREKE",10.2333,2.6667),
+        87:("SAVALOU",7.9292,1.9764),       88:("APLAHOUE",6.9333,1.6833),
+        89:("BOHICON",7.1769,2.0661),       90:("COME",6.4000,1.8833),
+        91:("NATITINGOU",10.3039,1.3806),   92:("PARAKOU",9.3372,2.6283),
+        93:("PORTO-NOVO",6.4969,2.6289),    94:("COTONOU",6.3703,2.3912),
     }
 
-    pf_ext = st.session_state.get("portefeuille_ext", None)
-    yr_ct = year_selector("yr_carte", "📅 Filtrer la carte par année(s)")
+    if _pf_carte is not None and "CODEVILL" in _pf_carte.columns:
+        _yr_carte = year_selector("yr_carte_v40","📅 Filtrer par année")
+        _df_carte = filter_pf_by_year(_pf_carte.copy(), _yr_carte)
+        _map_grp = _df_carte.groupby("CODEVILL").agg(
+            nb=("CODEVILL","count"),
+            actifs=("ETAT_POLICE",lambda x: (x=="ACTIF").sum()) if "ETAT_POLICE" in _df_carte.columns else ("CODEVILL","count"),
+            ca=("MONTENCA","sum") if "MONTENCA" in _df_carte.columns else ("CODEVILL","count"),
+        ).reset_index()
+        _map_grp["CODEVILL"] = _map_grp["CODEVILL"].astype(str).str.replace(".0","",regex=False)
 
-    if pf_ext is None or "LIBEVILL" not in pf_ext.columns:
-        alert("⚠️ Importez d'abord le portefeuille Excel (colonne LIBEVILL requise) depuis l'Accueil.","warn")
-    else:
-        pfm = pf_ext.copy()
-        if "DATESOUS" in pfm.columns:
-            pfm = filter_pf_by_year(pfm, yr_ct)
-        if pfm.empty:
-            alert("Aucune donnée sur la période.","info")
+        rows_map = []
+        for _, r in _map_grp.iterrows():
+            try:
+                _cv = int(float(r["CODEVILL"]))
+                if _cv in CODEVILL_GPS:
+                    _vname, _lat, _lon = CODEVILL_GPS[_cv]
+                    rows_map.append({"Ville":_vname,"Lat":_lat,"Lon":_lon,
+                                     "Polices":int(r["nb"]),"CA":float(r["ca"]),
+                                     "Actifs":int(r["actifs"])})
+            except Exception:
+                pass
+
+        if rows_map:
+            _df_map = pd.DataFrame(rows_map)
+            fig_map = px.scatter_mapbox(
+                _df_map, lat="Lat", lon="Lon", size="Polices", color="Polices",
+                hover_name="Ville", hover_data={"Polices":True,"Actifs":True,"CA":True,"Lat":False,"Lon":False},
+                color_continuous_scale=[[0,BLUEL],[0.5,GOLD],[1,GREEN]],
+                size_max=40, zoom=6.2, center={"lat":9.3,"lon":2.3},
+                mapbox_style="carto-positron")
+            fig_map.update_layout(height=600, margin=dict(l=0,r=0,t=30,b=0),
+                title=dict(text=f"🗺️ Portefeuille AFG par commune — {yr_label(_yr_carte)}",
+                           font=dict(size=13,color=NAVY),x=0.01))
+            st.plotly_chart(fig_map, use_container_width=True)
+
+            st.caption(f"{len(_df_map)} communes couvertes · {_df_map['Polices'].sum():,} polices")
+            _top_map = _df_map.sort_values("Polices",ascending=False).head(10)
+            st.dataframe(_top_map[["Ville","Polices","Actifs","CA"]].rename(columns={"CA":"CA (FCFA)"}),
+                         use_container_width=True, hide_index=True)
         else:
-            pfm["VILLE_KEY"] = pfm["LIBEVILL"].astype(str).str.upper().str.strip()
-            agg = pfm.groupby("VILLE_KEY").agg(
-                nb=("NUMEPOLI_P","count") if "NUMEPOLI_P" in pfm.columns else ("LIBEVILL","count"),
-                ca=("MONTENCA","sum") if "MONTENCA" in pfm.columns else ("LIBEVILL","count"),
-                actifs=("ETAT_POLICE", lambda x:(x=="ACTIF").sum()) if "ETAT_POLICE" in pfm.columns else ("LIBEVILL","count"),
-                nb_comm=("NOM_APP","nunique") if "NOM_APP" in pfm.columns else ("LIBEVILL","count"),
-                clients=("NOM_ASSU","nunique") if "NOM_ASSU" in pfm.columns else ("LIBEVILL","count"),
-            ).reset_index()
-            agg["lat"] = agg["VILLE_KEY"].map(lambda v: COORDS.get(v,[None,None])[0])
-            agg["lon"] = agg["VILLE_KEY"].map(lambda v: COORDS.get(v,[None,None])[1])
-            unmapped = agg[agg["lat"].isna()]
-            agg = agg.dropna(subset=["lat","lon"]).sort_values("nb",ascending=False)
+            alert("Aucune commune trouvée — vérifiez la colonne CODEVILL.","warn")
+    else:
+        alert("📥 Importez le <b>portefeuille</b> avec la colonne <b>CODEVILL</b> pour activer la carte.","warn")
 
-            # KPIs synthèse
-            k1,k2,k3,k4 = st.columns(4)
-            with k1: kpi("🏙️ Villes couvertes", f"{len(agg):,}", f"sur {agg['nb'].sum():,} polices", "", "")
-            with k2: kpi("👥 Commerciaux géolocalisés", f"{int(agg['nb_comm'].sum()):,}", "via LIBEVILL", "gold", "")
-            with k3: kpi("👤 Clients", f"{int(agg['clients'].sum()):,}", "uniques", "teal", "")
-            with k4: kpi("💰 Encaissements", fmt(agg['ca'].sum()), "total carte", "green", "")
-
-            # Top 5 villes par commerciaux
-            sth("🏆 Top 5 villes — Concentration des commerciaux (NOM_APP)", "RÉSEAU AFG")
-            top5 = agg.sort_values("nb_comm", ascending=False).head(5)
-            cols_top = st.columns(len(top5)) if len(top5) else []
-            for i,(_,r) in enumerate(top5.iterrows()):
-                with cols_top[i]:
-                    st.markdown(f"""
-                    <div style="background:linear-gradient(135deg,#003366,#004D99);border-radius:12px;
-                         padding:14px;color:white;text-align:center;border:1px solid rgba(201,162,39,.4);">
-                      <div style="font-size:11px;color:#E8C84A;font-weight:700;letter-spacing:.08em;">#{i+1}</div>
-                      <div style="font-size:14px;font-weight:900;margin:4px 0;">{r['VILLE_KEY'].title()}</div>
-                      <div style="font-size:22px;font-weight:900;color:#E8C84A;">{int(r['nb_comm'])}</div>
-                      <div style="font-size:10px;opacity:.8;">commerciaux</div>
-                      <hr style="border-color:rgba(255,255,255,.15);margin:6px 0;">
-                      <div style="font-size:10.5px;">📋 {int(r['nb']):,} polices</div>
-                      <div style="font-size:10.5px;">💰 {fmt(r['ca'])}</div>
-                    </div>""", unsafe_allow_html=True)
-
-            st.markdown("---")
-
-            # Carte Folium
-            try:
-                import folium
-                from streamlit_folium import st_folium
-                m = folium.Map(location=[9.3,2.3], zoom_start=7, tiles='CartoDB positron')
-                max_nb = max(agg["nb"].max(), 1)
-                for _,r in agg.iterrows():
-                    radius = max(8, min(48, (r["nb"]/max_nb)*42 + 6))
-                    color = GOLD if r["nb_comm"]>=10 else (BLUEL if r["nb_comm"]>=3 else "#7d9b76")
-                    popup_html = (
-                        f"<div style='font-family:Inter,sans-serif;min-width:200px'>"
-                        f"<b style='color:{NAVY};font-size:13px'>🏙️ {r['VILLE_KEY'].title()}</b><hr style='margin:4px 0'>"
-                        f"📋 <b>{int(r['nb']):,}</b> polices<br>"
-                        f"✅ <b>{int(r['actifs']):,}</b> actives<br>"
-                        f"👥 <b>{int(r['nb_comm'])}</b> commerciaux (NOM_APP)<br>"
-                        f"👤 <b>{int(r['clients']):,}</b> clients<br>"
-                        f"💰 <b>{fmt(r['ca'])}</b></div>"
-                    )
-                    folium.CircleMarker(
-                        location=[r["lat"],r["lon"]], radius=radius,
-                        color=NAVY, fill=True, fill_color=color, fill_opacity=0.78, weight=2,
-                        popup=folium.Popup(popup_html, max_width=260),
-                        tooltip=f"{r['VILLE_KEY'].title()} · {int(r['nb_comm'])} commerciaux"
-                    ).add_to(m)
-                    folium.Marker(
-                        [r["lat"]+0.08, r["lon"]],
-                        icon=folium.DivIcon(html=(
-                            f"<div style='font-size:10.5px;font-weight:800;color:{NAVY};white-space:nowrap;"
-                            f"background:rgba(255,255,255,.85);padding:1px 5px;border-radius:6px;'>"
-                            f"{r['VILLE_KEY'].title()} · <span style='color:{GOLD}'>{int(r['nb_comm'])} comm.</span></div>"))
-                    ).add_to(m)
-
-                cmap1, cmap2 = st.columns([3,2])
-                with cmap1:
-                    sth("🗺️ Carte interactive — Commerciaux AFG par ville (LIBEVILL)")
-                    st_folium(m, width=760, height=560, returned_objects=[])
-                with cmap2:
-                    sth("📋 Détail par ville", "Cliquez les marqueurs")
-                    disp = agg[["VILLE_KEY","nb_comm","nb","actifs","clients","ca"]].copy()
-                    disp["VILLE_KEY"] = disp["VILLE_KEY"].str.title()
-                    disp["ca"] = disp["ca"].apply(fmt)
-                    disp.columns = ["Ville","Commerciaux","Polices","Actives","Clients","CA"]
-                    st.dataframe(disp, use_container_width=True, hide_index=True, height=540)
-            except ImportError:
-                fig = px.scatter(agg, x="lon", y="lat",
-                    size="nb", color="nb_comm",
-                    hover_name=agg["VILLE_KEY"].str.title(),
-                    color_continuous_scale=[[0,BLUEL],[1,GOLD]], size_max=55,
-                    labels={"nb_comm":"Commerciaux","nb":"Polices"},
-                    title="🗺️ Carte des commerciaux AFG — Bénin (LIBEVILL)")
-                st.plotly_chart(fig, use_container_width=True)
-
-            # Liste des commerciaux par ville
-            st.markdown("---")
-            sth("👥 Commerciaux par ville — Détail (NOM_APP / CODEAPPO)", "DRILL-DOWN")
-            ville_sel = st.selectbox("🏙️ Sélectionnez une ville",
-                ["— Toutes —"] + sorted(agg["VILLE_KEY"].str.title().tolist()),
-                key="carte_ville_sel")
-            sub = pfm.copy()
-            if ville_sel != "— Toutes —":
-                sub = sub[sub["VILLE_KEY"]==ville_sel.upper()]
-            if "NOM_APP" in sub.columns and "CODEAPPO" in sub.columns:
-                comm_d = sub.groupby(["NOM_APP","CODEAPPO"]).agg(
-                    polices=("NUMEPOLI_P","count") if "NUMEPOLI_P" in sub.columns else ("NOM_APP","count"),
-                    ca=("MONTENCA","sum") if "MONTENCA" in sub.columns else ("NOM_APP","count"),
-                    clients=("NOM_ASSU","nunique") if "NOM_ASSU" in sub.columns else ("NOM_APP","count"),
-                ).reset_index().sort_values("ca", ascending=False)
-                comm_d = comm_d[comm_d["NOM_APP"].astype(str).str.strip()!=""]
-                comm_d.insert(0,"Rang", range(1, len(comm_d)+1))
-                comm_d["CA"] = comm_d["ca"].apply(fmt)
-                st.dataframe(
-                    comm_d[["Rang","NOM_APP","CODEAPPO","polices","clients","CA"]].rename(
-                        columns={"NOM_APP":"Nom Apporteur","CODEAPPO":"Code","polices":"Polices","clients":"Clients"}),
-                    use_container_width=True, hide_index=True, height=420)
-                st.caption(f"{len(comm_d)} commerciaux référencés{(' à '+ville_sel) if ville_sel!='— Toutes —' else ''}.")
-
-            if not unmapped.empty:
-                with st.expander(f"ℹ️ {len(unmapped)} ville(s) sans coordonnées GPS — non affichée(s) sur la carte"):
-                    st.dataframe(unmapped[["VILLE_KEY","nb","nb_comm"]].rename(
-                        columns={"VILLE_KEY":"Ville","nb":"Polices","nb_comm":"Commerciaux"}),
-                        use_container_width=True, hide_index=True)
-
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# PAGE — EXPORTS  (RAPPORT EXÉCUTIF PROFESSIONNEL PDF + EXCEL + CSV)
-# ═══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE EXPORTS v40
+# ══════════════════════════════════════════════════════════════════════════════
 elif "Exports" in nav:
-    sth("📤 Centre d'Exportation — Rapport Exécutif AFG", "DIRECTION GÉNÉRALE")
-    alert("Sélectionnez la ou les années à inclure dans le rapport. <b>Toutes les années</b> = totaux globaux du portefeuille.","info")
+    sth("📤 Exports — Rapports & Données","TÉLÉCHARGEMENTS")
+    _pf_exp = st.session_state.get("portefeuille_ext")
+    _ca_exp = st.session_state.get("ca_ext")
+    _sin_exp= st.session_state.get("sin_ext")
 
-    yr_ex = year_selector("yr_ex_rep", "📅 Filtrer le rapport par année(s) de souscription (DATESOUS)")
-    pf_ext_rep = st.session_state.get("portefeuille_ext", None)
+    _yr_exp = year_selector("yr_exp_v40","📅 Filtrer par année")
+    _lbl_exp = yr_label(_yr_exp)
 
-    # ── Construction des données filtrées ─────────────────────────────────────
-    if pf_ext_rep is not None and "DATESOUS" in pf_ext_rep.columns:
-        pf_rep = filter_pf_by_year(pf_ext_rep.copy(), yr_ex)
-        src_lbl = "Portefeuille Excel AFG (DATESOUS)"
-    else:
-        pf_rep = None
-        src_lbl = "Aucun portefeuille importé — rapport basé sur la BD interne uniquement"
-
-    # BIA filtrés par date_saisie
-    df_bia_rep = pd.read_sql_query("SELECT * FROM bulletins_bia", gc())
-    if not df_bia_rep.empty:
-        df_bia_rep = filter_by_year(df_bia_rep, yr_ex, date_col="date_saisie")
-
-    # Contrats internes filtrés
-    df_int_rep = q(BASE)
-    if not df_int_rep.empty:
-        df_int_rep['eq'] = df_int_rep['prime_annuelle'] + df_int_rep['prime_unique']
-        df_int_rep = filter_by_year(df_int_rep, yr_ex, date_col="date_souscription")
-
-    label_yr = yr_label(yr_ex)
-    st.caption(f"📌 Source principale : **{src_lbl}** · Période : **{label_yr}**")
-
-    # ── Calcul des KPIs ───────────────────────────────────────────────────────
-    if pf_rep is not None and not pf_rep.empty:
-        tot_p = len(pf_rep)
-        ep = pf_rep["ETAT_POLICE"].astype(str) if "ETAT_POLICE" in pf_rep.columns else pd.Series([], dtype=str)
-        nb_actif = int((ep=="ACTIF").sum())
-        nb_resil = int((ep=="RESILIE").sum())
-        nb_inact = int((ep=="INACTIF").sum())
-        nb_echu  = int((ep=="ECHU").sum())
-        nb_susp  = int((ep=="SUSPENDU").sum())
-        ca_tot   = float(pf_rep["MONTENCA"].sum()) if "MONTENCA" in pf_rep.columns else 0.0
-        ca_act   = float(pf_rep[ep=="ACTIF"]["MONTENCA"].sum()) if "MONTENCA" in pf_rep.columns else 0.0
-        nb_comm  = int(pf_rep["NOM_APP"].nunique()) if "NOM_APP" in pf_rep.columns else 0
-        nb_cli   = int(pf_rep["NOM_ASSU"].nunique()) if "NOM_ASSU" in pf_rep.columns else 0
-        tx_actif = nb_actif/max(tot_p,1)*100
-        tx_resil = nb_resil/max(tot_p,1)*100
-        ticket   = ca_tot/max(tot_p,1)
-        arpu     = ca_tot/max(nb_cli,1) if nb_cli else 0
-    else:
-        tot_p=nb_actif=nb_resil=nb_inact=nb_echu=nb_susp=nb_comm=nb_cli=0
-        ca_tot=ca_act=ticket=arpu=tx_actif=tx_resil=0.0
-
-    # KPIs internes (BD)
-    nb_bia = len(df_bia_rep)
-    cot_bia = float(df_bia_rep["cotisation_fcfa"].sum()) if (not df_bia_rep.empty and "cotisation_fcfa" in df_bia_rep.columns) else 0
-    nb_ct_int = len(df_int_rep)
-
-    # ── Affichage synthèse à l'écran ──────────────────────────────────────────
-    sth(f"📊 Synthèse — {label_yr}", "INDICATEURS CLÉS")
-    k1,k2,k3,k4,k5,k6 = st.columns(6)
-    with k1: kpi("📋 Polices", f"{tot_p:,}", "portefeuille filtré","gold","")
-    with k2: kpi("✅ Actives", f"{nb_actif:,}", f"{tx_actif:.1f}%","green","")
-    with k3: kpi("📉 Résiliées", f"{nb_resil:,}", f"{tx_resil:.1f}%","red" if tx_resil>25 else "amber","")
-    with k4: kpi("💰 CA total", fmt(ca_tot), "encaissements","gold","")
-    with k5: kpi("👥 Commerciaux", f"{nb_comm:,}", "apporteurs","","")
-    with k6: kpi("👤 Clients", f"{nb_cli:,}", "assurés distincts","teal","")
-
-    k7,k8,k9,k10 = st.columns(4)
-    with k7: kpi("🎫 Ticket moyen", fmt(ticket), "par police","gold","")
-    with k8: kpi("📈 ARPU", fmt(arpu) if arpu else "—", "par client","teal","")
-    with k9: kpi("📝 BIA saisis", f"{nb_bia:,}", "période sélectionnée","","")
-    with k10: kpi("💳 Cotisations BIA", fmt(cot_bia), "total","gold","")
-
-    st.markdown("---")
-    sth("📥 Téléchargements", "RAPPORT PRÊT À DIFFUSER")
-
-    cdl1, cdl2, cdl3 = st.columns(3)
-
-    # ────────────────── 1. RAPPORT PDF EXÉCUTIF ──────────────────────────────
-    with cdl1:
-        st.subheader("📄 Rapport PDF exécutif")
-        st.caption("Document professionnel prêt à diffuser à la Direction Générale.")
-        if st.button("🎯 Générer le rapport PDF", use_container_width=True, type="primary"):
-            try:
-                from reportlab.lib.pagesizes import A4
-                from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-                from reportlab.lib.units import cm
-                from reportlab.lib import colors as rl_colors
-                from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table,
-                    TableStyle, PageBreak)
-                from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
-            except ImportError:
-                alert("⚠️ reportlab requis. Exécutez : pip install reportlab","danger"); st.stop()
-
-            buf_pdf = io.BytesIO()
-            doc = SimpleDocTemplate(buf_pdf, pagesize=A4,
-                leftMargin=1.8*cm, rightMargin=1.8*cm,
-                topMargin=2*cm, bottomMargin=2*cm,
-                title=f"Rapport Exécutif AFG — {label_yr}",
-                author="AFG Assurances Bénin Vie")
-
-            ss = getSampleStyleSheet()
-            NAVY_RL = rl_colors.HexColor("#003366")
-            GOLD_RL = rl_colors.HexColor("#C9A227")
-            GOLDL_RL = rl_colors.HexColor("#E8C84A")
-            RED_RL = rl_colors.HexColor("#C0392B")
-            LGRAY_RL = rl_colors.HexColor("#F4F6F9")
-
-            st_title = ParagraphStyle("ti", parent=ss["Title"], fontName="Helvetica-Bold",
-                fontSize=22, textColor=NAVY_RL, alignment=TA_CENTER, spaceAfter=8)
-            st_sub = ParagraphStyle("su", parent=ss["Normal"], fontName="Helvetica",
-                fontSize=11, textColor=rl_colors.HexColor("#5A6478"), alignment=TA_CENTER, spaceAfter=18)
-            st_h1 = ParagraphStyle("h1", parent=ss["Heading1"], fontName="Helvetica-Bold",
-                fontSize=14, textColor=NAVY_RL, spaceBefore=14, spaceAfter=8)
-            st_body = ParagraphStyle("b", parent=ss["BodyText"], fontName="Helvetica",
-                fontSize=10, leading=14, alignment=TA_JUSTIFY, textColor=rl_colors.HexColor("#1F2A40"))
-            st_callout = ParagraphStyle("c", parent=ss["BodyText"], fontName="Helvetica-Oblique",
-                fontSize=10, textColor=NAVY_RL, alignment=TA_CENTER, spaceAfter=6)
-            st_small = ParagraphStyle("sm", parent=ss["Normal"], fontName="Helvetica",
-                fontSize=8.5, textColor=rl_colors.HexColor("#5A6478"), alignment=TA_CENTER)
-
-            story = []
-
-            # ── PAGE DE GARDE ────────────────────────────────────────────────
-            story.append(Spacer(1, 2.5*cm))
-            logo_tbl = Table([["AFG\nVIE"]], colWidths=[3.2*cm], rowHeights=[3.2*cm])
-            logo_tbl.setStyle(TableStyle([
-                ("BACKGROUND",(0,0),(-1,-1),GOLD_RL),
-                ("TEXTCOLOR",(0,0),(-1,-1),NAVY_RL),
-                ("FONTNAME",(0,0),(-1,-1),"Helvetica-Bold"),
-                ("FONTSIZE",(0,0),(-1,-1),22),
-                ("ALIGN",(0,0),(-1,-1),"CENTER"),
-                ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
-                ("BOX",(0,0),(-1,-1),1.5,NAVY_RL),
-            ]))
-            story.append(logo_tbl)
-            story.append(Spacer(1, 0.6*cm))
-            story.append(Paragraph("AFG ASSURANCES BÉNIN VIE", st_title))
-            story.append(Paragraph("Rapport Exécutif — Direction Générale", st_sub))
-            story.append(Spacer(1, 1.5*cm))
-
-            cover_data = [
-                ["Période couverte", label_yr],
-                ["Source des données", src_lbl],
-                ["Date d'édition", datetime.now().strftime("%d/%m/%Y à %H:%M")],
-                ["Édité par", f"{user.get('nom','—')} ({role})"],
-                ["Agence", agence_sel],
-                ["Référence", f"AFG-RPT-{datetime.now().strftime('%Y%m%d-%H%M')}"],
-            ]
-            cover_tbl = Table(cover_data, colWidths=[6*cm, 9.5*cm])
-            cover_tbl.setStyle(TableStyle([
-                ("BACKGROUND",(0,0),(0,-1),NAVY_RL),
-                ("TEXTCOLOR",(0,0),(0,-1),GOLDL_RL),
-                ("BACKGROUND",(1,0),(1,-1),LGRAY_RL),
-                ("FONTNAME",(0,0),(0,-1),"Helvetica-Bold"),
-                ("FONTNAME",(1,0),(1,-1),"Helvetica"),
-                ("FONTSIZE",(0,0),(-1,-1),10),
-                ("LEFTPADDING",(0,0),(-1,-1),10),
-                ("RIGHTPADDING",(0,0),(-1,-1),10),
-                ("TOPPADDING",(0,0),(-1,-1),7),
-                ("BOTTOMPADDING",(0,0),(-1,-1),7),
-                ("BOX",(0,0),(-1,-1),0.5,NAVY_RL),
-                ("INNERGRID",(0,0),(-1,-1),0.25,rl_colors.white),
-            ]))
-            story.append(cover_tbl)
-            story.append(Spacer(1, 2*cm))
-            story.append(Paragraph("« A AFG Assurances Benin Vie, nous avons pense a vous ! »", st_callout))
-            story.append(Spacer(1, 0.4*cm))
-            story.append(Paragraph("Document confidentiel — Usage interne — Direction Generale uniquement",
-                ParagraphStyle("conf", parent=st_small, textColor=RED_RL, fontName="Helvetica-Bold")))
-            story.append(PageBreak())
-
-            # ── 1. RÉSUMÉ EXÉCUTIF ───────────────────────────────────────────
-            story.append(Paragraph("1. Resume executif", st_h1))
-            risk_qual = ("critique et exigeant un plan d'action immediat" if tx_resil>50
-                        else ("eleve a surveiller" if tx_resil>25 else "maitrise"))
-            résumé_txt = (
-                f"Le present rapport synthetise les principaux indicateurs de performance "
-                f"d'<b>AFG Assurances Benin Vie</b> pour la periode <b>{label_yr}</b>. "
-                f"Le portefeuille analyse compte <b>{tot_p:,} polices</b>, dont "
-                f"<b>{nb_actif:,} actives</b> ({tx_actif:.1f}%), pour un encaissement total de "
-                f"<b>{fmt(ca_tot)}</b>. La compagnie compte <b>{nb_comm:,} apporteurs</b> actifs "
-                f"servant <b>{nb_cli:,} assures distincts</b>. Le taux de resiliation s'etablit a "
-                f"<b>{tx_resil:.1f}%</b> — niveau {risk_qual}."
-            )
-            story.append(Paragraph(résumé_txt, st_body))
-            story.append(Spacer(1, 0.4*cm))
-
-            # ── 2. INDICATEURS CLÉS ──────────────────────────────────────────
-            story.append(Paragraph("2. Indicateurs cles de performance (KPI)", st_h1))
-            kpi_data = [
-                ["Indicateur","Valeur","Commentaire"],
-                ["Polices totales", f"{tot_p:,}", f"Periode : {label_yr}"],
-                ["Polices actives", f"{nb_actif:,}", f"{tx_actif:.1f}% du portefeuille"],
-                ["Polices resiliees", f"{nb_resil:,}", f"{tx_resil:.1f}% — " + ("CRITIQUE" if tx_resil>50 else ("Eleve" if tx_resil>25 else "Maitrise"))],
-                ["Polices inactives", f"{nb_inact:,}", f"{nb_inact/max(tot_p,1)*100:.1f}% — a relancer"],
-                ["Polices echues", f"{nb_echu:,}", f"{nb_echu/max(tot_p,1)*100:.1f}%"],
-                ["Polices suspendues", f"{nb_susp:,}", f"{nb_susp/max(tot_p,1)*100:.1f}%"],
-                ["CA total (encaissements)", fmt(ca_tot), "Tous statuts confondus"],
-                ["CA polices actives", fmt(ca_act), "Encaissements polices ACTIF"],
-                ["Ticket moyen / police", fmt(ticket), "Encaissement moyen unitaire"],
-                ["ARPU (revenu / client)", fmt(arpu) if arpu else "—", "Encaissement moyen par assure"],
-                ["Nombre d'apporteurs", f"{nb_comm:,}", "Commerciaux actifs (NOM_APP distincts)"],
-                ["Nombre de clients", f"{nb_cli:,}", "Assures distincts (NOM_ASSU)"],
-                ["BIA saisis (BD interne)", f"{nb_bia:,}", "Bulletins d'Adhesion"],
-                ["Cotisations BIA", fmt(cot_bia), "Total cumule periode"],
-            ]
-            kpi_tbl = Table(kpi_data, colWidths=[6.5*cm, 4*cm, 6.5*cm], repeatRows=1)
-            kpi_tbl.setStyle(TableStyle([
-                ("BACKGROUND",(0,0),(-1,0),NAVY_RL),
-                ("TEXTCOLOR",(0,0),(-1,0),GOLDL_RL),
-                ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
-                ("FONTSIZE",(0,0),(-1,0),9.5),
-                ("FONTNAME",(0,1),(-1,-1),"Helvetica"),
-                ("FONTSIZE",(0,1),(-1,-1),9),
-                ("ALIGN",(1,1),(1,-1),"RIGHT"),
-                ("ALIGN",(0,0),(-1,0),"CENTER"),
-                ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
-                ("ROWBACKGROUNDS",(0,1),(-1,-1),[rl_colors.white, LGRAY_RL]),
-                ("LINEBELOW",(0,0),(-1,0),1,GOLD_RL),
-                ("BOX",(0,0),(-1,-1),0.5,rl_colors.HexColor("#CCCCCC")),
-                ("LEFTPADDING",(0,0),(-1,-1),8),
-                ("RIGHTPADDING",(0,0),(-1,-1),8),
-                ("TOPPADDING",(0,0),(-1,-1),5),
-                ("BOTTOMPADDING",(0,0),(-1,-1),5),
-            ]))
-            story.append(kpi_tbl)
-            story.append(Spacer(1, 0.4*cm))
-
-            # ── 3. RÉPARTITION PAR STATUT ────────────────────────────────────
-            story.append(Paragraph("3. Repartition du portefeuille par statut", st_h1))
-            stat_data = [
-                ["Statut","Nombre","Part","CA estime (FCFA)"],
-                ["Actif", f"{nb_actif:,}", f"{tx_actif:.1f}%", fmt(ca_act)],
-                ["Resilie", f"{nb_resil:,}", f"{tx_resil:.1f}%", "—"],
-                ["Inactif", f"{nb_inact:,}", f"{nb_inact/max(tot_p,1)*100:.1f}%", "—"],
-                ["Echu", f"{nb_echu:,}", f"{nb_echu/max(tot_p,1)*100:.1f}%", "—"],
-                ["Suspendu", f"{nb_susp:,}", f"{nb_susp/max(tot_p,1)*100:.1f}%", "—"],
-                ["TOTAL", f"{tot_p:,}", "100%", fmt(ca_tot)],
-            ]
-            stat_tbl = Table(stat_data, colWidths=[4.5*cm, 3*cm, 3*cm, 6.5*cm], repeatRows=1)
-            stat_tbl.setStyle(TableStyle([
-                ("BACKGROUND",(0,0),(-1,0),NAVY_RL),
-                ("TEXTCOLOR",(0,0),(-1,0),GOLDL_RL),
-                ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
-                ("FONTNAME",(0,-1),(-1,-1),"Helvetica-Bold"),
-                ("BACKGROUND",(0,-1),(-1,-1),GOLD_RL),
-                ("TEXTCOLOR",(0,-1),(-1,-1),NAVY_RL),
-                ("FONTSIZE",(0,0),(-1,-1),9.5),
-                ("ALIGN",(1,0),(-1,-1),"RIGHT"),
-                ("ALIGN",(0,0),(-1,0),"CENTER"),
-                ("ROWBACKGROUNDS",(0,1),(-1,-2),[rl_colors.white, LGRAY_RL]),
-                ("BOX",(0,0),(-1,-1),0.5,rl_colors.HexColor("#CCCCCC")),
-                ("INNERGRID",(0,0),(-1,-1),0.25,rl_colors.HexColor("#E0E0E0")),
-                ("TOPPADDING",(0,0),(-1,-1),5),
-                ("BOTTOMPADDING",(0,0),(-1,-1),5),
-            ]))
-            story.append(stat_tbl)
-            story.append(PageBreak())
-
-            def _make_top_table(rows, col_widths):
-                t = Table(rows, colWidths=col_widths, repeatRows=1)
-                t.setStyle(TableStyle([
-                    ("BACKGROUND",(0,0),(-1,0),NAVY_RL),
-                    ("TEXTCOLOR",(0,0),(-1,0),GOLDL_RL),
-                    ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
-                    ("FONTSIZE",(0,0),(-1,-1),9),
-                    ("ALIGN",(0,0),(0,-1),"CENTER"),
-                    ("ALIGN",(2,1),(-1,-1),"RIGHT"),
-                    ("ROWBACKGROUNDS",(0,1),(-1,-1),[rl_colors.white, LGRAY_RL]),
-                    ("BOX",(0,0),(-1,-1),0.5,rl_colors.HexColor("#CCCCCC")),
-                    ("TOPPADDING",(0,0),(-1,-1),4),
-                    ("BOTTOMPADDING",(0,0),(-1,-1),4),
-                ]))
-                return t
-
-            # ── 4. TOP COMMERCIAUX ───────────────────────────────────────────
-            story.append(Paragraph("4. Top 10 apporteurs (commerciaux)", st_h1))
-            if pf_rep is not None and "NOM_APP" in pf_rep.columns:
-                tcom = pf_rep.groupby("NOM_APP").agg(
-                    nb=("NOM_APP","count"),
-                    ca=("MONTENCA","sum") if "MONTENCA" in pf_rep.columns else ("NOM_APP","count"),
-                ).reset_index().sort_values("ca",ascending=False).head(10)
-                tcom["NOM_APP"] = tcom["NOM_APP"].astype(str).str.title()
-                rows = [["Rang","Apporteur","Polices","CA (FCFA)"]]
-                for i,(_,r) in enumerate(tcom.iterrows()):
-                    rows.append([f"{i+1}", str(r["NOM_APP"])[:40], f"{int(r['nb']):,}", fmt(float(r['ca']))])
-                story.append(_make_top_table(rows, [1.5*cm, 8*cm, 3*cm, 4.5*cm]))
-            else:
-                story.append(Paragraph("<i>Donnees apporteurs indisponibles (importez le portefeuille Excel).</i>", st_body))
-            story.append(Spacer(1, 0.4*cm))
-
-            # ── 5. TOP CLIENTS ───────────────────────────────────────────────
-            story.append(Paragraph("5. Top 10 clients (par chiffre d'affaires)", st_h1))
-            if pf_rep is not None and "NOM_ASSU" in pf_rep.columns:
-                tcli = pf_rep.groupby("NOM_ASSU").agg(
-                    nb=("NOM_ASSU","count"),
-                    ca=("MONTENCA","sum") if "MONTENCA" in pf_rep.columns else ("NOM_ASSU","count"),
-                ).reset_index().sort_values("ca",ascending=False).head(10)
-                tcli["NOM_ASSU"] = tcli["NOM_ASSU"].astype(str).str.title()
-                rows = [["Rang","Client","Contrats","CA (FCFA)"]]
-                for i,(_,r) in enumerate(tcli.iterrows()):
-                    rows.append([f"{i+1}", str(r["NOM_ASSU"])[:40], f"{int(r['nb']):,}", fmt(float(r['ca']))])
-                story.append(_make_top_table(rows, [1.5*cm, 8*cm, 3*cm, 4.5*cm]))
-            else:
-                story.append(Paragraph("<i>Donnees clients indisponibles.</i>", st_body))
-            story.append(PageBreak())
-
-            # ── 6. RÉPARTITION PAR PRODUIT ───────────────────────────────────
-            story.append(Paragraph("6. Performance par produit (top 10)", st_h1))
-            if pf_rep is not None and "LIBECATE" in pf_rep.columns:
-                tprod = pf_rep.groupby("LIBECATE").agg(
-                    nb=("LIBECATE","count"),
-                    ca=("MONTENCA","sum") if "MONTENCA" in pf_rep.columns else ("LIBECATE","count"),
-                ).reset_index().sort_values("nb",ascending=False).head(10)
-                rows = [["Rang","Produit","Polices","CA (FCFA)","Part"]]
-                for i,(_,r) in enumerate(tprod.iterrows()):
-                    rows.append([f"{i+1}", str(r["LIBECATE"])[:35], f"{int(r['nb']):,}",
-                        fmt(float(r['ca'])), f"{int(r['nb'])/max(tot_p,1)*100:.1f}%"])
-                story.append(_make_top_table(rows, [1.4*cm, 7*cm, 2.6*cm, 4*cm, 2*cm]))
-            story.append(Spacer(1, 0.4*cm))
-
-            # ── 7. RÉSEAU GÉOGRAPHIQUE (Top 10 villes) ──────────────────────
-            story.append(Paragraph("7. Reseau geographique — Top 10 villes (LIBEVILL)", st_h1))
-            if pf_rep is not None and "LIBEVILL" in pf_rep.columns:
-                tvil = pf_rep.groupby("LIBEVILL").agg(
-                    nb=("LIBEVILL","count"),
-                    ca=("MONTENCA","sum") if "MONTENCA" in pf_rep.columns else ("LIBEVILL","count"),
-                ).reset_index().sort_values("nb",ascending=False).head(10)
-                rows = [["Rang","Ville","Polices","CA (FCFA)"]]
-                for i,(_,r) in enumerate(tvil.iterrows()):
-                    rows.append([f"{i+1}", str(r["LIBEVILL"])[:30], f"{int(r['nb']):,}", fmt(float(r['ca']))])
-                story.append(_make_top_table(rows, [1.5*cm, 8*cm, 3*cm, 4.5*cm]))
-            story.append(Spacer(1, 0.4*cm))
-
-            # ── 8. DOMICILIATION BANCAIRE ────────────────────────────────────
-            if pf_rep is not None and "LIBEBANQ" in pf_rep.columns:
-                story.append(Paragraph("8. Top 10 banques de domiciliation", st_h1))
-                tbnk = pf_rep["LIBEBANQ"].dropna().astype(str).value_counts().head(10).reset_index()
-                tbnk.columns = ["Banque","Polices"]
-                rows = [["Rang","Banque","Polices","Part"]]
-                for i,(_,r) in enumerate(tbnk.iterrows()):
-                    rows.append([f"{i+1}", str(r["Banque"])[:30], f"{int(r['Polices']):,}",
-                        f"{int(r['Polices'])/max(tot_p,1)*100:.1f}%"])
-                story.append(_make_top_table(rows, [1.5*cm, 8.5*cm, 3*cm, 3*cm]))
-            story.append(PageBreak())
-
-            # ── 9. ANALYSE DES RISQUES ───────────────────────────────────────
-            story.append(Paragraph("9. Analyse des risques & recommandations", st_h1))
-            risk_lvl = "CRITIQUE" if tx_resil>50 else ("ELEVE" if tx_resil>25 else "MAITRISE")
-            risk_explain = ("(au-dessus du seuil critique CIMA de 50%). Une revision des produits Epargne Credit "
-                            "et Horizon Retraite est recommandee." if tx_resil>50 else
-                            ("(au-dessus du seuil d'alerte de 25%). Mettre en place une campagne de fidelisation."
-                             if tx_resil>25 else "(en dessous du seuil d'alerte). Performance saine."))
-            risk_txt = (
-                f"<b>Niveau de risque global :</b> {risk_lvl}<br/><br/>"
-                f"• <b>Taux de resiliation : {tx_resil:.1f}%</b> {risk_explain}<br/>"
-                f"• <b>{nb_inact:,} polices inactives</b> representent un gisement de relance "
-                f"({nb_inact/max(tot_p,1)*100:.1f}% du portefeuille).<br/>"
-                f"• <b>{nb_echu:,} polices echues</b> a analyser pour reconduction tacite ou resiliation administrative.<br/>"
-                f"• <b>Concentration geographique</b> : surveiller la dependance aux principales villes du reseau."
-            )
-            story.append(Paragraph(risk_txt, st_body))
-            story.append(Spacer(1, 0.5*cm))
-
-            recos = (
-                "<b>Plan d'action recommande :</b><br/>"
-                "1. Lancer une campagne de relance ciblee sur les polices inactives sous 30 jours.<br/>"
-                "2. Programme d'incentive renforce pour le Top 10 des apporteurs.<br/>"
-                "3. Audit des produits a fort taux de resiliation (revue tarifaire et contractuelle).<br/>"
-                "4. Renforcement du maillage commercial dans les villes secondaires identifiees.<br/>"
-                "5. Mise en place d'un suivi mensuel des KPIs avec ce tableau de bord."
-            )
-            story.append(Paragraph(recos, st_body))
-            story.append(Spacer(1, 0.4*cm))
-
-            # ── 10. CONCLUSION ───────────────────────────────────────────────
-            story.append(Paragraph("10. Conclusion", st_h1))
-            ccl = (
-                f"Ce rapport offre a la Direction Generale d'AFG Assurances Benin Vie une vision "
-                f"consolidee du portefeuille pour la periode <b>{label_yr}</b>. Les indicateurs presentes "
-                f"permettent de prendre des decisions strategiques eclairees en matiere de pilotage "
-                f"commercial, gestion des risques et developpement du reseau. Le tableau de bord PDG v19 "
-                f"est conforme aux exigences CIMA et met a disposition des outils de prevision et de "
-                f"surveillance temps reel pour piloter la performance avec precision."
-            )
-            story.append(Paragraph(ccl, st_body))
-            story.append(Spacer(1, 0.6*cm))
-            story.append(Paragraph("« A AFG Assurances Benin Vie, nous avons pense a vous ! »", st_callout))
-
-            # ── PIED DE PAGE ─────────────────────────────────────────────────
-            def _footer(canvas, doc_):
-                canvas.saveState()
-                canvas.setFont("Helvetica", 8)
-                canvas.setFillColor(rl_colors.HexColor("#5A6478"))
-                canvas.drawString(1.8*cm, 1*cm,
-                    "AFG Assurances Benin Vie · Conforme CIMA · Groupe AFG Holding")
-                canvas.drawRightString(A4[0]-1.8*cm, 1*cm,
-                    f"Page {doc_.page} · {datetime.now().strftime('%d/%m/%Y')}")
-                canvas.setStrokeColor(GOLD_RL)
-                canvas.setLineWidth(0.6)
-                canvas.line(1.8*cm, 1.3*cm, A4[0]-1.8*cm, 1.3*cm)
-                canvas.restoreState()
-
-            doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
-
-            pdf_bytes = buf_pdf.getvalue()
-            st.session_state["last_pdf_report"] = pdf_bytes
-            st.session_state["last_pdf_name"] = f"AFG_Rapport_Executif_{label_yr.replace(', ','-').replace(' ','_')}.pdf"
-            st.success(f"✅ Rapport PDF généré ({len(pdf_bytes)//1024} Ko) — Cliquez ci-dessous pour télécharger.")
-
-        if st.session_state.get("last_pdf_report"):
-            st.download_button(
-                "⬇️ Télécharger le rapport PDF",
-                data=st.session_state["last_pdf_report"],
-                file_name=st.session_state.get("last_pdf_name","AFG_Rapport.pdf"),
-                mime="application/pdf",
-                use_container_width=True, type="primary")
-
-    # ────────────────── 2. EXCEL MULTI-ONGLETS ───────────────────────────────
-    with cdl2:
-        st.subheader("📊 Excel multi-onglets")
-        st.caption("Fichier complet avec données brutes, KPIs, classements.")
-        if st.button("📥 Générer Excel complet", use_container_width=True):
-            buf = io.BytesIO()
-            with pd.ExcelWriter(buf, engine='openpyxl') as wr:
-                kpis_df = pd.DataFrame({
-                    'Indicateur': ['Période','Source','Polices totales','Polices actives',
-                        'Polices résiliées','Polices inactives','Polices échues','Polices suspendues',
-                        'CA total','CA actifs','Ticket moyen','ARPU','Taux actif','Taux résiliation',
-                        'Apporteurs','Clients distincts','BIA saisis','Cotisations BIA'],
-                    'Valeur': [label_yr, src_lbl, tot_p, nb_actif, nb_resil, nb_inact, nb_echu, nb_susp,
-                        ca_tot, ca_act, ticket, arpu, f"{tx_actif:.2f}%", f"{tx_resil:.2f}%",
-                        nb_comm, nb_cli, nb_bia, cot_bia]
-                })
-                kpis_df.to_excel(wr, sheet_name='KPIs', index=False)
-
-                if pf_rep is not None and not pf_rep.empty:
-                    pf_rep.head(10000).to_excel(wr, sheet_name='Portefeuille', index=False)
-                    if "NOM_APP" in pf_rep.columns:
-                        tcom = pf_rep.groupby("NOM_APP").agg(
-                            polices=("NOM_APP","count"),
-                            ca=("MONTENCA","sum") if "MONTENCA" in pf_rep.columns else ("NOM_APP","count"),
-                        ).reset_index().sort_values("ca",ascending=False)
-                        tcom.to_excel(wr, sheet_name='Top apporteurs', index=False)
-                    if "NOM_ASSU" in pf_rep.columns:
-                        tcli = pf_rep.groupby("NOM_ASSU").agg(
-                            polices=("NOM_ASSU","count"),
-                            ca=("MONTENCA","sum") if "MONTENCA" in pf_rep.columns else ("NOM_ASSU","count"),
-                        ).reset_index().sort_values("ca",ascending=False).head(100)
-                        tcli.to_excel(wr, sheet_name='Top 100 clients', index=False)
-                    if "LIBECATE" in pf_rep.columns:
-                        tprod = pf_rep.groupby("LIBECATE").agg(
-                            polices=("LIBECATE","count"),
-                            ca=("MONTENCA","sum") if "MONTENCA" in pf_rep.columns else ("LIBECATE","count"),
-                        ).reset_index().sort_values("polices",ascending=False)
-                        tprod.to_excel(wr, sheet_name='Produits', index=False)
-                    if "LIBEVILL" in pf_rep.columns:
-                        tvil = pf_rep.groupby("LIBEVILL").agg(
-                            polices=("LIBEVILL","count"),
-                            ca=("MONTENCA","sum") if "MONTENCA" in pf_rep.columns else ("LIBEVILL","count"),
-                        ).reset_index().sort_values("polices",ascending=False)
-                        tvil.to_excel(wr, sheet_name='Villes', index=False)
-
-                if not df_bia_rep.empty:
-                    bia_export = df_bia_rep.drop(
-                        columns=['sig_souscripteur','sig_assure','sig_conseiller'], errors='ignore')
-                    bia_export.to_excel(wr, sheet_name='BIA', index=False)
-
-            st.download_button("⬇️ Télécharger Excel", data=buf.getvalue(),
-                file_name=f"AFG_Rapport_Complet_{label_yr.replace(', ','-').replace(' ','_')}.xlsx",
+    _e1,_e2,_e3 = st.columns(3)
+    with _e1:
+        st.markdown(f"""<div style="background:{BLUEL}15;border:2px solid {BLUEL};border-radius:12px;
+             padding:1rem;text-align:center;">
+          <div style="font-size:2rem;">📋</div>
+          <div style="font-weight:800;color:{NAVY};margin:6px 0;">Portefeuille Excel</div>
+          <div style="font-size:11px;color:#5A6478;margin-bottom:10px;">
+            {'✅ ' + f"{len(_pf_exp):,}" + ' polices chargées' if _pf_exp is not None else '⚠️ Non chargé'}</div>
+        </div>""", unsafe_allow_html=True)
+        if _pf_exp is not None:
+            _df_exp_pf = filter_pf_by_year(_pf_exp.copy(), _yr_exp)
+            _buf_pf_exp = io.BytesIO()
+            with pd.ExcelWriter(_buf_pf_exp, engine="openpyxl") as _wx_pf:
+                _df_exp_pf.to_excel(_wx_pf, index=False, sheet_name="Portefeuille")
+            st.download_button(f"⬇️ Portefeuille · {_lbl_exp}",
+                data=_buf_pf_exp.getvalue(),
+                file_name=f"AFG_Portefeuille_{_lbl_exp.replace(' ','_')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True)
 
-    # ────────────────── 3. CSV ───────────────────────────────────────────────
-    with cdl3:
-        st.subheader("📄 CSV portefeuille")
-        st.caption("Export brut pour analyses externes.")
-        if st.button("📥 Générer CSV", use_container_width=True):
-            if pf_rep is not None and not pf_rep.empty:
-                csv_data = pf_rep.to_csv(index=False).encode('utf-8-sig')
-                st.download_button("⬇️ Télécharger CSV", data=csv_data,
-                    file_name=f"AFG_Portefeuille_{label_yr.replace(', ','-').replace(' ','_')}.csv",
-                    mime="text/csv", use_container_width=True)
-            elif not df_int_rep.empty:
-                csv_cols = [c for c in ['numero_contrat','date_souscription','nom','prenom',
-                    'cln','pnom','categorie','groupe','prime_annuelle','prime_unique','eq',
-                    'statut','region'] if c in df_int_rep.columns]
-                csv_data = df_int_rep[csv_cols].to_csv(index=False).encode('utf-8-sig')
-                st.download_button("⬇️ Télécharger CSV", data=csv_data,
-                    file_name=f"AFG_Contrats_{label_yr.replace(', ','-').replace(' ','_')}.csv",
-                    mime="text/csv", use_container_width=True)
-            else:
-                alert("Aucune donnée à exporter.","warn")
+    with _e2:
+        st.markdown(f"""<div style="background:{GOLD}15;border:2px solid {GOLD};border-radius:12px;
+             padding:1rem;text-align:center;">
+          <div style="font-size:2rem;">💰</div>
+          <div style="font-weight:800;color:{NAVY};margin:6px 0;">Base CA Excel</div>
+          <div style="font-size:11px;color:#5A6478;margin-bottom:10px;">
+            {'✅ ' + f"{len(_ca_exp):,}" + ' quittances chargées' if _ca_exp is not None else '⚠️ Non chargée'}</div>
+        </div>""", unsafe_allow_html=True)
+        if _ca_exp is not None:
+            _sel_ca_exp = period_selector("exp_ca_v40","📅 Période CA", df_ca=_ca_exp)
+            _df_ca_exp  = filter_by_period(_ca_exp, _sel_ca_exp, date_col="DATECOMP")
+            _lbl_ca_exp = _sel_ca_exp.get("label","Toutes")
+            _buf_ca_exp = io.BytesIO()
+            with pd.ExcelWriter(_buf_ca_exp, engine="openpyxl") as _wx_ca:
+                _df_ca_exp.to_excel(_wx_ca, index=False, sheet_name="CA")
+            st.download_button(f"⬇️ Base CA · {_lbl_ca_exp}",
+                data=_buf_ca_exp.getvalue(),
+                file_name=f"AFG_CA_{_lbl_ca_exp.replace(' ','_')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True)
 
+    with _e3:
+        st.markdown(f"""<div style="background:{GREEN}15;border:2px solid {GREEN};border-radius:12px;
+             padding:1rem;text-align:center;">
+          <div style="font-size:2rem;">🏥</div>
+          <div style="font-weight:800;color:{NAVY};margin:6px 0;">Base Prestations Excel</div>
+          <div style="font-size:11px;color:#5A6478;margin-bottom:10px;">
+            {'✅ ' + f"{len(_sin_exp):,}" + ' dossiers chargés' if _sin_exp is not None else '⚠️ Non chargée'}</div>
+        </div>""", unsafe_allow_html=True)
+        if _sin_exp is not None:
+            _buf_sin_exp = io.BytesIO()
+            with pd.ExcelWriter(_buf_sin_exp, engine="openpyxl") as _wx_sin:
+                _sin_exp.to_excel(_wx_sin, index=False, sheet_name="Prestations")
+            st.download_button("⬇️ Base Prestations (complète)",
+                data=_buf_sin_exp.getvalue(),
+                file_name="AFG_Prestations.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True)
+
+    # ── Rapport synthèse CSV ──────────────────────────────────────────────────
+    st.markdown("---")
+    sth("📊 Rapport synthèse CSV","INDICATEURS CLÉS")
+    if _pf_exp is not None or _ca_exp is not None:
+        _syn = []
+        if _pf_exp is not None:
+            _kpis_pf = st.session_state.get("kpis_pf", {})
+            _syn.append({"Indicateur":"Nb polices total","Valeur":f"{len(_pf_exp):,}","Source":"Portefeuille"})
+            _syn.append({"Indicateur":"Polices actives","Valeur":f"{_kpis_pf.get('nb_actif',0):,}","Source":"Portefeuille"})
+            _syn.append({"Indicateur":"CA portefeuille (MONTENCA)","Valeur":fmt(_kpis_pf.get('ca_tot',0)),"Source":"Portefeuille"})
+        if _ca_exp is not None:
+            _kpis_ca = st.session_state.get("kpis_ca", {})
+            _syn.append({"Indicateur":"CA encaissé (CHIFAFFA)","Valeur":fmt(_kpis_ca.get('ca_total',0)),"Source":"Base CA"})
+            _syn.append({"Indicateur":"Nb quittances","Valeur":f"{_kpis_ca.get('nb_quittances',0):,}","Source":"Base CA"})
+        if _sin_exp is not None:
+            _kpis_sin = st.session_state.get("kpis_sin", {})
+            _syn.append({"Indicateur":"Total réglé sinistres","Valeur":fmt(_kpis_sin.get('total_regle',0)),"Source":"Prestations"})
+        _df_syn = pd.DataFrame(_syn)
+        st.dataframe(_df_syn, use_container_width=True, hide_index=True)
+        _csv_syn = _df_syn.to_csv(index=False).encode("utf-8-sig")
+        st.download_button("⬇️ Rapport synthèse CSV", data=_csv_syn,
+            file_name="AFG_Rapport_Synthese.csv", mime="text/csv", use_container_width=True)
+    else:
+        alert("Chargez au moins une base pour générer un rapport.","info")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE PARTENAIRES v40 — CHIFAFFA (CA) · DATECOMP · codes 3 chiffres ≠ 100
+# ══════════════════════════════════════════════════════════════════════════════
+elif "Partenaires" in nav:
+    sth("🤝 Partenaires Financiers — Apporteurs AFG VIE","TABLEAU DE BORD STRATÉGIQUE")
+
+    _ca_part = st.session_state.get("ca_ext")
+    _pf_part = st.session_state.get("portefeuille_ext")
+
+    if _ca_part is None or (hasattr(_ca_part,"empty") and _ca_part.empty):
+        alert("📥 Importez la <b>base CA</b> depuis <b>Accueil</b> pour activer le suivi Partenaires.","warn"); st.stop()
+
+    if "CODEAPPO" not in _ca_part.columns:
+        alert("La base CA ne contient pas la colonne <b>CODEAPPO</b>.","danger"); st.stop()
+
+    # ── Sélecteur période ────────────────────────────────────────────────────
+    _sel_part = period_selector("part_v40","📅 Période DATECOMP", df_ca=_ca_part)
+    _lbl_part = _sel_part.get("label","Toutes périodes")
+    _ca_pf    = filter_by_period(_ca_part, _sel_part, date_col="DATECOMP")
+
+    if _ca_pf.empty:
+        alert(f"Aucune donnée CA pour {_lbl_part}.","warn"); st.stop()
+
+    # ── Normalisation CODEAPPO ────────────────────────────────────────────────
+    _ca_pf = _ca_pf.copy()
+    _ca_pf["_CAN"] = _ca_pf["CODEAPPO"].apply(lambda x: str(x).strip().replace(".0","").upper() if pd.notna(x) else "")
+    _df_pa = _ca_pf[_ca_pf["_CAN"].apply(is_partenaire_code)].copy()
+
+    _ca_ref = float(_ca_pf["CHIFAFFA"].sum()) if "CHIFAFFA" in _ca_pf.columns else 1.0
+
+    if _df_pa.empty:
+        alert(f"Aucun partenaire (code 3 chiffres ≠ 100) pour {_lbl_part}.","warn"); st.stop()
+
+    # ── Noms depuis portefeuille ──────────────────────────────────────────────
+    _nom_map_p = {}
+    if _pf_part is not None and "CODEAPPO" in _pf_part.columns and "NOM_APP" in _pf_part.columns:
+        for _, _r in _pf_part[["CODEAPPO","NOM_APP"]].dropna().drop_duplicates().iterrows():
+            _k = str(_r["CODEAPPO"]).strip().replace(".0","").upper()
+            if _k and _k not in _nom_map_p: _nom_map_p[_k] = str(_r["NOM_APP"]).strip().title()
+    if "NOM_APP" in _df_pa.columns:
+        for _k, _g in _df_pa.groupby("_CAN"):
+            if _k not in _nom_map_p:
+                _v = _g["NOM_APP"].dropna().astype(str).str.strip()
+                if not _v.empty and _v.iloc[0]: _nom_map_p[_k] = _v.iloc[0].title()
+    _df_pa["PARTENAIRE"] = _df_pa["_CAN"].map(_nom_map_p).fillna("Partenaire " + _df_pa["_CAN"])
+
+    # ── Agrégat ────────────────────────────────────────────────────────────────
+    _agg_p_dict = {"ca":("CHIFAFFA","sum"),"nb_q":("CHIFAFFA","count")}
+    if "POLICE_KEY" in _df_pa.columns: _agg_p_dict["nb_pol"] = ("POLICE_KEY","nunique")
+    if "COMMAPPO"   in _df_pa.columns: _agg_p_dict["comm"]   = ("COMMAPPO","sum")
+    _agg_p = _df_pa.groupby(["_CAN","PARTENAIRE"]).agg(**_agg_p_dict).reset_index()
+    _agg_p = _agg_p.sort_values("ca",ascending=False).reset_index(drop=True)
+    if "nb_pol" not in _agg_p.columns: _agg_p["nb_pol"] = _agg_p["nb_q"]
+    if "comm"   not in _agg_p.columns: _agg_p["comm"]   = 0.0
+    _agg_p["part_%"] = (_agg_p["ca"]/_agg_p["ca"].sum().clip(1)*100).round(2)
+    _agg_p["ticket"] = (_agg_p["ca"]/_agg_p["nb_q"].clip(1)).round(0)
+    _agg_p["rang"]   = range(1,len(_agg_p)+1)
+
+    _ca_p_tot  = float(_agg_p["ca"].sum())
+    _nb_part   = len(_agg_p)
+    _share_p   = _ca_p_tot / max(_ca_ref, 1) * 100
+    _comm_p    = float(_agg_p["comm"].sum())
+    _tx_comm_p = _comm_p / max(_ca_p_tot, 1) * 100
+    _ticket_p  = _ca_p_tot / max(int(_agg_p["nb_q"].sum()), 1)
+
+    # HHI
+    _sh_p = _agg_p["ca"]; _sh_p = _sh_p[_sh_p>0]
+    _hhi  = float(((_sh_p/_sh_p.sum())**2).sum()*10000) if not _sh_p.empty else 0.0
+    _hhi_lbl = "diversifié" if _hhi<1500 else ("modéré" if _hhi<2500 else "concentré")
+    _hhi_clr = "green" if _hhi<1500 else ("amber" if _hhi<2500 else "red")
+
+    # ── Bandeau ───────────────────────────────────────────────────────────────
+    st.markdown(f"""
+    <div style="background:linear-gradient(135deg,#003366,#0E7C66);border-radius:14px;
+         padding:1.2rem 1.8rem;margin-bottom:1rem;border-left:6px solid #C9A227;">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:1rem;">
+        <div>
+          <div style="color:#E8C84A;font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.15em;">
+            AFG VIE — Partenaires Financiers v40</div>
+          <div style="color:white;font-size:1.1rem;font-weight:900;">
+            🤝 {_nb_part} partenaires actifs · {_lbl_part}</div>
+          <div style="color:rgba(255,255,255,.65);font-size:11px;">
+            📅 Période : <b style="color:#E8C84A;">{_lbl_part}</b>
+            · {int(_agg_p['nb_q'].sum()):,} quittances
+          </div>
+        </div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;">
+          <div style="background:rgba(201,162,39,.18);border:2px solid rgba(201,162,39,.55);
+               border-radius:12px;padding:8px 14px;text-align:center;">
+            <div style="font-size:1.1rem;font-weight:900;color:#E8C84A;">{fmt(_ca_p_tot)}</div>
+            <div style="font-size:9px;color:rgba(255,255,255,.7);">CA Partenaires</div>
+          </div>
+          <div style="background:rgba(77,255,224,.10);border:2px solid rgba(77,255,224,.4);
+               border-radius:12px;padding:8px 14px;text-align:center;">
+            <div style="font-size:1.2rem;font-weight:900;color:#4DFFE0;">{_share_p:.1f}%</div>
+            <div style="font-size:9px;color:rgba(255,255,255,.7);">Part CA total</div>
+          </div>
+        </div>
+      </div>
+    </div>""", unsafe_allow_html=True)
+
+    _pk = st.columns(6)
+    with _pk[0]: kpi("💰 CA Partenaires", fmt(_ca_p_tot),   _lbl_part,          "gold","")
+    with _pk[1]: kpi("🤝 Partenaires",    str(_nb_part),     "codes 3 chiff.≠100","teal","")
+    with _pk[2]: kpi("🧾 Quittances",     f"{int(_agg_p['nb_q'].sum()):,}","lignes CA","","")
+    with _pk[3]: kpi("📊 Part marché",    f"{_share_p:.2f}%",f"sur {fmt(_ca_ref)} total","gold","")
+    with _pk[4]: kpi("💼 Commissions",    fmt(_comm_p),      f"{_tx_comm_p:.2f}%","teal","")
+    with _pk[5]: kpi("⚖️ HHI",           f"{_hhi:,.0f}",    _hhi_lbl,           _hhi_clr,"")
+
+    st.markdown("---")
+    _tp1p,_tp2p,_tp3p,_tp4p = st.tabs(["🏆 Classement","📈 Évolution","🔍 Fiche","📋 Export"])
+
+    with _tp1p:
+        sth(f"🏆 Classement CA — {_lbl_part}","CHIFAFFA")
+        _topP = _agg_p.head(20).copy()
+        _topP["_disp"] = _topP["rang"].astype(str) + ". " + _topP["PARTENAIRE"] + " (" + _topP["_CAN"] + ")"
+        fig_cl_p = go.Figure(go.Bar(
+            x=_topP["ca"], y=_topP["_disp"], orientation="h",
+            marker=dict(color=_topP["ca"],colorscale=[[0,"#0E7C66"],[0.5,GOLD],[1,NAVY]],showscale=False),
+            text=[f"{fmt(v)} · {p:.1f}%" for v,p in zip(_topP["ca"],_topP["part_%"])],
+            textposition="outside", textfont=dict(size=9,color=NAVY)))
+        fig_cl_p.update_layout(yaxis=dict(autorange="reversed",tickfont=dict(size=9)))
+        chl(fig_cl_p,580,f"💰 CA partenaires — {_lbl_part}")
+        st.plotly_chart(fig_cl_p, use_container_width=True)
+
+        # Podium
+        if len(_agg_p)>=1:
+            st.markdown("---"); sth("🥇 Podium","TOP 3")
+            _pod_p = st.columns(3)
+            for _ri,_ci,_med,_bg,_bd in [(0,1,"🥇","#FFFDE7","#DAA520"),(1,0,"🥈","#F5F5F5","#9E9E9E"),(2,2,"🥉","#FBE9E7","#BF360C")]:
+                if _ri < len(_agg_p):
+                    _rp2 = _agg_p.iloc[_ri]
+                    with _pod_p[_ci]:
+                        st.markdown(f"""
+                        <div style="background:{_bg};border:2.5px solid {_bd};border-radius:14px;
+                             padding:1.2rem .8rem;text-align:center;min-height:180px;">
+                          <div style="font-size:2.5rem;">{_med}</div>
+                          <div style="font-size:11px;font-weight:900;color:{NAVY};">{str(_rp2['PARTENAIRE'])[:35]}</div>
+                          <div style="font-size:10px;color:#5A6478;">Code : <b>{_rp2['_CAN']}</b></div>
+                          <div style="font-size:1.1rem;font-weight:900;color:{NAVY};margin:6px 0;">{fmt(_rp2['ca'])}</div>
+                          <div style="font-size:10px;color:#5A6478;">{int(_rp2['nb_q']):,} quitt. · {_rp2['part_%']:.1f}%</div>
+                        </div>""", unsafe_allow_html=True)
+
+    with _tp2p:
+        sth(f"📈 Évolution mensuelle — {_lbl_part}","DATECOMP")
+        if "YYYYMM_COMP" in _df_pa.columns:
+            _top10_p = _agg_p.head(10)["_CAN"].tolist()
+            _nmap_p  = {r["_CAN"]:r["PARTENAIRE"] for _,r in _agg_p.head(10).iterrows()}
+            _evo_p = _df_pa[_df_pa["_CAN"].isin(_top10_p)].copy()
+            _evo_p["_NOM_P"] = _evo_p["_CAN"].map(_nmap_p).fillna(_evo_p["_CAN"])
+            _evo_pm = _evo_p.groupby(["YYYYMM_COMP","_NOM_P"])["CHIFAFFA"].sum().reset_index().sort_values("YYYYMM_COMP")
+            fig_ev_p2 = px.line(_evo_pm, x="YYYYMM_COMP", y="CHIFAFFA", color="_NOM_P",
+                markers=True, labels={"YYYYMM_COMP":"Mois","CHIFAFFA":"CA (FCFA)","_NOM_P":"Partenaire"})
+            fig_ev_p2.update_layout(legend=dict(font=dict(size=8),orientation="h",y=-0.3))
+            chl(fig_ev_p2,480,f"📈 CA mensuel partenaires · {_lbl_part}")
+            st.plotly_chart(fig_ev_p2, use_container_width=True)
+        else:
+            alert("YYYYMM_COMP non disponible.","info")
+
+    with _tp3p:
+        sth("🔍 Fiche partenaire","DÉTAIL")
+        _opts_p = [f"{r['_CAN']} — {r['PARTENAIRE']}" for _,r in _agg_p.iterrows()]
+        _sel_p2 = st.selectbox("🔍 Partenaire",["— Sélectionner —"]+_opts_p,key="part_sel_v40")
+        if _sel_p2 != "— Sélectionner —":
+            _idx_p = _opts_p.index(_sel_p2)
+            _rp3   = _agg_p.iloc[_idx_p]
+            _code_p = _rp3["_CAN"]
+            st.markdown(f"""
+            <div style="background:#FFFFF8;border:2px solid #C9A227;border-radius:12px;
+                 padding:1rem 1.5rem;margin:8px 0 12px;">
+              <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:1rem;">
+                <div>
+                  <div style="font-size:9px;color:#5A6478;text-transform:uppercase;letter-spacing:.1em;">FICHE · {_lbl_part}</div>
+                  <div style="font-size:1.2rem;font-weight:900;color:{NAVY};">{_rp3['PARTENAIRE']}</div>
+                  <div style="font-size:11px;color:#5A6478;">Code : <b style="font-family:monospace;color:{NAVY};">{_code_p}</b> · Rang #{_idx_p+1}/{len(_agg_p)}</div>
+                </div>
+                <div style="text-align:right;">
+                  <div style="font-size:1.5rem;font-weight:900;color:#C9A227;">{fmt(_rp3['ca'])}</div>
+                  <div style="font-size:10px;color:#5A6478;">{_rp3['part_%']:.2f}% du CA partenaires</div>
+                </div>
+              </div>
+            </div>""", unsafe_allow_html=True)
+            _fpk = st.columns(4)
+            with _fpk[0]: kpi("💰 CA",fmt(_rp3['ca']),_lbl_part,"gold","")
+            with _fpk[1]: kpi("🧾 Quittances",f"{int(_rp3['nb_q']):,}","","","")
+            with _fpk[2]: kpi("🎫 Ticket moyen",fmt(_rp3['ticket']),"","teal","")
+            with _fpk[3]: kpi("💼 Commissions",fmt(float(_rp3['comm'])),"","teal","")
+
+            if "YYYYMM_COMP" in _df_pa.columns:
+                _ca_op = _df_pa[_df_pa["_CAN"]==_code_p]
+                if not _ca_op.empty:
+                    _ev_p1 = _ca_op.groupby("YYYYMM_COMP")["CHIFAFFA"].agg(ca="sum",nb="count").reset_index().sort_values("YYYYMM_COMP")
+                    fig_op = make_subplots(specs=[[{"secondary_y":True}]])
+                    fig_op.add_trace(go.Bar(x=_ev_p1["YYYYMM_COMP"],y=_ev_p1["ca"],name="💰 CA",
+                        marker_color=GOLD,opacity=.85,text=[fmt(v) for v in _ev_p1["ca"]],textposition="outside"),secondary_y=False)
+                    fig_op.add_trace(go.Scatter(x=_ev_p1["YYYYMM_COMP"],y=_ev_p1["nb"],name="🧾 Quitt.",
+                        line=dict(color=NAVY,width=2.5),mode="lines+markers"),secondary_y=True)
+                    fig_op.update_yaxes(title_text="CA (FCFA)",secondary_y=False)
+                    fig_op.update_yaxes(title_text="Quittances",secondary_y=True,showgrid=False)
+                    chl(fig_op,420,f"📅 CA mensuel — {_rp3['PARTENAIRE'][:30]}")
+                    st.plotly_chart(fig_op, use_container_width=True)
+
+    with _tp4p:
+        sth("📋 Tableau & Export","PARTENAIRES")
+        _disp_p2 = _agg_p.rename(columns={"_CAN":"Code","PARTENAIRE":"Partenaire",
+            "ca":"CA (FCFA)","nb_q":"Quittances","nb_pol":"Polices","comm":"Commissions",
+            "part_%":"Part %","ticket":"Ticket moyen","rang":"Rang"})
+        for _c in ["CA (FCFA)","Commissions","Ticket moyen"]:
+            if _c in _disp_p2.columns: _disp_p2[_c] = _disp_p2[_c].apply(fmt)
+        if "Part %" in _disp_p2.columns: _disp_p2["Part %"] = _disp_p2["Part %"].apply(lambda x: f"{x:.2f}%")
+        _cols_p2 = [c for c in ["Rang","Code","Partenaire","CA (FCFA)","Part %","Quittances","Polices","Commissions","Ticket moyen"] if c in _disp_p2.columns]
+        st.dataframe(_disp_p2[_cols_p2], use_container_width=True, hide_index=True, height=480)
+        _buf_p2 = io.BytesIO()
+        with pd.ExcelWriter(_buf_p2, engine="openpyxl") as _wx_p2:
+            _disp_p2[_cols_p2].to_excel(_wx_p2, index=False, sheet_name=f"Partenaires_{_lbl_part[:15]}")
+            _ca_pf_cols = [c for c in ["_CAN","PARTENAIRE","CHIFAFFA","DATECOMP","YYYYMM_COMP","POLICE_KEY","COMMAPPO"] if c in _df_pa.columns]
+            _df_pa[_ca_pf_cols].to_excel(_wx_p2, index=False, sheet_name="Détail CA")
+        _dl1p,_dl2p = st.columns(2)
+        with _dl1p:
+            st.download_button(f"⬇️ Exporter Excel · {_lbl_part}", data=_buf_p2.getvalue(),
+                file_name=f"AFG_Partenaires_{_lbl_part.replace(' ','_')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True)
+        with _dl2p:
+            _csv_p2 = _agg_p.to_csv(index=False).encode("utf-8-sig")
+            st.download_button(f"⬇️ Exporter CSV · {_lbl_part}", data=_csv_p2,
+                file_name=f"AFG_Partenaires_{_lbl_part.replace(' ','_')}.csv",
+                mime="text/csv", use_container_width=True)
 
 # ── FOOTER ─────────────────────────────────────────────────────────────────────
 st.markdown(f"""
 <div class="afg-footer">
   <span style="font-weight:900;color:{GOLD};font-size:11.5px;">AFG VIE</span>
   <span class="fd">|</span>
-  <strong>AFG Assurances Bénin Vie</strong> — Tableau de Bord PDG v17.0
+  <strong>AFG Assurances Bénin Vie</strong> — Tableau de Bord PDG v33.0 — Partenaires Financiers · Période flexible · Sinistres consolidés
   <span class="fd">|</span>
   À AFG Assurances Bénin Vie, nous avons pensé à vous !
   <span class="fd">|</span>
