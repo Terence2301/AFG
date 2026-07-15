@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-  AFG ASSURANCES BÉNIN VIE —REPORTING 
+  AFG ASSURANCES BÉNIN VIE — DASHBOARD 
   Bug-fixes v3 : chargement direct (no pickle) · filtre date corrigé
                  navigation cachée · jointures inter-bases fiables
 ================================================================================
@@ -12,7 +12,7 @@
 """
 import streamlit as st
 st.set_page_config(
-    page_title="AFG Bénin Vie — Dashboard ",
+    page_title="AFG Bénin Vie ",
     page_icon="🛡️", layout="wide",
     initial_sidebar_state="expanded",
     menu_items={"About": "AFG Assurances Bénin Vie "}
@@ -454,7 +454,7 @@ DEFAULTS = {
     "pf": None, "ca": None, "sin": None,
     "ca_list_raw": [],   # liste de DataFrames CA bruts (multi-exercices)
     "pf_ok": False, "ca_ok": False, "sin_ok": False,
-    "show_all_nav": False,   # navigation : True = afficher tous les onglets
+    # current_page : seule "Saisie BIA" est accessible à l'entrée
     "current_page": "📝  Saisie BIA",
 }
 for k, v in DEFAULTS.items():
@@ -501,6 +501,7 @@ today = date.today()
 # ─────────────────────────────────────────────
 #  SIDEBAR
 # ─────────────────────────────────────────────
+# ── Définition de toutes les pages disponibles ────────────────────────────────
 ALL_PAGES = [
     "🏠  Accueil & KPIs",
     "📊  Analyse CA",
@@ -515,7 +516,19 @@ ALL_PAGES = [
     "🗂️  Base BIA",
     "📤  Exports",
 ]
+# Seule page visible sans aucune base chargée
 VISIBLE_DEFAULT = ["📝  Saisie BIA"]
+
+# ── Calcul des pages disponibles selon les bases chargées ─────────────────────
+# RÈGLE : Saisie BIA toujours visible.
+#         Dès qu'AU MOINS une base est chargée → toutes les pages se débloquent.
+#         Ce calcul est fait à chaque rendu (pas besoin de bouton).
+_any_data = (st.session_state.pf_ok or st.session_state.ca_ok or st.session_state.sin_ok)
+pages_visible = ALL_PAGES if _any_data else VISIBLE_DEFAULT
+
+# Sécurité : si la page courante a disparu (ex. données effacées), revenir à BIA
+if st.session_state.current_page not in pages_visible:
+    st.session_state.current_page = "📝  Saisie BIA"
 
 with st.sidebar:
     st.markdown(f"""
@@ -528,26 +541,26 @@ with st.sidebar:
     <div style="background:rgba(26,127,110,.12);border-radius:8px;padding:8px 10px;margin:0 4px 8px">
       <div style="font-size:9px;opacity:.5;text-transform:uppercase;letter-spacing:.05em">Connecté</div>
       <div style="font-weight:700;font-size:12px;margin-top:1px">{user['nom']}</div>
-    </div><hr>""", unsafe_allow_html=True)
+    </div>""", unsafe_allow_html=True)
 
-    # Navigation : par défaut seuls Saisie BIA et Base BIA
-    if st.session_state.show_all_nav:
-        pages_visible = ALL_PAGES
-        if st.button("🔒 Masquer les onglets analytiques", use_container_width=True):
-            st.session_state.show_all_nav = False
-            if st.session_state.current_page not in VISIBLE_DEFAULT:
-                st.session_state.current_page = "📝  Saisie BIA"
-            st.rerun()
+    # ── Message d'état navigation ─────────────────────────────────────────────
+    if not _any_data:
+        st.markdown(f"""
+        <div style="background:rgba(202,111,30,.15);border:1px solid {AMBER};border-radius:8px;
+             padding:8px 10px;margin:6px 4px 4px;font-size:10px;color:rgba(255,255,255,.7);line-height:1.5">
+          🔒 <b style="color:{MINT}">Accès limité</b><br>
+          Chargez au moins une base pour accéder aux tableaux de bord analytiques.
+        </div>""", unsafe_allow_html=True)
     else:
-        pages_visible = VISIBLE_DEFAULT
-        if st.button("📊 Afficher tous les onglets", use_container_width=True):
-            st.session_state.show_all_nav = True
-            st.rerun()
+        st.markdown(f"""
+        <div style="background:rgba(26,127,110,.15);border:1px solid {GREEN};border-radius:8px;
+             padding:8px 10px;margin:6px 4px 4px;font-size:10px;color:rgba(255,255,255,.7);line-height:1.5">
+          ✅ <b style="color:{MINT}">{sum([st.session_state.pf_ok, st.session_state.ca_ok, st.session_state.sin_ok])}/3 base(s)</b> chargée(s) — tous les onglets sont disponibles.
+        </div>""", unsafe_allow_html=True)
 
-    if st.session_state.current_page not in pages_visible:
-        st.session_state.current_page = pages_visible[0]
+    st.markdown("<hr>", unsafe_allow_html=True)
 
-    nav_choice = st.radio("", pages_visible, 
+    nav_choice = st.radio("", pages_visible,
                           index=pages_visible.index(st.session_state.current_page),
                           label_visibility="collapsed")
     st.session_state.current_page = nav_choice
