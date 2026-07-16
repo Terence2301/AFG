@@ -2,20 +2,20 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-  AFG ASSURANCES BÉNIN VIE — DASHBOARD 
+  AFG ASSURANCES BÉNIN VIE — DASHBOARD ACTUARIEL EXPERT v3.0
   Bug-fixes v3 : chargement direct (no pickle) · filtre date corrigé
                  navigation cachée · jointures inter-bases fiables
 ================================================================================
   LANCEMENT : streamlit run app_afg.py
-  LOGIN     : PDG AFG/1001 · ADMIN AFG/1003 · ACTUAIRE AFG/1005 
+  LOGIN     : PDG AFG/1001 · ADMIN AFG/1003 · ACTUAIRE AFG/1005 · DEMO/0000
 ================================================================================
 """
 import streamlit as st
 st.set_page_config(
-    page_title="AFG Bénin Vie ",
+    page_title="AFG Bénin Vie — Dashboard Expert",
     page_icon="🛡️", layout="wide",
     initial_sidebar_state="expanded",
-    menu_items={"About": "AFG Assurances Bénin Vie "}
+    menu_items={"About": "AFG Assurances Bénin Vie v3.0"}
 )
 
 import pandas as pd, numpy as np, io, os, tempfile, warnings, hashlib, sqlite3
@@ -160,9 +160,11 @@ AGENCES = ["","Siège Social — Cotonou","Agence Cotonou Centre","Agence Cotono
 
 USERS = {
     "PDG AFG":       hashlib.sha256(b"1001").hexdigest(),
+    "DG AFG":        hashlib.sha256(b"1002").hexdigest(),
     "ADMIN AFG":     hashlib.sha256(b"1003").hexdigest(),
     "MANAGER AFG":   hashlib.sha256(b"1004").hexdigest(),
     "ACTUAIRE AFG":  hashlib.sha256(b"1005").hexdigest(),
+    "DEMO VISITEUR": hashlib.sha256(b"0000").hexdigest(),
 }
 
 # ─────────────────────────────────────────────
@@ -307,88 +309,182 @@ def bia_all():
     c=get_conn(); df=pd.read_sql("SELECT * FROM bulletins_bia ORDER BY created_at DESC",c); c.close(); return df
 init_db()
 
-# ─────────────────────────────────────────────
-#  CHARGEMENT DIRECT — sans pickle, sans cache
-#  Bug fix : lecture directe du fichier uploadé
-# ─────────────────────────────────────────────
-def read_uploaded(f, sheet=0):
-    """Lit un fichier uploadé Streamlit vers DataFrame (str). Robuste."""
-    name = getattr(f, "name", "file.xlsx").lower()
-    data = f.read()
-    if name.endswith(".csv"):
-        raw = data.decode("utf-8", errors="replace")
-        sep = ";" if ";" in raw.split("\n")[0] else ","
-        return pd.read_csv(io.StringIO(raw), sep=sep, dtype=str, low_memory=False)
-    # Excel
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
-        tmp.write(data); path = tmp.name
-    try:
-        xl = pd.ExcelFile(path, engine="openpyxl")
-        sh = xl.sheet_names[0] if sheet == 0 else (sheet if sheet in xl.sheet_names else xl.sheet_names[0])
-        return pd.read_excel(path, sheet_name=sh, engine="openpyxl", dtype=str)
-    finally:
-        try: os.unlink(path)
-        except: pass
+# ══════════════════════════════════════════════════════════════════════════════
+#  CHARGEMENT OPTIMISÉ — lecture directe, colonnes filtrées, typage minimal
+#  Fixes : removeChild DOM bug, lenteur 300K lignes, crash mémoire
+# ══════════════════════════════════════════════════════════════════════════════
 
-def prep_pf(df):
-    """Nettoie et typage du Portefeuille."""
-    df = df.copy()
-    df.columns = [str(c).strip() for c in df.columns]
+# Colonnes utiles uniquement — élimine les ~80 colonnes mortes du PF (306K×100 → 306K×21)
+PF_COLS = {
+    "CODEINTE_P","NUMEPOLI_P","LIBECATE","ETAT_POLICE","NOM_ASSU","NOM_APP",
+    "LIBEVILL","DATESOUS","DATEEFFE","DATEECHE","DATENAIS",
+    "COTI_PERIODIQUE","MONTENCA","SEXERISQ","CODEPERI","NBRE_PRIME",
+    "COMMGEST","CODEAPPO","CODERISQ",
+}
+CA_COLS = {
+    "CODEINTE","NUMEPOLI","DATECOMP","NOMPRODUIT","LIBECATE",
+    "NOM_INTERMEDIAIRE","CODEAPPO","CHIFAFFA","PRIMNETT","COMMAPPO",
+    "COMMGEST","TYPEMOUV","SORTQUIT",
+}
+SIN_COLS = {
+    "Int police","No Police","Date Survenance","Date Déclaration","Date validation",
+    "Date Emission","Date Comptabilisation","Libéllé Catégorie","Nature Sinistre",
+    "Sort Sinistre","Souscripteur","Désignation risque","Nom Bénéficiaire",
+    "Exercice Sinistre","Réglement Total","Réglement Principal",
+    "SAP au 31/12/2025","Réglement Honoraires",
+}
+
+def _excel_sheet(path: str, preferred: str) -> str:
+    """Retourne le nom de feuille existant (préféré en premier, sinon sheet[0])."""
+    xl = pd.ExcelFile(path, engine="openpyxl")
+    if preferred in xl.sheet_names:
+        return preferred
+    # Cherche une feuille dont le nom contient 'liste' (insensible casse)
+    for s in xl.sheet_names:
+        if "liste" in s.lower():
+            return s
+    return xl.sheet_names[0]
+
+def _keep_cols(df: pd.DataFrame, wanted: set) -> pd.DataFrame:
+    """Conserve uniquement les colonnes présentes ET utiles."""
+    keep = [c for c in df.columns if c in wanted]
+    return df[keep] if keep else df
+
+def load_pf(f) -> pd.DataFrame:
+    """
+    Charge le Portefeuille :
+    1. Écrit le fichier uploadé dans un tmp
+    2. Lit uniquement les colonnes PF_COLS (usecols) → ~5× plus rapide
+    3. Typage minimal sur les colonnes présentes
+    """
+    data = f.read()
+    name = getattr(f, "name", "f.xlsx").lower()
+
+    if name.endswith(".csv"):
+        raw  = data.decode("utf-8", errors="replace")
+        sep  = ";" if ";" in raw.split("\n")[0] else ","
+        df   = pd.read_csv(io.StringIO(raw), sep=sep, dtype=str, low_memory=False)
+        df.columns = [str(c).strip() for c in df.columns]
+        df = _keep_cols(df, PF_COLS)
+    else:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
+            tmp.write(data); path = tmp.name
+        try:
+            # Lire les en-têtes d'abord pour ne garder que les colonnes utiles
+            hdr  = pd.read_excel(path, engine="openpyxl", nrows=0)
+            hdr.columns = [str(c).strip() for c in hdr.columns]
+            use  = [c for c in hdr.columns if c in PF_COLS]
+            if not use:   # fallback : tout lire
+                use = None
+            df   = pd.read_excel(path, engine="openpyxl", dtype=str,
+                                  usecols=use)
+            df.columns = [str(c).strip() for c in df.columns]
+        finally:
+            try: os.unlink(path)
+            except: pass
+
+    # Typage
     for c in ["DATESOUS","DATEEFFE","DATEECHE","DATENAIS"]:
         if c in df.columns:
-            df[c] = pd.to_datetime(df[c], errors="coerce", infer_datetime_format=True)
-    for c in ["MONTENCA","COTI_PERIODIQUE","NBRE_PRIME"]:
-        if c in df.columns: df[c] = clean_num(df[c])
-    # Clé de jointure : CODEINTE_P-NUMEPOLI_P
+            df[c] = pd.to_datetime(df[c], errors="coerce")
+    for c in ["MONTENCA","COTI_PERIODIQUE","NBRE_PRIME","COMMGEST"]:
+        if c in df.columns:
+            df[c] = clean_num(df[c])
+    # Clé de jointure
     if "CODEINTE_P" in df.columns and "NUMEPOLI_P" in df.columns:
         df["POLICE_KEY"] = (df["CODEINTE_P"].astype(str).str.strip()
                             + "-" + df["NUMEPOLI_P"].astype(str).str.strip())
-    # Aussi conserver CODEINTE/NUMEPOLI (même police)
-    if "CODEINTE" in df.columns and "NUMEPOLI" in df.columns:
-        df["POLICE_KEY2"] = (df["CODEINTE"].astype(str).str.strip()
-                             + "-" + df["NUMEPOLI"].astype(str).str.strip())
     return df
 
-def prep_ca(df):
-    """Nettoie et typage de la Base CA."""
-    df = df.copy()
-    df.columns = [str(c).strip() for c in df.columns]
+
+def load_ca(f) -> pd.DataFrame:
+    """Charge une Base CA (une seule feuille / un exercice)."""
+    data = f.read()
+    name = getattr(f, "name", "f.xlsx").lower()
+
+    if name.endswith(".csv"):
+        raw = data.decode("utf-8", errors="replace")
+        sep = ";" if ";" in raw.split("\n")[0] else ","
+        df  = pd.read_csv(io.StringIO(raw), sep=sep, dtype=str, low_memory=False)
+        df.columns = [str(c).strip() for c in df.columns]
+        df = _keep_cols(df, CA_COLS)
+    else:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
+            tmp.write(data); path = tmp.name
+        try:
+            hdr = pd.read_excel(path, engine="openpyxl", nrows=0)
+            hdr.columns = [str(c).strip() for c in hdr.columns]
+            use = [c for c in hdr.columns if c in CA_COLS] or None
+            df  = pd.read_excel(path, engine="openpyxl", dtype=str, usecols=use)
+            df.columns = [str(c).strip() for c in df.columns]
+        finally:
+            try: os.unlink(path)
+            except: pass
+
+    # Typage
     if "DATECOMP" in df.columns:
-        df["DATECOMP"] = pd.to_datetime(df["DATECOMP"], errors="coerce", infer_datetime_format=True)
-        df["ANNEE"] = df["DATECOMP"].dt.year.astype("Int64")
-        df["MOIS"]  = df["DATECOMP"].dt.month.astype("Int64")
-        df["JOUR"]  = df["DATECOMP"].dt.day.astype("Int64")
+        df["DATECOMP"] = pd.to_datetime(df["DATECOMP"], errors="coerce")
+        df["ANNEE"]    = df["DATECOMP"].dt.year.astype("Int64")
+        df["MOIS"]     = df["DATECOMP"].dt.month.astype("Int64")
     for c in ["CHIFAFFA","PRIMNETT","COMMAPPO","COMMGEST"]:
-        if c in df.columns: df[c] = clean_num(df[c])
-    # Clé de jointure CA : CODEINTE-NUMEPOLI (même format que CODEINTE_P-NUMEPOLI_P du PF)
+        if c in df.columns:
+            df[c] = clean_num(df[c])
     if "CODEINTE" in df.columns and "NUMEPOLI" in df.columns:
         df["POLICE_KEY"] = (df["CODEINTE"].astype(str).str.strip()
                             + "-" + df["NUMEPOLI"].astype(str).str.strip())
-    # CODEAPPO normalisé
     if "CODEAPPO" in df.columns:
-        def norm_appo(x):
+        def _norm(x):
             if pd.isna(x): return ""
             s = str(x).strip().replace(".0","")
             return s if s.isdigit() else str(x).strip()
-        df["CODEAPPO_STR"] = df["CODEAPPO"].apply(norm_appo)
+        df["CODEAPPO_STR"] = df["CODEAPPO"].apply(_norm)
     return df
 
-def prep_sin(df):
-    """Nettoie et typage des Prestations."""
-    df = df.copy()
-    df.columns = [str(c).strip() for c in df.columns]
-    for c in ["Date Survenance","Date Déclaration","Date validation","Date Emission","Date Comptabilisation","Date Création"]:
+
+def load_sin(f) -> pd.DataFrame:
+    """
+    Charge les Prestations/Sinistres.
+    Essaie la feuille 'Liste', puis toute feuille contenant 'liste', puis sheet[0].
+    """
+    data = f.read()
+    name = getattr(f, "name", "f.xlsx").lower()
+
+    if name.endswith(".csv"):
+        raw = data.decode("utf-8", errors="replace")
+        sep = ";" if ";" in raw.split("\n")[0] else ","
+        df  = pd.read_csv(io.StringIO(raw), sep=sep, dtype=str, low_memory=False)
+        df.columns = [str(c).strip() for c in df.columns]
+        df = _keep_cols(df, SIN_COLS)
+    else:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
+            tmp.write(data); path = tmp.name
+        try:
+            sh  = _excel_sheet(path, "Liste")
+            hdr = pd.read_excel(path, sheet_name=sh, engine="openpyxl", nrows=0)
+            hdr.columns = [str(c).strip() for c in hdr.columns]
+            use = [c for c in hdr.columns if c in SIN_COLS] or None
+            df  = pd.read_excel(path, sheet_name=sh, engine="openpyxl",
+                                 dtype=str, usecols=use)
+            df.columns = [str(c).strip() for c in df.columns]
+        finally:
+            try: os.unlink(path)
+            except: pass
+
+    # Typage
+    for c in ["Date Survenance","Date Déclaration","Date validation",
+              "Date Emission","Date Comptabilisation"]:
         if c in df.columns:
-            df[c] = pd.to_datetime(df[c], errors="coerce", infer_datetime_format=True)
-    for c in ["Réglement Total","Réglement Principal","SAP au 31/12/2025","Réglement Honoraires"]:
-        if c in df.columns: df[c] = clean_num(df[c])
-    # Clé de jointure : Int police - No Police
+            df[c] = pd.to_datetime(df[c], errors="coerce")
+    for c in ["Réglement Total","Réglement Principal",
+              "SAP au 31/12/2025","Réglement Honoraires"]:
+        if c in df.columns:
+            df[c] = clean_num(df[c])
     if "Int police" in df.columns and "No Police" in df.columns:
         df["POLICE_KEY"] = (df["Int police"].astype(str).str.strip()
                             + "-" + df["No Police"].astype(str).str.strip())
-    # Exercice sinistre (pour filtre annuel car Date Survenance ≠ exercice)
     if "Exercice Sinistre" in df.columns:
-        df["ANNEE_SIN"] = pd.to_numeric(df["Exercice Sinistre"], errors="coerce").astype("Int64")
+        df["ANNEE_SIN"] = pd.to_numeric(
+            df["Exercice Sinistre"], errors="coerce").astype("Int64")
     return df
 
 # ─────────────────────────────────────────────
@@ -586,79 +682,118 @@ with st.sidebar:
     st.markdown(f"<div style='background:{GREEN};color:white;text-align:center;border-radius:7px;padding:5px;margin:5px 4px;font-weight:700;font-size:11px'>{period_lbl}</div>", unsafe_allow_html=True)
     st.markdown("<hr>", unsafe_allow_html=True)
 
-    # ── Chargement des bases ────────────────────────────────────────────────
-    st.markdown(f"<div style='font-size:9.5px;font-weight:700;opacity:.55;text-transform:uppercase;letter-spacing:.07em;margin-bottom:4px'>📂 Bases de données</div>", unsafe_allow_html=True)
+    # ── Chargement des bases ─────────────────────────────────────────────────
+    # FIX removeChild : NE PAS appeler st.rerun() dans le handler d'upload.
+    # On utilise un flag "_needs_rerun" positionné APRÈS le traitement complet
+    # du widget. Le rerun est déclenché hors du bloc with st.sidebar, ce qui
+    # évite la corruption DOM de React/Streamlit.
+    st.markdown(
+        f"<div style='font-size:9.5px;font-weight:700;opacity:.55;text-transform:uppercase;"
+        f"letter-spacing:.07em;margin-bottom:4px'>📂 Bases de données</div>",
+        unsafe_allow_html=True)
 
-    # PORTEFEUILLE
-    with st.expander(f"📋 Portefeuille {'✅' if st.session_state.pf_ok else '—'}", expanded=not st.session_state.pf_ok):
-        f_pf = st.file_uploader("Portefeuille .xlsx/.csv", type=["xlsx","xls","csv"],
-                                key="up_pf", label_visibility="collapsed")
+    _needs_rerun = False   # sera mis à True si une base est chargée avec succès
+
+    # ── Portefeuille ─────────────────────────────────────────────────────────
+    _pf_lbl = f"📋 Portefeuille {'✅ '+str(len(st.session_state.pf))+' polices' if st.session_state.pf_ok else '—'}"
+    with st.expander(_pf_lbl, expanded=not st.session_state.pf_ok):
+        f_pf = st.file_uploader(
+            "PF .xlsx/.csv", type=["xlsx","xls","csv"],
+            key="up_pf", label_visibility="collapsed")
         if f_pf is not None and not st.session_state.pf_ok:
-            with st.spinner("⏳ Chargement portefeuille…"):
+            with st.spinner("⏳ Lecture et nettoyage du portefeuille…"):
                 try:
-                    raw = read_uploaded(f_pf)
-                    st.session_state.pf = prep_pf(raw)
+                    df_pf_raw = load_pf(f_pf)
+                    st.session_state.pf    = df_pf_raw
                     st.session_state.pf_ok = True
-                    st.rerun()
+                    _needs_rerun = True
                 except Exception as e:
-                    st.error(f"Erreur : {e}")
+                    st.error(f"❌ Erreur portefeuille : {e}")
         if st.session_state.pf_ok and st.session_state.pf is not None:
-            pf_n = len(st.session_state.pf)
-            st.success(f"✅ {pf_n:,} polices")
+            st.caption(f"{len(st.session_state.pf):,} polices · {len(st.session_state.pf.columns)} colonnes utiles")
             if st.button("🗑️ Supprimer PF", key="del_pf"):
-                st.session_state.pf = None; st.session_state.pf_ok = False; st.rerun()
+                st.session_state.pf    = None
+                st.session_state.pf_ok = False
+                _needs_rerun = True
 
-    # CA — MULTI-EXERCICES
-    n_ca = len(st.session_state.ca_list_raw)
-    with st.expander(f"💰 Base CA {'✅ ('+str(n_ca)+' fichier(s))' if st.session_state.ca_ok else '—'}", expanded=not st.session_state.ca_ok):
-        f_ca = st.file_uploader("CA .xlsx/.csv (ajouter)", type=["xlsx","xls","csv"],
-                                key="up_ca", label_visibility="collapsed")
+    # ── Base CA — multi-exercices ─────────────────────────────────────────────
+    _n_ca  = len(st.session_state.ca_list_raw)
+    _ca_lbl = f"💰 Base CA {'✅ ('+str(_n_ca)+' fichier(s))' if st.session_state.ca_ok else '—'}"
+    with st.expander(_ca_lbl, expanded=not st.session_state.ca_ok):
+        f_ca = st.file_uploader(
+            "CA .xlsx/.csv (ajouter)", type=["xlsx","xls","csv"],
+            key="up_ca", label_visibility="collapsed")
         if f_ca is not None:
-            fname = f_ca.name
-            already = any(getattr(r, "_name", "") == fname for r in [])
-            with st.spinner("⏳ Chargement CA…"):
-                try:
-                    raw_ca = read_uploaded(f_ca)
-                    raw_ca = prep_ca(raw_ca)
-                    st.session_state.ca_list_raw.append(raw_ca)
-                    if len(st.session_state.ca_list_raw) == 1:
-                        st.session_state.ca = raw_ca
-                    else:
-                        st.session_state.ca = pd.concat(st.session_state.ca_list_raw, ignore_index=True)
-                    st.session_state.ca_ok = True
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Erreur CA : {e}")
+            # Anti-doublon : nom+taille comme empreinte
+            _ca_id = f"{f_ca.name}_{f_ca.size}"
+            _seen  = st.session_state.get("_ca_seen_ids", set())
+            if _ca_id in _seen:
+                st.caption("ℹ️ Ce fichier est déjà chargé.")
+            else:
+                with st.spinner("⏳ Chargement CA…"):
+                    try:
+                        df_ca_new = load_ca(f_ca)
+                        _seen.add(_ca_id)
+                        st.session_state["_ca_seen_ids"] = _seen
+                        st.session_state.ca_list_raw.append(df_ca_new)
+                        st.session_state.ca = (
+                            df_ca_new if len(st.session_state.ca_list_raw) == 1
+                            else pd.concat(st.session_state.ca_list_raw, ignore_index=True)
+                        )
+                        st.session_state.ca_ok = True
+                        _needs_rerun = True
+                    except Exception as e:
+                        st.error(f"❌ Erreur CA : {e}")
         if st.session_state.ca_ok and st.session_state.ca is not None:
-            ca_n = len(st.session_state.ca)
-            yrs = sorted(st.session_state.ca["ANNEE"].dropna().unique().astype(int).tolist()) if "ANNEE" in st.session_state.ca.columns else []
-            st.success(f"✅ {ca_n:,} lignes · Exercices : {', '.join(map(str,yrs))}")
+            _yrs = (sorted(st.session_state.ca["ANNEE"].dropna()
+                           .unique().astype(int).tolist())
+                    if "ANNEE" in st.session_state.ca.columns else [])
+            st.caption(f"{len(st.session_state.ca):,} quittances · Exercices : {', '.join(map(str,_yrs))}")
             if st.button("🗑️ Vider CA", key="del_ca"):
-                st.session_state.ca = None; st.session_state.ca_list_raw = []; st.session_state.ca_ok = False; st.rerun()
+                st.session_state.ca          = None
+                st.session_state.ca_list_raw = []
+                st.session_state["_ca_seen_ids"] = set()
+                st.session_state.ca_ok       = False
+                _needs_rerun = True
 
-    # PRESTATIONS
-    with st.expander(f"🏥 Prestations {'✅' if st.session_state.sin_ok else '—'}", expanded=not st.session_state.sin_ok):
-        f_sin = st.file_uploader("Prestations .xlsx/.csv", type=["xlsx","xls","csv"],
-                                 key="up_sin", label_visibility="collapsed")
+    # ── Prestations / Sinistres ───────────────────────────────────────────────
+    _sin_lbl = f"🏥 Prestations {'✅ '+str(len(st.session_state.sin))+' dossiers' if st.session_state.sin_ok else '—'}"
+    with st.expander(_sin_lbl, expanded=not st.session_state.sin_ok):
+        f_sin = st.file_uploader(
+            "Prestations .xlsx/.csv", type=["xlsx","xls","csv"],
+            key="up_sin", label_visibility="collapsed")
         if f_sin is not None and not st.session_state.sin_ok:
             with st.spinner("⏳ Chargement prestations…"):
                 try:
-                    raw_sin = read_uploaded(f_sin, sheet="Liste")
-                    st.session_state.sin = prep_sin(raw_sin)
+                    df_sin_raw = load_sin(f_sin)
+                    st.session_state.sin    = df_sin_raw
                     st.session_state.sin_ok = True
-                    st.rerun()
+                    _needs_rerun = True
                 except Exception as e:
-                    st.error(f"Erreur Prestations : {e}")
+                    st.error(f"❌ Erreur prestations : {e}")
         if st.session_state.sin_ok and st.session_state.sin is not None:
-            st.success(f"✅ {len(st.session_state.sin):,} dossiers")
+            st.caption(f"{len(st.session_state.sin):,} dossiers · {len(st.session_state.sin.columns)} colonnes")
             if st.button("🗑️ Supprimer SIN", key="del_sin"):
-                st.session_state.sin = None; st.session_state.sin_ok = False; st.rerun()
+                st.session_state.sin    = None
+                st.session_state.sin_ok = False
+                _needs_rerun = True
 
     st.markdown("<hr>", unsafe_allow_html=True)
-    if st.button("🚪 Déconnexion"):
-        for k in DEFAULTS: st.session_state[k] = DEFAULTS[k]
-        st.rerun()
-    st.markdown(f"<div style='text-align:center;font-size:8px;opacity:.22;padding:4px 0'>© 2025 AFG Assurances Bénin Vie<br>Dashboard Expert v3.0 · CIMA</div>", unsafe_allow_html=True)
+    _logout = st.button("🚪 Déconnexion")
+    st.markdown(
+        f"<div style='text-align:center;font-size:8px;opacity:.22;padding:4px 0'>"
+        f"© 2025 AFG Assurances Bénin Vie<br>Dashboard Expert v3.0 · CIMA</div>",
+        unsafe_allow_html=True)
+
+# ── Rerun unique HORS du contexte sidebar (évite removeChild DOM bug) ─────────
+# Tous les changements d'état qui nécessitent un rechargement sont regroupés ici.
+if "_logout" in dir() and _logout:
+    for k in DEFAULTS:
+        st.session_state[k] = DEFAULTS[k]
+    st.rerun()
+
+if "_needs_rerun" in dir() and _needs_rerun:
+    st.rerun()
 
 # ─────────────────────────────────────────────
 #  RACCOURCIS
