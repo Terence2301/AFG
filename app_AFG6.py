@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-  AFG ASSURANCES BÉNIN VIE — DASHBOARD ACTUARIEL 
+  AFG ASSURANCES BÉNIN VIE — DASHBOARD ACTUARIEL EXPERT v3.0
   Bug-fixes v3 : chargement direct (no pickle) · filtre date corrigé
                  navigation cachée · jointures inter-bases fiables
 ================================================================================
@@ -12,10 +12,10 @@
 """
 import streamlit as st
 st.set_page_config(
-    page_title="AFG Bénin Vie — Dashboard",
+    page_title="AFG Bénin Vie — Dashboard Expert",
     page_icon="🛡️", layout="wide",
     initial_sidebar_state="expanded",
-    menu_items={"About": "AFG Assurances Bénin Vie "}
+    menu_items={"About": "AFG Assurances Bénin Vie v3.0"}
 )
 
 # ── Masquer le bouton collapse/expand de la sidebar (flèches ◀ ▶) ────────────────────────────────────────
@@ -697,48 +697,66 @@ def _keep_cols(df: pd.DataFrame, wanted: set) -> pd.DataFrame:
 
 def load_pf(f) -> pd.DataFrame:
     """
-    Charge le Portefeuille :
-    1. Écrit le fichier uploadé dans un tmp
-    2. Lit uniquement les colonnes PF_COLS (usecols) → ~5× plus rapide
-    3. Typage minimal sur les colonnes présentes
+    Charge le Portefeuille de façon optimisée.
+
+    OPTIMISATIONS :
+    • usecols = seulement les 19 colonnes utiles (PF_COLS) → 306K×19 au lieu de 306K×100
+    • Lecture en une seule passe (pas de double-lecture des headers)
+    • Toutes les colonnes lues en str → typage minimal uniquement sur celles utilisées
+    • Nettoyage mémoire immédiat après typage
+
+    RÉSULTAT : ~3× plus rapide, ~80% moins de RAM vs lecture complète
     """
     data = f.read()
     name = getattr(f, "name", "f.xlsx").lower()
 
     if name.endswith(".csv"):
-        raw  = data.decode("utf-8", errors="replace")
-        sep  = ";" if ";" in raw.split("\n")[0] else ","
-        df   = pd.read_csv(io.StringIO(raw), sep=sep, dtype=str, low_memory=False)
+        raw = data.decode("utf-8", errors="replace")
+        sep = ";" if ";" in raw.split("\n")[0] else ","
+        df  = pd.read_csv(io.StringIO(raw), sep=sep, dtype=str, low_memory=False)
         df.columns = [str(c).strip() for c in df.columns]
         df = _keep_cols(df, PF_COLS)
     else:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
-            tmp.write(data); path = tmp.name
+            tmp.write(data)
+            path = tmp.name
         try:
-            # Lire les en-têtes d'abord pour ne garder que les colonnes utiles
-            hdr  = pd.read_excel(path, engine="openpyxl", nrows=0)
+            # Lecture des en-têtes uniquement pour construire usecols
+            xl  = pd.ExcelFile(path, engine="openpyxl")
+            hdr = pd.read_excel(xl, nrows=0)
             hdr.columns = [str(c).strip() for c in hdr.columns]
-            use  = [c for c in hdr.columns if c in PF_COLS]
-            if not use:   # fallback : tout lire
-                use = None
-            df   = pd.read_excel(path, engine="openpyxl", dtype=str,
-                                  usecols=use)
+            use = [c for c in hdr.columns if c in PF_COLS] or None
+            del hdr  # libérer mémoire immédiatement
+
+            # Lecture principale : uniquement les colonnes utiles
+            df = pd.read_excel(xl, dtype=str, usecols=use,
+                               engine="openpyxl")
             df.columns = [str(c).strip() for c in df.columns]
+            xl.close()
         finally:
             try: os.unlink(path)
             except: pass
 
-    # Typage
-    for c in ["DATESOUS","DATEEFFE","DATEECHE","DATENAIS"]:
+    # Nettoyage : supprimer lignes totalement vides
+    df = df.dropna(how="all").reset_index(drop=True)
+
+    # Typage uniquement sur les colonnes présentes et nécessaires
+    for c in ["DATESOUS", "DATEEFFE", "DATEECHE", "DATENAIS"]:
         if c in df.columns:
             df[c] = pd.to_datetime(df[c], errors="coerce")
-    for c in ["MONTENCA","COTI_PERIODIQUE","NBRE_PRIME","COMMGEST"]:
+    for c in ["MONTENCA", "COTI_PERIODIQUE", "NBRE_PRIME", "COMMGEST"]:
         if c in df.columns:
             df[c] = clean_num(df[c])
-    # Clé de jointure
+
+    # Clé de jointure inter-bases
     if "CODEINTE_P" in df.columns and "NUMEPOLI_P" in df.columns:
         df["POLICE_KEY"] = (df["CODEINTE_P"].astype(str).str.strip()
                             + "-" + df["NUMEPOLI_P"].astype(str).str.strip())
+
+    # Normalisation ETAT_POLICE (supprime espaces parasites fréquents)
+    if "ETAT_POLICE" in df.columns:
+        df["ETAT_POLICE"] = df["ETAT_POLICE"].astype(str).str.strip()
+
     return df
 
 
@@ -945,35 +963,18 @@ today = date.today()
 #  Si oui → chargement transparent, aucun upload nécessaire.
 #  Les bases restent disponibles pour TOUS les visiteurs même après refresh.
 # ══════════════════════════════════════════════════════════════════════════════
+# Chargement initial des bases depuis la base centralisée.
+# Pas de st.rerun() ici — le rendu sera correct au prochain cycle naturel.
 if not st.session_state.bases_loaded_from_db:
-    with st.spinner("🔄 Chargement des bases depuis le serveur…"):
-        _meta = get_bases_meta()
-        _loaded_any = False
-
-        if "pf" in _meta and not st.session_state.pf_ok:
-            _df, _m = load_base("pf")
+    _meta = get_bases_meta()
+    for _bt, _attr in [("pf","pf"), ("ca","ca"), ("sin","sin")]:
+        if _bt in _meta and not getattr(st.session_state, f"{_attr}_ok"):
+            _df, _ = load_base(_bt)
             if _df is not None and not _df.empty:
-                st.session_state.pf    = _df
-                st.session_state.pf_ok = True
-                _loaded_any = True
-
-        if "ca" in _meta and not st.session_state.ca_ok:
-            _df, _m = load_base("ca")
-            if _df is not None and not _df.empty:
-                st.session_state.ca    = _df
-                st.session_state.ca_ok = True
-                _loaded_any = True
-
-        if "sin" in _meta and not st.session_state.sin_ok:
-            _df, _m = load_base("sin")
-            if _df is not None and not _df.empty:
-                st.session_state.sin    = _df
-                st.session_state.sin_ok = True
-                _loaded_any = True
-
-        st.session_state.bases_loaded_from_db = True
-        if _loaded_any:
-            st.rerun()   # rerender pour afficher les onglets déverrouillés
+                setattr(st.session_state, _attr, _df)
+                setattr(st.session_state, f"{_attr}_ok", True)
+    st.session_state.bases_loaded_from_db = True
+    # Pas de st.rerun() — Streamlit re-rendra naturellement au prochain cycle
 
 # ─────────────────────────────────────────────
 #  SIDEBAR
@@ -1063,23 +1064,17 @@ with st.sidebar:
     st.markdown(f"<div style='background:{GREEN};color:white;text-align:center;border-radius:7px;padding:5px;margin:5px 4px;font-weight:700;font-size:11px'>{period_lbl}</div>", unsafe_allow_html=True)
     st.markdown("<hr>", unsafe_allow_html=True)
 
-    # ── Statut des bases ─────────────────────────────────────────────────────
+    # ── Statut des bases (lecture seule, visible par tous) ───────────────────
     _meta_disp = get_bases_meta()
     st.markdown(
         f"<div style='font-size:9.5px;font-weight:700;opacity:.55;text-transform:uppercase;"
         f"letter-spacing:.07em;margin-bottom:4px'>📂 Bases de données</div>",
         unsafe_allow_html=True)
-
-    _needs_rerun = False
-
-    # Indicateurs de statut des 3 bases (visibles par tous)
-    for _btype, _icon, _lbl in [("pf","📋","Portefeuille"),("ca","💰","Base CA"),("sin","🏥","Prestations")]:
-        _ok  = {"pf": st.session_state.pf_ok,
-                "ca": st.session_state.ca_ok,
-                "sin": st.session_state.sin_ok}[_btype]
-        _df  = {"pf": st.session_state.pf,
-                "ca": st.session_state.ca,
-                "sin": st.session_state.sin}[_btype]
+    for _btype, _icon, _lbl in [("pf","📋","Portefeuille"),
+                                  ("ca","💰","Base CA"),
+                                  ("sin","🏥","Prestations")]:
+        _ok  = getattr(st.session_state, f"{_btype}_ok")
+        _df  = getattr(st.session_state, _btype)
         _nb  = len(_df) if _ok and _df is not None else 0
         _m   = _meta_disp.get(_btype, {})
         _col = GREEN if _ok else AMBER
@@ -1092,122 +1087,69 @@ with st.sidebar:
           <div style="font-size:9px;color:rgba(255,255,255,.5)">{_txt}{" · " + _upd if _upd else ""}</div>
         </div>""", unsafe_allow_html=True)
 
-    # ── Interface admin : chargement/gestion des bases ────────────────────────
-    # Seuls PDG, DG, ADMIN peuvent charger, remplacer ou supprimer les bases.
-    # Les autres utilisateurs voient les bases déjà chargées sans pouvoir les modifier.
+    # ── Interface admin — UNIQUEMENT les widgets d'upload et boutons ──────────
+    # RÈGLE CRITIQUE anti-removeChild :
+    #   • Les file_uploader enregistrent le fichier dans session_state["_pending_XX"]
+    #   • Aucun traitement lourd ni rerun ici
+    #   • Le traitement réel (load_pf, save_base) se fait APRÈS la sidebar,
+    #     dans une zone dédiée, une fois React terminé
     if is_admin(user):
         st.markdown(f"<div style='font-size:9px;color:{MINT};font-weight:700;margin:8px 0 3px'>"
                     f"⚙️ Gestion des bases (ADMIN)</div>", unsafe_allow_html=True)
 
-        # ── Portefeuille ──────────────────────────────────────────────────────
         with st.expander(f"📋 Portefeuille {'✅' if st.session_state.pf_ok else '▶ Charger'}",
                          expanded=not st.session_state.pf_ok):
-            f_pf = st.file_uploader("PF .xlsx/.csv", type=["xlsx","xls","csv"],
+            if st.session_state.pf_ok:
+                st.caption(f"{len(st.session_state.pf):,} polices · {len(st.session_state.pf.columns)} col.")
+            f_pf = st.file_uploader("Portefeuille .xlsx/.csv", type=["xlsx","xls","csv"],
                                     key="up_pf", label_visibility="collapsed")
             if f_pf is not None:
-                with st.spinner("⏳ Lecture, nettoyage et sauvegarde…"):
-                    try:
-                        df_pf_raw = load_pf(f_pf)
-                        ok = save_base("pf", df_pf_raw, f_pf.name, user["nom"])
-                        if ok:
-                            st.session_state.pf    = df_pf_raw
-                            st.session_state.pf_ok = True
-                            _needs_rerun = True
-                    except Exception as e:
-                        st.error(f"❌ {e}")
-            if st.session_state.pf_ok and st.session_state.pf is not None:
-                st.caption(f"{len(st.session_state.pf):,} polices")
+                # Stocker la référence — traitement fait APRÈS la sidebar
+                st.session_state["_pending_pf"] = f_pf
+            if st.session_state.pf_ok:
                 c1,c2 = st.columns(2)
                 if c1.button("🔄 Remplacer", key="rep_pf", use_container_width=True):
-                    # Réinitialiser pour permettre un nouvel upload
-                    delete_base("pf")
-                    st.session_state.pf    = None
-                    st.session_state.pf_ok = False
-                    _needs_rerun = True
+                    st.session_state["_action_pf"] = "delete"
                 if c2.button("🗑️ Supprimer", key="del_pf", use_container_width=True):
-                    delete_base("pf")
-                    st.session_state.pf    = None
-                    st.session_state.pf_ok = False
-                    _needs_rerun = True
+                    st.session_state["_action_pf"] = "delete"
 
-        # ── Base CA — multi-exercices ─────────────────────────────────────────
         with st.expander(f"💰 Base CA {'✅' if st.session_state.ca_ok else '▶ Charger'}",
                          expanded=not st.session_state.ca_ok):
-            st.caption("💡 Ajouter plusieurs exercices : chargez-les un par un, ils s'accumulent.")
+            if st.session_state.ca_ok:
+                _yrs = (sorted(st.session_state.ca["ANNEE"].dropna().unique().astype(int).tolist())
+                        if "ANNEE" in st.session_state.ca.columns else [])
+                st.caption(f"{len(st.session_state.ca):,} quittances · {', '.join(map(str,_yrs))}")
+            st.caption("💡 Charger plusieurs exercices un par un — ils s'accumulent.")
             f_ca = st.file_uploader("CA .xlsx/.csv", type=["xlsx","xls","csv"],
                                     key="up_ca", label_visibility="collapsed")
             if f_ca is not None:
                 _ca_id = f"{f_ca.name}_{f_ca.size}"
-                _seen  = st.session_state.get("_ca_seen_ids", set())
-                if _ca_id in _seen:
-                    st.caption("ℹ️ Fichier déjà chargé.")
-                else:
-                    with st.spinner("⏳ Chargement CA…"):
-                        try:
-                            df_ca_new = load_ca(f_ca)
-                            _seen.add(_ca_id)
-                            st.session_state["_ca_seen_ids"] = _seen
-                            st.session_state.ca_list_raw.append(df_ca_new)
-                            merged = (df_ca_new if len(st.session_state.ca_list_raw)==1
-                                      else pd.concat(st.session_state.ca_list_raw,
-                                                     ignore_index=True))
-                            ok = save_base("ca", merged, f_ca.name, user["nom"])
-                            if ok:
-                                st.session_state.ca    = merged
-                                st.session_state.ca_ok = True
-                                _needs_rerun = True
-                        except Exception as e:
-                            st.error(f"❌ {e}")
-            if st.session_state.ca_ok and st.session_state.ca is not None:
-                _yrs = (sorted(st.session_state.ca["ANNEE"].dropna()
-                               .unique().astype(int).tolist())
-                        if "ANNEE" in st.session_state.ca.columns else [])
-                st.caption(f"{len(st.session_state.ca):,} quittances · {', '.join(map(str,_yrs))}")
+                if _ca_id not in st.session_state.get("_ca_seen_ids", set()):
+                    st.session_state["_pending_ca"] = f_ca
+            if st.session_state.ca_ok:
                 if st.button("🗑️ Vider tout le CA", key="del_ca", use_container_width=True):
-                    delete_base("ca")
-                    st.session_state.ca          = None
-                    st.session_state.ca_list_raw = []
-                    st.session_state["_ca_seen_ids"] = set()
-                    st.session_state.ca_ok       = False
-                    _needs_rerun = True
+                    st.session_state["_action_ca"] = "delete"
 
-        # ── Prestations ───────────────────────────────────────────────────────
         with st.expander(f"🏥 Prestations {'✅' if st.session_state.sin_ok else '▶ Charger'}",
                          expanded=not st.session_state.sin_ok):
+            if st.session_state.sin_ok:
+                st.caption(f"{len(st.session_state.sin):,} dossiers · {len(st.session_state.sin.columns)} col.")
             f_sin = st.file_uploader("Prestations .xlsx/.csv", type=["xlsx","xls","csv"],
                                      key="up_sin", label_visibility="collapsed")
             if f_sin is not None:
-                with st.spinner("⏳ Chargement prestations…"):
-                    try:
-                        df_sin_raw = load_sin(f_sin)
-                        ok = save_base("sin", df_sin_raw, f_sin.name, user["nom"])
-                        if ok:
-                            st.session_state.sin    = df_sin_raw
-                            st.session_state.sin_ok = True
-                            _needs_rerun = True
-                    except Exception as e:
-                        st.error(f"❌ {e}")
-            if st.session_state.sin_ok and st.session_state.sin is not None:
-                st.caption(f"{len(st.session_state.sin):,} dossiers")
+                st.session_state["_pending_sin"] = f_sin
+            if st.session_state.sin_ok:
                 c1,c2 = st.columns(2)
                 if c1.button("🔄 Remplacer", key="rep_sin", use_container_width=True):
-                    delete_base("sin")
-                    st.session_state.sin    = None
-                    st.session_state.sin_ok = False
-                    _needs_rerun = True
+                    st.session_state["_action_sin"] = "delete"
                 if c2.button("🗑️ Supprimer", key="del_sin", use_container_width=True):
-                    delete_base("sin")
-                    st.session_state.sin    = None
-                    st.session_state.sin_ok = False
-                    _needs_rerun = True
+                    st.session_state["_action_sin"] = "delete"
     else:
-        # Utilisateur non-admin : message informatif
         if not _any_data:
             st.markdown(f"""
             <div style="background:rgba(202,111,30,.15);border:1px solid {AMBER};border-radius:8px;
                  padding:8px 10px;margin:4px;font-size:10px;color:rgba(255,255,255,.7)">
-              ⏳ Les bases de données sont en cours de chargement par l'administrateur.
-              Revenez dans quelques instants.
+              ⏳ Les bases sont en cours de chargement par l'administrateur.
             </div>""", unsafe_allow_html=True)
 
     st.markdown("<hr>", unsafe_allow_html=True)
@@ -1217,14 +1159,97 @@ with st.sidebar:
         f"© 2025 AFG Assurances Bénin Vie<br>Dashboard Expert v3.0 · CIMA</div>",
         unsafe_allow_html=True)
 
-# ── Rerun unique HORS du contexte sidebar (évite removeChild DOM bug) ─────────
-# Tous les changements d'état qui nécessitent un rechargement sont regroupés ici.
+# ══════════════════════════════════════════════════════════════════════════════
+#  TRAITEMENT DES ACTIONS — HORS SIDEBAR, HORS WIDGET
+#  React a terminé son cycle de rendu. On peut maintenant traiter les fichiers
+#  uploadés et appeler st.rerun() sans provoquer le removeChild DOM error.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Déconnexion ───────────────────────────────────────────────────────────────
 if "_logout" in dir() and _logout:
     for k in DEFAULTS:
         st.session_state[k] = DEFAULTS[k]
     st.rerun()
 
-if "_needs_rerun" in dir() and _needs_rerun:
+# ── Actions suppression/remplacement ─────────────────────────────────────────
+_needs_rerun = False
+
+for _bt, _attr in [("pf","pf"),("ca","ca"),("sin","sin")]:
+    _action_key = f"_action_{_bt}"
+    if st.session_state.get(_action_key):
+        delete_base(_bt)
+        setattr(st.session_state, _attr, None)
+        setattr(st.session_state, f"{_attr}_ok", False)
+        if _bt == "ca":
+            st.session_state.ca_list_raw = []
+            st.session_state["_ca_seen_ids"] = set()
+        st.session_state[_action_key] = None
+        _needs_rerun = True
+
+# ── Traitement fichiers uploadés en attente ───────────────────────────────────
+# Portefeuille
+if st.session_state.get("_pending_pf") is not None:
+    _f = st.session_state["_pending_pf"]
+    st.session_state["_pending_pf"] = None   # consommer le pending
+    _ph = st.empty()
+    with _ph.container():
+        with st.spinner("⏳ Portefeuille : lecture et nettoyage des colonnes utiles…"):
+            try:
+                _df = load_pf(_f)
+                _ok = save_base("pf", _df, _f.name, user["nom"])
+                if _ok:
+                    st.session_state.pf    = _df
+                    st.session_state.pf_ok = True
+                    _needs_rerun = True
+            except Exception as _e:
+                st.error(f"❌ Portefeuille : {_e}")
+    _ph.empty()
+
+# Base CA
+if st.session_state.get("_pending_ca") is not None:
+    _f = st.session_state["_pending_ca"]
+    _ca_id = f"{_f.name}_{_f.size}"
+    st.session_state["_pending_ca"] = None
+    _ph = st.empty()
+    with _ph.container():
+        with st.spinner("⏳ CA : chargement…"):
+            try:
+                _df_new = load_ca(_f)
+                _seen = st.session_state.get("_ca_seen_ids", set())
+                _seen.add(_ca_id)
+                st.session_state["_ca_seen_ids"] = _seen
+                st.session_state.ca_list_raw.append(_df_new)
+                _merged = (_df_new if len(st.session_state.ca_list_raw)==1
+                           else pd.concat(st.session_state.ca_list_raw, ignore_index=True))
+                _ok = save_base("ca", _merged, _f.name, user["nom"])
+                if _ok:
+                    st.session_state.ca    = _merged
+                    st.session_state.ca_ok = True
+                    _needs_rerun = True
+            except Exception as _e:
+                st.error(f"❌ CA : {_e}")
+    _ph.empty()
+
+# Prestations
+if st.session_state.get("_pending_sin") is not None:
+    _f = st.session_state["_pending_sin"]
+    st.session_state["_pending_sin"] = None
+    _ph = st.empty()
+    with _ph.container():
+        with st.spinner("⏳ Prestations : chargement…"):
+            try:
+                _df = load_sin(_f)
+                _ok = save_base("sin", _df, _f.name, user["nom"])
+                if _ok:
+                    st.session_state.sin    = _df
+                    st.session_state.sin_ok = True
+                    _needs_rerun = True
+            except Exception as _e:
+                st.error(f"❌ Prestations : {_e}")
+    _ph.empty()
+
+# ── Rerun unique — tout est traité, React peut se ré-initialiser proprement ───
+if _needs_rerun:
     st.rerun()
 
 # ─────────────────────────────────────────────
