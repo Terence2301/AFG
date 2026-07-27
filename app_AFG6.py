@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-  AFG ASSURANCES BÉNIN VIE — DASHBOARD ACTUARIEL EXPERT v3.0
+  AFG ASSURANCES BÉNIN VIE — DASHBOARD ACTUARIEL 
   Bug-fixes v3 : chargement direct (no pickle) · filtre date corrigé
                  navigation cachée · jointures inter-bases fiables
 ================================================================================
@@ -12,11 +12,34 @@
 """
 import streamlit as st
 st.set_page_config(
-    page_title="AFG Bénin Vie — Dashboard Expert",
+    page_title="AFG Bénin Vie — Dashboard",
     page_icon="🛡️", layout="wide",
     initial_sidebar_state="expanded",
-    menu_items={"About": "AFG Assurances Bénin Vie v3.0"}
+    menu_items={"About": "AFG Assurances Bénin Vie "}
 )
+
+# ── Masquer le bouton collapse/expand de la sidebar (flèches ◀ ▶) ────────────────────────────────────────
+# Injecté immédiatement après set_page_config pour être actif dès le premier frame.
+st.markdown("""
+<style>
+/* Masquer le bouton collapse/expand (flèches gauche/droite) */
+[data-testid="collapsedControl"] { display: none !important; }
+button[kind="header"]            { display: none !important; }
+
+/* La sidebar reste toujours visible, jamais rétractable */
+section[data-testid="stSidebar"] {
+    min-width: 285px !important;
+    max-width: 320px !important;
+    transform: translateX(0) !important;
+    visibility: visible !important;
+    display: block !important;
+}
+section[data-testid="stSidebar"][aria-expanded="false"] {
+    margin-left: 0 !important;
+    min-width: 285px !important;
+}
+</style>
+""", unsafe_allow_html=True)
 
 import pandas as pd, numpy as np, io, os, tempfile, warnings, hashlib, sqlite3
 from datetime import datetime, date
