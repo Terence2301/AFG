@@ -265,6 +265,25 @@ def clean_num(s):
          .str.replace(" ","",regex=False).str.replace(",",".",regex=False),
         errors="coerce")
 
+def clean_str_col(s: pd.Series) -> pd.Series:
+    """Nettoie une colonne texte : strip, normalise Unicode, supprime NaN affichés."""
+    import unicodedata
+    def _clean(v):
+        if pd.isna(v): return ""
+        t = str(v).strip()
+        # Normalise les caractères accentués mal encodés (Latin-1 → UTF-8)
+        try:
+            t = t.encode("latin-1").decode("utf-8")
+        except Exception:
+            pass
+        # Normalise NFC (formes composées)
+        try:
+            t = unicodedata.normalize("NFC", t)
+        except Exception:
+            pass
+        return t
+    return s.apply(_clean)
+
 def dl_csv(df):
     return df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
 
@@ -1022,6 +1041,34 @@ pages_visible = ALL_PAGES if _any_data else VISIBLE_DEFAULT
 if st.session_state.current_page not in pages_visible:
     st.session_state.current_page = "📝  Saisie BIA"
 
+
+# ── Callbacks file_uploader — appelés par Streamlit APRÈS le rendu React ──────
+# C'est le SEUL pattern garanti sans removeChild sur Streamlit Cloud.
+# Le callback s'exécute entre deux cycles, DOM stable.
+def _cb_pf():
+    f = st.session_state.get("up_pf")
+    if f is not None and not st.session_state.get("_pf_bytes_stored"):
+        st.session_state["_pending_pf_bytes"] = f.read()
+        st.session_state["_pending_pf_name"]  = f.name
+        st.session_state["_pf_bytes_stored"]  = True
+
+def _cb_ca():
+    f = st.session_state.get("up_ca")
+    if f is not None:
+        _cid = f"{f.name}_{f.size}"
+        if _cid not in st.session_state.get("_ca_seen_ids", set()):
+            raw  = f.read()
+            lst  = st.session_state.get("_pending_ca_list", [])
+            lst.append({"bytes": raw, "name": f.name, "id": _cid})
+            st.session_state["_pending_ca_list"] = lst
+
+def _cb_sin():
+    f = st.session_state.get("up_sin")
+    if f is not None and not st.session_state.get("_sin_bytes_stored"):
+        st.session_state["_pending_sin_bytes"] = f.read()
+        st.session_state["_pending_sin_name"]  = f.name
+        st.session_state["_sin_bytes_stored"]  = True
+
 with st.sidebar:
     st.markdown(f"""
     <div style="text-align:center;padding:.8rem 0 .4rem">
@@ -1111,69 +1158,70 @@ with st.sidebar:
         st.markdown(f"<div style='font-size:9px;color:{MINT};font-weight:700;margin:8px 0 3px'>"
                     f"⚙️ Gestion des bases (ADMIN)</div>", unsafe_allow_html=True)
 
-        with st.expander(f"📋 Portefeuille {'✅' if st.session_state.pf_ok else '▶ Charger'}",
-                         expanded=not st.session_state.pf_ok):
+        # ── PATTERN DÉFINITIF anti-removeChild ───────────────────────────────
+        # on_change= : Streamlit appelle le callback ENTRE deux cycles React,
+        # quand le DOM est complètement stable. Aucun f.read() dans le rendu.
+        with st.expander(
+                f"📋 Portefeuille {'✅' if st.session_state.pf_ok else '▶ Charger'}",
+                expanded=not st.session_state.pf_ok):
             if st.session_state.pf_ok:
-                st.caption(f"{len(st.session_state.pf):,} polices · {len(st.session_state.pf.columns)} col.")
-            f_pf = st.file_uploader(
-                "💡 CSV recommandé pour vitesse maximale | xlsx accepté",
-                type=["csv","xlsx","xls"], key="up_pf",
+                pf_cols = len(st.session_state.pf.columns) if st.session_state.pf is not None else 0
+                st.caption(f"{len(st.session_state.pf):,} polices · {pf_cols} col.")
+            st.file_uploader(
+                "CSV recommandé · xlsx accepté",
+                type=["csv","xlsx","xls"],
+                key="up_pf",
+                on_change=_cb_pf,
                 label_visibility="visible")
-            if f_pf is not None and not st.session_state.get("_pf_bytes_stored"):
-                # Lire les bytes IMMÉDIATEMENT — ultra-rapide, évite timeout websocket
-                _raw = f_pf.read()
-                st.session_state["_pending_pf_bytes"] = _raw
-                st.session_state["_pending_pf_name"]  = f_pf.name
-                st.session_state["_pf_bytes_stored"]  = True
             if st.session_state.pf_ok:
-                c1,c2 = st.columns(2)
+                c1, c2 = st.columns(2)
                 if c1.button("🔄 Remplacer", key="rep_pf", use_container_width=True):
-                    st.session_state["_action_pf"] = "delete"
+                    st.session_state["_action_pf"]      = "delete"
                     st.session_state["_pf_bytes_stored"] = False
                 if c2.button("🗑️ Supprimer", key="del_pf", use_container_width=True):
-                    st.session_state["_action_pf"] = "delete"
+                    st.session_state["_action_pf"]      = "delete"
                     st.session_state["_pf_bytes_stored"] = False
 
-        with st.expander(f"💰 Base CA {'✅' if st.session_state.ca_ok else '▶ Charger'}",
-                         expanded=not st.session_state.ca_ok):
+        with st.expander(
+                f"💰 Base CA {'✅' if st.session_state.ca_ok else '▶ Charger'}",
+                expanded=not st.session_state.ca_ok):
             if st.session_state.ca_ok:
-                _yrs = (sorted(st.session_state.ca["ANNEE"].dropna().unique().astype(int).tolist())
+                _yrs = (sorted(st.session_state.ca["ANNEE"].dropna()
+                               .unique().astype(int).tolist())
                         if "ANNEE" in st.session_state.ca.columns else [])
-                st.caption(f"{len(st.session_state.ca):,} quittances · {', '.join(map(str,_yrs))}")
-            st.caption("💡 CSV recommandé · Plusieurs exercices : charger un par un")
-            f_ca = st.file_uploader("CA .csv/.xlsx", type=["csv","xlsx","xls"],
-                                    key="up_ca", label_visibility="collapsed")
-            if f_ca is not None:
-                _ca_id = f"{f_ca.name}_{f_ca.size}"
-                if _ca_id not in st.session_state.get("_ca_seen_ids", set()):
-                    _raw_ca = f_ca.read()
-                    _pending_list = st.session_state.get("_pending_ca_list", [])
-                    _pending_list.append({"bytes": _raw_ca, "name": f_ca.name, "id": _ca_id})
-                    st.session_state["_pending_ca_list"] = _pending_list
+                st.caption(f"{len(st.session_state.ca):,} quittances"
+                           f"{' · '+', '.join(map(str,_yrs)) if _yrs else ''}")
+            st.caption("Plusieurs exercices : charger un par un — ils s'accumulent")
+            st.file_uploader(
+                "CSV recommandé · xlsx accepté",
+                type=["csv","xlsx","xls"],
+                key="up_ca",
+                on_change=_cb_ca,
+                label_visibility="visible")
             if st.session_state.ca_ok:
-                if st.button("🗑️ Vider tout le CA", key="del_ca", use_container_width=True):
+                if st.button("🗑️ Vider tout le CA", key="del_ca",
+                             use_container_width=True):
                     st.session_state["_action_ca"] = "delete"
 
-        with st.expander(f"🏥 Prestations {'✅' if st.session_state.sin_ok else '▶ Charger'}",
-                         expanded=not st.session_state.sin_ok):
+        with st.expander(
+                f"🏥 Prestations {'✅' if st.session_state.sin_ok else '▶ Charger'}",
+                expanded=not st.session_state.sin_ok):
             if st.session_state.sin_ok:
-                st.caption(f"{len(st.session_state.sin):,} dossiers · {len(st.session_state.sin.columns)} col.")
-            f_sin = st.file_uploader(
-                "💡 CSV recommandé | xlsx accepté",
-                type=["csv","xlsx","xls"], key="up_sin",
+                sin_cols = len(st.session_state.sin.columns) if st.session_state.sin is not None else 0
+                st.caption(f"{len(st.session_state.sin):,} dossiers · {sin_cols} col.")
+            st.file_uploader(
+                "CSV recommandé · xlsx accepté",
+                type=["csv","xlsx","xls"],
+                key="up_sin",
+                on_change=_cb_sin,
                 label_visibility="visible")
-            if f_sin is not None and not st.session_state.get("_sin_bytes_stored"):
-                _raw_sin = f_sin.read()
-                st.session_state["_pending_sin_bytes"] = _raw_sin
-                st.session_state["_pending_sin_name"]  = f_sin.name
-                st.session_state["_sin_bytes_stored"]  = True
             if st.session_state.sin_ok:
-                c1,c2 = st.columns(2)
+                c1, c2 = st.columns(2)
                 if c1.button("🔄 Remplacer", key="rep_sin", use_container_width=True):
-                    st.session_state["_action_sin"] = "delete"
+                    st.session_state["_action_sin"]      = "delete"
                     st.session_state["_sin_bytes_stored"] = False
                 if c2.button("🗑️ Supprimer", key="del_sin", use_container_width=True):
-                    st.session_state["_action_sin"] = "delete"
+                    st.session_state["_action_sin"]      = "delete"
                     st.session_state["_sin_bytes_stored"] = False
     else:
         if not _any_data:
@@ -1262,8 +1310,10 @@ def _bytes_to_df_pf(raw: bytes, fname: str) -> pd.DataFrame:
     if "CODEINTE_P" in df.columns and "NUMEPOLI_P" in df.columns:
         df["POLICE_KEY"] = (df["CODEINTE_P"].astype(str).str.strip()
                             + "-" + df["NUMEPOLI_P"].astype(str).str.strip())
-    if "ETAT_POLICE" in df.columns:
-        df["ETAT_POLICE"] = df["ETAT_POLICE"].astype(str).str.strip()
+    # Nettoyage Unicode des colonnes texte (corrige les "?" sur noms accentués)
+    for _tc in ["LIBECATE","NOM_ASSU","LIBEVILL","NOM_APP","ETAT_POLICE","CODEPERI"]:
+        if _tc in df.columns:
+            df[_tc] = clean_str_col(df[_tc])
     return df.loc[:, df.notna().any(axis=0)]
 
 def _bytes_to_df_ca(raw: bytes, fname: str) -> pd.DataFrame:
@@ -1305,6 +1355,9 @@ def _bytes_to_df_ca(raw: bytes, fname: str) -> pd.DataFrame:
             s = str(x).strip().replace(".0","")
             return s if s.isdigit() else str(x).strip()
         df["CODEAPPO_STR"] = df["CODEAPPO"].apply(_n)
+    for _tc in ["LIBECATE","NOM_INTERMEDIAIRE","TYPEMOUV","SORTQUIT"]:
+        if _tc in df.columns:
+            df[_tc] = clean_str_col(df[_tc])
     return df.loc[:, df.notna().any(axis=0)]
 
 def _bytes_to_df_sin(raw: bytes, fname: str) -> pd.DataFrame:
@@ -1344,6 +1397,10 @@ def _bytes_to_df_sin(raw: bytes, fname: str) -> pd.DataFrame:
     if "Exercice Sinistre" in df.columns:
         df["ANNEE_SIN"] = pd.to_numeric(
             df["Exercice Sinistre"], errors="coerce").astype("Int64")
+    for _tc in ["Nature Sinistre","Sort Sinistre","Libéllé Catégorie",
+               "Souscripteur","Désignation risque","Nom Bénéficiaire"]:
+        if _tc in df.columns:
+            df[_tc] = clean_str_col(df[_tc])
     return df.loc[:, df.notna().any(axis=0)]
 
 # ── Traitement des bytes stockés — parsing et sauvegarde ─────────────────────
@@ -1779,14 +1836,12 @@ elif "Analyse CA" in page:
 # ═══════════════════════════════════════════════════════════════════════════════
 elif "Portefeuille" in page:
     if pf is None: alert("Chargez le Portefeuille dans la barre latérale.","warn"); st.stop()
-    df_all = pf  # portefeuille complet pour l'évolution historique
-    df = pf_f()  # filtré par période
+    df_all = pf  # portefeuille complet — toujours utilisé pour les stats
+    # Pour le portefeuille, on affiche TOUJOURS toutes les polices
+    # Le filtre période s'applique uniquement sur les exports et l'évolution
+    df = df_all
 
-    section(f"📋 Portefeuille — {period_lbl}","ANALYSE · FILTRES · EXPORT")
-
-    if df.empty and MODE != "annee":
-        alert(f"Aucune souscription pour {period_lbl}. Le filtre s'applique sur DATESOUS. Essayez 'Année' ou 'Mois'.","info")
-        df = df_all  # afficher tout si filtre trop restrictif pour la période
+    section(f"📋 Portefeuille — Vue complète","ANALYSE · FILTRES · EXPORT")
 
     # Filtres
     f1,f2,f3,f4 = st.columns(4)
@@ -1822,7 +1877,7 @@ elif "Portefeuille" in page:
     kpi(c5,"Cotisation périodique",fmt(coti_p),"COTI_PERIODIQUE","blue",icon="💳")
 
     st.markdown("")
-    t1,t2,t3,t4 = st.tabs(["📋 Tableau","📊 Statistiques","📈 Évolution souscriptions","🔗 Jointure CA"])
+    t1,t2,t3,t4,t5 = st.tabs(["📋 Tableau","📊 Statistiques","📈 Évolution souscriptions","🔗 Jointure CA","👤 Tous les clients"])
 
     with t1:
         COLS_SHOW=[c for c in ["POLICE_KEY","NUMEPOLI_P","LIBECATE","ETAT_POLICE","NOM_ASSU","LIBEVILL","NOM_APP","DATESOUS","DATEEFFE","DATEECHE","COTI_PERIODIQUE","MONTENCA","SEXERISQ","CODEPERI","NBRE_PRIME"] if c in fi.columns]
@@ -1867,8 +1922,9 @@ elif "Portefeuille" in page:
         with sc4:
             if "LIBEVILL" in fi.columns:
                 vl=fi["LIBEVILL"].value_counts().head(10).reset_index(); vl.columns=["Ville","Nb"]
+                _pal_vl = PAL[:len(vl)]
                 fig4=go.Figure(go.Bar(x=vl["Nb"],y=vl["Ville"].str[:18],orientation="h",
-                    marker_color=PALETTE if (PALETTE:=PAL[:len(vl)]) else PAL,
+                    marker_color=_pal_vl,
                     text=vl["Nb"].astype(str),textposition="outside",textfont_size=10))
                 fig4.update_layout(yaxis=dict(autorange="reversed"))
                 fig_style(fig4,320,"📍 Top 10 villes")
@@ -1903,6 +1959,77 @@ elif "Portefeuille" in page:
             a,b=st.columns(2)
             a.download_button("📥 CSV jointure",dl_csv(tp),"jointure_pf_ca.csv","text/csv",use_container_width=True,key="dl_join_pf")
         else: alert("Chargez la Base CA pour voir la jointure PF × CA.","info")
+
+    with t5:
+        section("👤 Liste complète des clients","NOM_ASSU · TOUTES POLICES")
+        if pf is None:
+            alert("Chargez le Portefeuille.","warn")
+        else:
+            # Filtres clients
+            fc1,fc2,fc3 = st.columns(3)
+            srch_cli = fc1.text_input("🔍 Rechercher un assuré",
+                placeholder="Nom, prénom…", label_visibility="collapsed",
+                key="srch_cli")
+            etat_cli_opts = ["Tous"] + sorted(
+                pf["ETAT_POLICE"].dropna().unique().tolist()) if "ETAT_POLICE" in pf.columns else ["Tous"]
+            etat_cli = fc2.selectbox("État police", etat_cli_opts,
+                label_visibility="collapsed", key="etat_cli")
+            ville_cli_opts = ["Toutes"] + sorted(
+                pf["LIBEVILL"].dropna().unique().tolist()) if "LIBEVILL" in pf.columns else ["Toutes"]
+            ville_cli = fc3.selectbox("Ville", ville_cli_opts,
+                label_visibility="collapsed", key="ville_cli")
+
+            df_cli = pf.copy()
+            if etat_cli != "Tous" and "ETAT_POLICE" in df_cli.columns:
+                df_cli = df_cli[df_cli["ETAT_POLICE"] == etat_cli]
+            if ville_cli != "Toutes" and "LIBEVILL" in df_cli.columns:
+                df_cli = df_cli[df_cli["LIBEVILL"] == ville_cli]
+            if srch_cli:
+                _mask = pd.Series(False, index=df_cli.index)
+                for _c in ["NOM_ASSU","LIBEVILL","NOM_APP"]:
+                    if _c in df_cli.columns:
+                        _mask |= df_cli[_c].astype(str).str.lower().str.contains(
+                            srch_cli.lower(), na=False)
+                df_cli = df_cli[_mask]
+
+            # Colonnes à afficher
+            _cli_cols = [c for c in [
+                "NOM_ASSU","LIBECATE","ETAT_POLICE","LIBEVILL","NOM_APP",
+                "DATESOUS","COTI_PERIODIQUE","MONTENCA","CODEPERI","POLICE_KEY"
+            ] if c in df_cli.columns]
+            df_cli_disp = df_cli[_cli_cols].copy()
+            if "DATESOUS" in df_cli_disp.columns:
+                df_cli_disp["DATESOUS"] = df_cli_disp["DATESOUS"].apply(ds)
+            for _nc in ["COTI_PERIODIQUE","MONTENCA"]:
+                if _nc in df_cli_disp.columns:
+                    df_cli_disp[_nc] = df_cli_disp[_nc].apply(lambda x: fmt(x,""))
+
+            st.caption(f"**{len(df_cli):,} clients** affichés sur {len(pf):,} polices totales")
+
+            # Afficher avec pagination (1000 lignes max)
+            page_size = 1000
+            total_pages = max(1, (len(df_cli) + page_size - 1) // page_size)
+            if total_pages > 1:
+                page_num = st.number_input(
+                    f"Page (1–{total_pages})", min_value=1,
+                    max_value=total_pages, value=1, key="cli_page")
+                start = (page_num - 1) * page_size
+                df_show = df_cli_disp.iloc[start:start+page_size]
+            else:
+                df_show = df_cli_disp
+
+            st.dataframe(df_show, use_container_width=True,
+                        hide_index=True, height=500)
+            ac1, ac2 = st.columns(2)
+            ac1.download_button("📥 CSV clients filtrés",
+                dl_csv(df_cli[_cli_cols]),
+                f"clients_{etat_cli}_{ville_cli}.csv",
+                "text/csv", use_container_width=True, key="dl_cli_csv")
+            ac2.download_button("📥 Excel clients",
+                dl_xlsx(df_cli[_cli_cols].head(50000)),
+                "clients.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True, key="dl_cli_xl")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PAGE — PRODUITS
@@ -1968,12 +2095,12 @@ elif "Produits" in page:
 # ═══════════════════════════════════════════════════════════════════════════════
 elif "Commerciaux" in page:
     section(f"👥 Commerciaux & Partenaires — {period_lbl}","CLASSEMENT · PARETO")
-    src=ca_f() if ca is not None else pf_f()
-    if src is None or src.empty: alert("Chargez la Base CA ou le Portefeuille.","warn"); st.stop()
-    ag_k="NOM_INTERMEDIAIRE" if "NOM_INTERMEDIAIRE" in src.columns else "NOM_APP"
-    ca_k="CHIFAFFA" if "CHIFAFFA" in src.columns else "MONTENCA"
-    comm_k="COMMAPPO" if "COMMAPPO" in src.columns else None
-    grp=src.groupby(ag_k).agg(CA=(ca_k,"sum"),Nb=(ca_k,"count"),
+    _src_com=ca_f() if ca is not None else pf_f()
+    if _src_com is None or _src_com.empty: alert("Chargez la Base CA ou le Portefeuille.","warn"); st.stop()
+    ag_k="NOM_INTERMEDIAIRE" if "NOM_INTERMEDIAIRE" in _src_com.columns else "NOM_APP"
+    ca_k="CHIFAFFA" if "CHIFAFFA" in _src_com.columns else "MONTENCA"
+    comm_k="COMMAPPO" if "COMMAPPO" in _src_com.columns else None
+    grp=_src_com.groupby(ag_k).agg(CA=(ca_k,"sum"),Nb=(ca_k,"count"),
         **({} if not comm_k else {"Comm":(comm_k,"sum")})).reset_index().sort_values("CA",ascending=False).reset_index(drop=True)
     grp.index+=1; tot=grp["CA"].sum()
     grp["Part %"]=(grp["CA"]/max(tot,1)*100).round(2); grp["Part cum %"]=grp["Part %"].cumsum().round(1)
@@ -2020,7 +2147,7 @@ elif "Clients" in page:
     kpi(c1,"Clients distincts",f"{nb_cli:,}","NOM_ASSU uniques","teal",icon="👤")
     kpi(c2,"Villes couvertes",f"{nb_vl:,}","LIBEVILL","",icon="📍")
     kpi(c3,"MONTENCA moy/client",fmt(ca_moy),"Encaissement moyen","blue",icon="💰")
-    t_g,t_d,t_a=st.tabs(["🗺️ Géographie","📊 Démographie","🎂 Pyramide des âges"])
+    t_g,t_d,t_a,t_cl=st.tabs(["🗺️ Géographie","📊 Démographie","🎂 Pyramide des âges","👤 Répertoire clients"])
     with t_g:
         if "LIBEVILL" in df.columns:
             c1,c2=st.columns(2)
@@ -2085,6 +2212,67 @@ elif "Clients" in page:
                 a.download_button("📥 CSV pyramide",dl_csv(da[["age","SEXERISQ"]]),"pyramide.csv","text/csv",use_container_width=True,key="dl_pyr")
         else: alert("Colonnes DATENAIS et SEXERISQ requises dans le portefeuille.","info")
 
+    with t_cl:
+        section("👤 Répertoire complet des clients assurés","RECHERCHE · FILTRE · EXPORT")
+        _c1,_c2,_c3,_c4 = st.columns(4)
+        _srch = _c1.text_input("🔍 Rechercher",placeholder="Nom assuré…",
+            label_visibility="collapsed", key="cli_geo_srch")
+        _etat_opts = ["Tous"]+sorted(df["ETAT_POLICE"].dropna().unique().tolist())             if "ETAT_POLICE" in df.columns else ["Tous"]
+        _etat = _c2.selectbox("État",_etat_opts,label_visibility="collapsed",key="cli_geo_etat")
+        _vill_opts = ["Toutes"]+sorted(df["LIBEVILL"].dropna().unique().tolist())             if "LIBEVILL" in df.columns else ["Toutes"]
+        _vill = _c3.selectbox("Ville",_vill_opts,label_visibility="collapsed",key="cli_geo_vill")
+        _prod_opts = ["Tous"]+sorted(df["LIBECATE"].dropna().unique().tolist())             if "LIBECATE" in df.columns else ["Tous"]
+        _prod = _c4.selectbox("Produit",_prod_opts,label_visibility="collapsed",key="cli_geo_prod")
+
+        _df_rep = df.copy()
+        if _etat != "Tous" and "ETAT_POLICE" in _df_rep.columns:
+            _df_rep = _df_rep[_df_rep["ETAT_POLICE"]==_etat]
+        if _vill != "Toutes" and "LIBEVILL" in _df_rep.columns:
+            _df_rep = _df_rep[_df_rep["LIBEVILL"]==_vill]
+        if _prod != "Tous" and "LIBECATE" in _df_rep.columns:
+            _df_rep = _df_rep[_df_rep["LIBECATE"]==_prod]
+        if _srch:
+            _m = pd.Series(False,index=_df_rep.index)
+            for _c in ["NOM_ASSU","LIBEVILL","NOM_APP","LIBECATE"]:
+                if _c in _df_rep.columns:
+                    _m |= _df_rep[_c].astype(str).str.lower().str.contains(_srch.lower(),na=False)
+            _df_rep = _df_rep[_m]
+
+        _rep_cols = [c for c in ["NOM_ASSU","LIBECATE","ETAT_POLICE","LIBEVILL",
+            "NOM_APP","DATESOUS","COTI_PERIODIQUE","MONTENCA","CODEPERI","POLICE_KEY"]
+            if c in _df_rep.columns]
+        _df_rep_d = _df_rep[_rep_cols].copy()
+        if "DATESOUS" in _df_rep_d.columns:
+            _df_rep_d["DATESOUS"] = _df_rep_d["DATESOUS"].apply(ds)
+        for _nc in ["COTI_PERIODIQUE","MONTENCA"]:
+            if _nc in _df_rep_d.columns:
+                _df_rep_d[_nc] = _df_rep_d[_nc].apply(lambda x: fmt(x,""))
+        _df_rep_d.columns = [
+            {"NOM_ASSU":"Assuré","LIBECATE":"Produit","ETAT_POLICE":"État",
+             "LIBEVILL":"Ville","NOM_APP":"Apporteur","DATESOUS":"Date souscription",
+             "COTI_PERIODIQUE":"Cotisation","MONTENCA":"Encaissement",
+             "CODEPERI":"Périodicité","POLICE_KEY":"N° Police"}.get(c,c)
+            for c in _df_rep_d.columns]
+
+        st.caption(f"**{len(_df_rep):,} polices** · {_df_rep['NOM_ASSU'].nunique() if 'NOM_ASSU' in _df_rep.columns else 0:,} clients distincts")
+
+        # Pagination 500 lignes
+        _ps = 500
+        _tp = max(1,(len(_df_rep)+_ps-1)//_ps)
+        if _tp > 1:
+            _pn = st.number_input(f"Page (1–{_tp})",min_value=1,max_value=_tp,value=1,key="cli_rep_page")
+            _st = (_pn-1)*_ps
+            st.dataframe(_df_rep_d.iloc[_st:_st+_ps],use_container_width=True,hide_index=True,height=520)
+        else:
+            st.dataframe(_df_rep_d,use_container_width=True,hide_index=True,height=520)
+
+        _ac1,_ac2 = st.columns(2)
+        _ac1.download_button("📥 CSV répertoire",dl_csv(_df_rep[_rep_cols]),
+            "repertoire_clients.csv","text/csv",use_container_width=True,key="dl_rep_csv")
+        _ac2.download_button("📥 Excel répertoire",dl_xlsx(_df_rep[_rep_cols].head(50000)),
+            "repertoire_clients.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,key="dl_rep_xl")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PAGE — SINISTRES & PROVISIONS
@@ -2160,7 +2348,10 @@ elif "Sinistres" in page:
             b.download_button("📥 Excel",dl_xlsx(evo),"evo_sin.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_evo_sin_xl")
 
     with t_p:
-        cat_c="Libéllé Catégorie" if "Libéllé Catégorie" in sin.columns else "Libellé Catégorie"
+        # Détection robuste du nom de colonne (accents variables selon encodage)
+        cat_c = next((c for c in sin.columns
+                      if "cat" in c.lower() and ("gorie" in c.lower() or "g" in c.lower())),
+                     "Libéllé Catégorie")
         if cat_c in sin.columns:
             sp2=sin.groupby(cat_c).agg(Nb=(cat_c,"count"),Regle=("Réglement Total","sum"),SAP=("SAP au 31/12/2025","sum")).reset_index().sort_values("Regle",ascending=False)
             sp2["Charge"]=sp2["Regle"]+sp2["SAP"]
@@ -2190,7 +2381,14 @@ elif "Sinistres" in page:
         else: alert("Colonnes ANNEE_SIN et Date Survenance requises.","info")
 
     with t_r:
-        cs=[c for c in ["Date Survenance","Libéllé Catégorie","Nature Sinistre","Sort Sinistre","Souscripteur","Désignation risque","Réglement Total","SAP au 31/12/2025","Date Déclaration","Date validation","Nom Bénéficiaire","Exercice Sinistre","POLICE_KEY"] if c in sin.columns]
+        _sin_raw_want = ["Date Survenance","Nature Sinistre","Sort Sinistre","Souscripteur",
+            "Désignation risque","Réglement Total","SAP au 31/12/2025",
+            "Date Déclaration","Date validation","Nom Bénéficiaire",
+            "Exercice Sinistre","POLICE_KEY"]
+        # Ajouter la colonne catégorie quelle que soit son orthographe
+        _cat_col = next((c for c in sin.columns if "cat" in c.lower()),None)
+        if _cat_col and _cat_col not in _sin_raw_want: _sin_raw_want.insert(1, _cat_col)
+        cs=[c for c in _sin_raw_want if c in sin.columns]
         srch_s=st.text_input("🔍 Rechercher",label_visibility="collapsed",placeholder="Nature, souscripteur, produit…",key="srch_sin")
         di_s=sin[cs].copy()
         for dc in ["Date Survenance","Date Déclaration","Date validation"]:
@@ -2973,7 +3171,7 @@ elif "Base BIA" in page:
             if "LIBEVILL" in fi.columns:
                 vl=fi["LIBEVILL"].value_counts().head(10).reset_index(); vl.columns=["Ville","Nb"]
                 fig4=go.Figure(go.Bar(x=vl["Nb"],y=vl["Ville"].str[:18],orientation="h",
-                    marker_color=PALETTE if (PALETTE:=PAL[:len(vl)]) else PAL,
+                    marker_color=PAL[:len(vl)],
                     text=vl["Nb"].astype(str),textposition="outside",textfont_size=10))
                 fig4.update_layout(yaxis=dict(autorange="reversed"))
                 fig_style(fig4,320,"📍 Top 10 villes")
