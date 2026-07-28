@@ -1115,17 +1115,24 @@ with st.sidebar:
                          expanded=not st.session_state.pf_ok):
             if st.session_state.pf_ok:
                 st.caption(f"{len(st.session_state.pf):,} polices · {len(st.session_state.pf.columns)} col.")
-            f_pf = st.file_uploader("Portefeuille .xlsx/.csv", type=["xlsx","xls","csv"],
-                                    key="up_pf", label_visibility="collapsed")
-            if f_pf is not None:
-                # Stocker la référence — traitement fait APRÈS la sidebar
-                st.session_state["_pending_pf"] = f_pf
+            f_pf = st.file_uploader(
+                "💡 CSV recommandé pour vitesse maximale | xlsx accepté",
+                type=["csv","xlsx","xls"], key="up_pf",
+                label_visibility="visible")
+            if f_pf is not None and not st.session_state.get("_pf_bytes_stored"):
+                # Lire les bytes IMMÉDIATEMENT — ultra-rapide, évite timeout websocket
+                _raw = f_pf.read()
+                st.session_state["_pending_pf_bytes"] = _raw
+                st.session_state["_pending_pf_name"]  = f_pf.name
+                st.session_state["_pf_bytes_stored"]  = True
             if st.session_state.pf_ok:
                 c1,c2 = st.columns(2)
                 if c1.button("🔄 Remplacer", key="rep_pf", use_container_width=True):
                     st.session_state["_action_pf"] = "delete"
+                    st.session_state["_pf_bytes_stored"] = False
                 if c2.button("🗑️ Supprimer", key="del_pf", use_container_width=True):
                     st.session_state["_action_pf"] = "delete"
+                    st.session_state["_pf_bytes_stored"] = False
 
         with st.expander(f"💰 Base CA {'✅' if st.session_state.ca_ok else '▶ Charger'}",
                          expanded=not st.session_state.ca_ok):
@@ -1133,13 +1140,16 @@ with st.sidebar:
                 _yrs = (sorted(st.session_state.ca["ANNEE"].dropna().unique().astype(int).tolist())
                         if "ANNEE" in st.session_state.ca.columns else [])
                 st.caption(f"{len(st.session_state.ca):,} quittances · {', '.join(map(str,_yrs))}")
-            st.caption("💡 Charger plusieurs exercices un par un — ils s'accumulent.")
-            f_ca = st.file_uploader("CA .xlsx/.csv", type=["xlsx","xls","csv"],
+            st.caption("💡 CSV recommandé · Plusieurs exercices : charger un par un")
+            f_ca = st.file_uploader("CA .csv/.xlsx", type=["csv","xlsx","xls"],
                                     key="up_ca", label_visibility="collapsed")
             if f_ca is not None:
                 _ca_id = f"{f_ca.name}_{f_ca.size}"
                 if _ca_id not in st.session_state.get("_ca_seen_ids", set()):
-                    st.session_state["_pending_ca"] = f_ca
+                    _raw_ca = f_ca.read()
+                    _pending_list = st.session_state.get("_pending_ca_list", [])
+                    _pending_list.append({"bytes": _raw_ca, "name": f_ca.name, "id": _ca_id})
+                    st.session_state["_pending_ca_list"] = _pending_list
             if st.session_state.ca_ok:
                 if st.button("🗑️ Vider tout le CA", key="del_ca", use_container_width=True):
                     st.session_state["_action_ca"] = "delete"
@@ -1148,16 +1158,23 @@ with st.sidebar:
                          expanded=not st.session_state.sin_ok):
             if st.session_state.sin_ok:
                 st.caption(f"{len(st.session_state.sin):,} dossiers · {len(st.session_state.sin.columns)} col.")
-            f_sin = st.file_uploader("Prestations .xlsx/.csv", type=["xlsx","xls","csv"],
-                                     key="up_sin", label_visibility="collapsed")
-            if f_sin is not None:
-                st.session_state["_pending_sin"] = f_sin
+            f_sin = st.file_uploader(
+                "💡 CSV recommandé | xlsx accepté",
+                type=["csv","xlsx","xls"], key="up_sin",
+                label_visibility="visible")
+            if f_sin is not None and not st.session_state.get("_sin_bytes_stored"):
+                _raw_sin = f_sin.read()
+                st.session_state["_pending_sin_bytes"] = _raw_sin
+                st.session_state["_pending_sin_name"]  = f_sin.name
+                st.session_state["_sin_bytes_stored"]  = True
             if st.session_state.sin_ok:
                 c1,c2 = st.columns(2)
                 if c1.button("🔄 Remplacer", key="rep_sin", use_container_width=True):
                     st.session_state["_action_sin"] = "delete"
+                    st.session_state["_sin_bytes_stored"] = False
                 if c2.button("🗑️ Supprimer", key="del_sin", use_container_width=True):
                     st.session_state["_action_sin"] = "delete"
+                    st.session_state["_sin_bytes_stored"] = False
     else:
         if not _any_data:
             st.markdown(f"""
@@ -1213,74 +1230,209 @@ if _did_action:
 # Zone de progression visible pendant le traitement (avant le rendu principal)
 _processed = False
 
-if st.session_state.get("_pending_pf") is not None:
-    _f = st.session_state.pop("_pending_pf")
-    with st.status("⏳ Chargement du Portefeuille…", expanded=True) as _st:
+# ── Helpers pour lire depuis bytes stockés ───────────────────────────────────
+def _bytes_to_df_pf(raw: bytes, fname: str) -> pd.DataFrame:
+    """Parse bytes (CSV ou XLSX) en DataFrame PF filtré."""
+    if fname.lower().endswith(".csv"):
+        txt = raw.decode("utf-8", errors="replace")
+        sep = ";" if ";" in txt.split("\n")[0] else ","
+        df  = pd.read_csv(io.StringIO(txt), sep=sep, dtype=str, low_memory=False)
+        df.columns = [str(c).strip() for c in df.columns]
+        df = _keep_cols(df, PF_COLS)
+    else:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
+            tmp.write(raw); path = tmp.name
         try:
-            st.write("📖 Lecture du fichier (colonnes utiles uniquement)…")
-            _df = load_pf(_f)
-            st.write(f"✅ {len(_df):,} polices · {len(_df.columns)} colonnes")
+            xl  = pd.ExcelFile(path, engine="openpyxl")
+            hdr = pd.read_excel(xl, nrows=0)
+            hdr.columns = [str(c).strip() for c in hdr.columns]
+            use = [c for c in hdr.columns if c in PF_COLS] or None
+            del hdr
+            df  = pd.read_excel(xl, dtype=str, usecols=use)
+            df.columns = [str(c).strip() for c in df.columns]
+            xl.close()
+        finally:
+            try: os.unlink(path)
+            except: pass
+    df = df.dropna(how="all").reset_index(drop=True)
+    for c in ["DATESOUS","DATEEFFE","DATEECHE","DATENAIS"]:
+        if c in df.columns: df[c] = pd.to_datetime(df[c], errors="coerce")
+    for c in ["MONTENCA","COTI_PERIODIQUE","NBRE_PRIME","COMMGEST"]:
+        if c in df.columns: df[c] = clean_num(df[c])
+    if "CODEINTE_P" in df.columns and "NUMEPOLI_P" in df.columns:
+        df["POLICE_KEY"] = (df["CODEINTE_P"].astype(str).str.strip()
+                            + "-" + df["NUMEPOLI_P"].astype(str).str.strip())
+    if "ETAT_POLICE" in df.columns:
+        df["ETAT_POLICE"] = df["ETAT_POLICE"].astype(str).str.strip()
+    return df.loc[:, df.notna().any(axis=0)]
+
+def _bytes_to_df_ca(raw: bytes, fname: str) -> pd.DataFrame:
+    """Parse bytes (CSV ou XLSX) en DataFrame CA filtré."""
+    if fname.lower().endswith(".csv"):
+        txt = raw.decode("utf-8", errors="replace")
+        sep = ";" if ";" in txt.split("\n")[0] else ","
+        df  = pd.read_csv(io.StringIO(txt), sep=sep, dtype=str, low_memory=False)
+        df.columns = [str(c).strip() for c in df.columns]
+        df = _keep_cols(df, CA_COLS)
+    else:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
+            tmp.write(raw); path = tmp.name
+        try:
+            xl  = pd.ExcelFile(path, engine="openpyxl")
+            hdr = pd.read_excel(xl, nrows=0)
+            hdr.columns = [str(c).strip() for c in hdr.columns]
+            use = [c for c in hdr.columns if c in CA_COLS] or None
+            del hdr
+            df  = pd.read_excel(xl, dtype=str, usecols=use)
+            df.columns = [str(c).strip() for c in df.columns]
+            xl.close()
+        finally:
+            try: os.unlink(path)
+            except: pass
+    df = df.dropna(how="all").reset_index(drop=True)
+    if "DATECOMP" in df.columns:
+        df["DATECOMP"] = pd.to_datetime(df["DATECOMP"], errors="coerce")
+        df["ANNEE"]    = df["DATECOMP"].dt.year.astype("Int64")
+        df["MOIS"]     = df["DATECOMP"].dt.month.astype("Int64")
+    for c in ["CHIFAFFA","PRIMNETT","COMMAPPO","COMMGEST"]:
+        if c in df.columns: df[c] = clean_num(df[c])
+    if "CODEINTE" in df.columns and "NUMEPOLI" in df.columns:
+        df["POLICE_KEY"] = (df["CODEINTE"].astype(str).str.strip()
+                            + "-" + df["NUMEPOLI"].astype(str).str.strip())
+    if "CODEAPPO" in df.columns:
+        def _n(x):
+            if pd.isna(x): return ""
+            s = str(x).strip().replace(".0","")
+            return s if s.isdigit() else str(x).strip()
+        df["CODEAPPO_STR"] = df["CODEAPPO"].apply(_n)
+    return df.loc[:, df.notna().any(axis=0)]
+
+def _bytes_to_df_sin(raw: bytes, fname: str) -> pd.DataFrame:
+    """Parse bytes (CSV ou XLSX) en DataFrame Prestations filtré."""
+    if fname.lower().endswith(".csv"):
+        txt = raw.decode("utf-8", errors="replace")
+        sep = ";" if ";" in txt.split("\n")[0] else ","
+        df  = pd.read_csv(io.StringIO(txt), sep=sep, dtype=str, low_memory=False)
+        df.columns = [str(c).strip() for c in df.columns]
+        df = _keep_cols(df, SIN_COLS)
+    else:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
+            tmp.write(raw); path = tmp.name
+        try:
+            sh  = _excel_sheet(path, "Liste")
+            xl  = pd.ExcelFile(path, engine="openpyxl")
+            hdr = pd.read_excel(xl, sheet_name=sh, nrows=0)
+            hdr.columns = [str(c).strip() for c in hdr.columns]
+            use = [c for c in hdr.columns if c in SIN_COLS] or None
+            del hdr
+            df  = pd.read_excel(xl, sheet_name=sh, dtype=str, usecols=use)
+            df.columns = [str(c).strip() for c in df.columns]
+            xl.close()
+        finally:
+            try: os.unlink(path)
+            except: pass
+    df = df.dropna(how="all").reset_index(drop=True)
+    for c in ["Date Survenance","Date Déclaration","Date validation",
+              "Date Emission","Date Comptabilisation"]:
+        if c in df.columns: df[c] = pd.to_datetime(df[c], errors="coerce")
+    for c in ["Réglement Total","Réglement Principal",
+              "SAP au 31/12/2025","Réglement Honoraires"]:
+        if c in df.columns: df[c] = clean_num(df[c])
+    if "Int police" in df.columns and "No Police" in df.columns:
+        df["POLICE_KEY"] = (df["Int police"].astype(str).str.strip()
+                            + "-" + df["No Police"].astype(str).str.strip())
+    if "Exercice Sinistre" in df.columns:
+        df["ANNEE_SIN"] = pd.to_numeric(
+            df["Exercice Sinistre"], errors="coerce").astype("Int64")
+    return df.loc[:, df.notna().any(axis=0)]
+
+# ── Traitement des bytes stockés — parsing et sauvegarde ─────────────────────
+# Les bytes sont déjà en mémoire (lus instantanément dans la sidebar).
+# On parse ici, sans aucun widget actif → DOM stable → st.rerun() sûr.
+
+if st.session_state.get("_pending_pf_bytes") is not None:
+    _raw  = st.session_state.pop("_pending_pf_bytes")
+    _name = st.session_state.pop("_pending_pf_name", "portefeuille.xlsx")
+    with st.status(f"⏳ Traitement du Portefeuille ({len(_raw)//1024} KB)…",
+                   expanded=True) as _st:
+        try:
+            st.write("📊 Filtrage des colonnes utiles (19 sur ~100)…")
+            _df = _bytes_to_df_pf(_raw, _name)
+            del _raw
+            st.write(f"✅ {len(_df):,} polices · {len(_df.columns)} colonnes conservées")
             st.write("💾 Sauvegarde en base centralisée…")
-            _ok = save_base("pf", _df, _f.name, user["nom"])
+            _ok = save_base("pf", _df, _name, user["nom"])
             if _ok:
                 st.session_state.pf    = _df
                 st.session_state.pf_ok = True
                 _processed = True
-                _st.update(label=f"✅ Portefeuille chargé — {len(_df):,} polices",
+                _st.update(label=f"✅ Portefeuille — {len(_df):,} polices chargées",
                            state="complete")
             else:
-                _st.update(label="❌ Erreur sauvegarde Portefeuille", state="error")
+                _st.update(label="❌ Erreur lors de la sauvegarde", state="error")
         except Exception as _e:
             _st.update(label=f"❌ {_e}", state="error")
+            st.session_state["_pf_bytes_stored"] = False
 
-if st.session_state.get("_pending_ca") is not None:
-    _f   = st.session_state.pop("_pending_ca")
-    _cid = f"{_f.name}_{_f.size}"
-    with st.status("⏳ Chargement de la Base CA…", expanded=True) as _st:
-        try:
-            st.write("📖 Lecture du fichier CA…")
-            _df_new = load_ca(_f)
-            st.write(f"✅ {len(_df_new):,} quittances lues")
-            _seen = st.session_state.get("_ca_seen_ids", set())
-            _seen.add(_cid)
-            st.session_state["_ca_seen_ids"] = _seen
-            st.session_state.ca_list_raw.append(_df_new)
-            _merged = (_df_new if len(st.session_state.ca_list_raw) == 1
-                       else pd.concat(st.session_state.ca_list_raw, ignore_index=True))
-            st.write("💾 Sauvegarde en base centralisée…")
-            _ok = save_base("ca", _merged, _f.name, user["nom"])
-            if _ok:
-                st.session_state.ca    = _merged
-                st.session_state.ca_ok = True
-                _processed = True
-                _yrs = (sorted(_merged["ANNEE"].dropna().unique().astype(int).tolist())
-                        if "ANNEE" in _merged.columns else [])
-                _st.update(label=f"✅ CA chargé — {len(_merged):,} quittances · {', '.join(map(str,_yrs))}",
-                           state="complete")
-            else:
-                _st.update(label="❌ Erreur sauvegarde CA", state="error")
-        except Exception as _e:
-            _st.update(label=f"❌ {_e}", state="error")
+if st.session_state.get("_pending_ca_list"):
+    _pending_list = st.session_state.pop("_pending_ca_list")
+    for _item in _pending_list:
+        _raw  = _item["bytes"]
+        _name = _item["name"]
+        _cid  = _item["id"]
+        with st.status(f"⏳ Traitement CA — {_name} ({len(_raw)//1024} KB)…",
+                       expanded=True) as _st:
+            try:
+                st.write("📊 Filtrage des colonnes utiles (13 sur ~79)…")
+                _df_new = _bytes_to_df_ca(_raw, _name)
+                del _raw
+                st.write(f"✅ {len(_df_new):,} quittances lues")
+                _seen = st.session_state.get("_ca_seen_ids", set())
+                _seen.add(_cid)
+                st.session_state["_ca_seen_ids"] = _seen
+                st.session_state.ca_list_raw.append(_df_new)
+                _merged = (
+                    _df_new if len(st.session_state.ca_list_raw) == 1
+                    else pd.concat(st.session_state.ca_list_raw, ignore_index=True))
+                st.write("💾 Sauvegarde en base centralisée…")
+                _ok = save_base("ca", _merged, _name, user["nom"])
+                if _ok:
+                    st.session_state.ca    = _merged
+                    st.session_state.ca_ok = True
+                    _processed = True
+                    _yrs = (sorted(_merged["ANNEE"].dropna().unique().astype(int).tolist())
+                            if "ANNEE" in _merged.columns else [])
+                    _st.update(
+                        label=f"✅ CA — {len(_merged):,} quittances · {', '.join(map(str,_yrs))}",
+                        state="complete")
+                else:
+                    _st.update(label="❌ Erreur lors de la sauvegarde", state="error")
+            except Exception as _e:
+                _st.update(label=f"❌ {_e}", state="error")
 
-if st.session_state.get("_pending_sin") is not None:
-    _f = st.session_state.pop("_pending_sin")
-    with st.status("⏳ Chargement des Prestations…", expanded=True) as _st:
+if st.session_state.get("_pending_sin_bytes") is not None:
+    _raw  = st.session_state.pop("_pending_sin_bytes")
+    _name = st.session_state.pop("_pending_sin_name", "prestations.xlsx")
+    with st.status(f"⏳ Traitement des Prestations ({len(_raw)//1024} KB)…",
+                   expanded=True) as _st:
         try:
-            st.write("📖 Lecture du fichier Prestations…")
-            _df = load_sin(_f)
-            st.write(f"✅ {len(_df):,} dossiers lus")
+            st.write("📊 Filtrage des colonnes utiles (18 sur ~77)…")
+            _df = _bytes_to_df_sin(_raw, _name)
+            del _raw
+            st.write(f"✅ {len(_df):,} dossiers · {len(_df.columns)} colonnes conservées")
             st.write("💾 Sauvegarde en base centralisée…")
-            _ok = save_base("sin", _df, _f.name, user["nom"])
+            _ok = save_base("sin", _df, _name, user["nom"])
             if _ok:
                 st.session_state.sin    = _df
                 st.session_state.sin_ok = True
                 _processed = True
-                _st.update(label=f"✅ Prestations chargées — {len(_df):,} dossiers",
+                _st.update(label=f"✅ Prestations — {len(_df):,} dossiers chargés",
                            state="complete")
             else:
-                _st.update(label="❌ Erreur sauvegarde Prestations", state="error")
+                _st.update(label="❌ Erreur lors de la sauvegarde", state="error")
         except Exception as _e:
             _st.update(label=f"❌ {_e}", state="error")
+            st.session_state["_sin_bytes_stored"] = False
 
 # ── Rerun final — uniquement si un traitement a eu lieu ──────────────────────
 # À ce point, TOUT le DOM est stable : sidebar rendue, widgets stabilisés,
