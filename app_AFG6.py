@@ -761,7 +761,10 @@ def load_pf(f) -> pd.DataFrame:
 
 
 def load_ca(f) -> pd.DataFrame:
-    """Charge une Base CA (une seule feuille / un exercice)."""
+    """
+    Charge une Base CA — colonnes utiles uniquement.
+    CA_COLS = 13 colonnes sur ~79 dans le fichier original.
+    """
     data = f.read()
     name = getattr(f, "name", "f.xlsx").lower()
 
@@ -775,16 +778,20 @@ def load_ca(f) -> pd.DataFrame:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
             tmp.write(data); path = tmp.name
         try:
-            hdr = pd.read_excel(path, engine="openpyxl", nrows=0)
+            xl  = pd.ExcelFile(path, engine="openpyxl")
+            hdr = pd.read_excel(xl, nrows=0)
             hdr.columns = [str(c).strip() for c in hdr.columns]
             use = [c for c in hdr.columns if c in CA_COLS] or None
-            df  = pd.read_excel(path, engine="openpyxl", dtype=str, usecols=use)
+            del hdr
+            df  = pd.read_excel(xl, dtype=str, usecols=use)
             df.columns = [str(c).strip() for c in df.columns]
+            xl.close()
         finally:
             try: os.unlink(path)
             except: pass
 
-    # Typage
+    df = df.dropna(how="all").reset_index(drop=True)
+
     if "DATECOMP" in df.columns:
         df["DATECOMP"] = pd.to_datetime(df["DATECOMP"], errors="coerce")
         df["ANNEE"]    = df["DATECOMP"].dt.year.astype("Int64")
@@ -801,13 +808,15 @@ def load_ca(f) -> pd.DataFrame:
             s = str(x).strip().replace(".0","")
             return s if s.isdigit() else str(x).strip()
         df["CODEAPPO_STR"] = df["CODEAPPO"].apply(_norm)
+    # Supprimer colonnes vides
+    df = df.loc[:, df.notna().any(axis=0)]
     return df
 
 
 def load_sin(f) -> pd.DataFrame:
     """
-    Charge les Prestations/Sinistres.
-    Essaie la feuille 'Liste', puis toute feuille contenant 'liste', puis sheet[0].
+    Charge les Prestations — SIN_COLS uniquement (18 colonnes sur ~77).
+    Détecte automatiquement la feuille "Liste" ou équivalent.
     """
     data = f.read()
     name = getattr(f, "name", "f.xlsx").lower()
@@ -823,17 +832,20 @@ def load_sin(f) -> pd.DataFrame:
             tmp.write(data); path = tmp.name
         try:
             sh  = _excel_sheet(path, "Liste")
-            hdr = pd.read_excel(path, sheet_name=sh, engine="openpyxl", nrows=0)
+            xl  = pd.ExcelFile(path, engine="openpyxl")
+            hdr = pd.read_excel(xl, sheet_name=sh, nrows=0)
             hdr.columns = [str(c).strip() for c in hdr.columns]
             use = [c for c in hdr.columns if c in SIN_COLS] or None
-            df  = pd.read_excel(path, sheet_name=sh, engine="openpyxl",
-                                 dtype=str, usecols=use)
+            del hdr
+            df  = pd.read_excel(xl, sheet_name=sh, dtype=str, usecols=use)
             df.columns = [str(c).strip() for c in df.columns]
+            xl.close()
         finally:
             try: os.unlink(path)
             except: pass
 
-    # Typage
+    df = df.dropna(how="all").reset_index(drop=True)
+
     for c in ["Date Survenance","Date Déclaration","Date validation",
               "Date Emission","Date Comptabilisation"]:
         if c in df.columns:
@@ -848,6 +860,8 @@ def load_sin(f) -> pd.DataFrame:
     if "Exercice Sinistre" in df.columns:
         df["ANNEE_SIN"] = pd.to_numeric(
             df["Exercice Sinistre"], errors="coerce").astype("Int64")
+    # Supprimer colonnes vides
+    df = df.loc[:, df.notna().any(axis=0)]
     return df
 
 # ─────────────────────────────────────────────
@@ -1160,9 +1174,19 @@ with st.sidebar:
         unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  TRAITEMENT DES ACTIONS — HORS SIDEBAR, HORS WIDGET
-#  React a terminé son cycle de rendu. On peut maintenant traiter les fichiers
-#  uploadés et appeler st.rerun() sans provoquer le removeChild DOM error.
+#  TRAITEMENT DES ACTIONS — CYCLE 2 (hors sidebar, hors widget)
+#
+#  PRINCIPE ANTI-removeChild :
+#  On ne fait JAMAIS st.rerun() pendant ou juste après un widget Streamlit.
+#  À la place :
+#   • Cycle 1 : widget stocke fichier dans _pending_XX → rendu normal → fin
+#   • Cycle 2 : on détecte _pending_XX → on traite (load + save) →
+#               on met _ok=True → st.rerun() EN TOUTE FIN de script
+#               (après tous les widgets, après tout le rendu)
+#   • Cycle 3 : _ok=True → onglets disponibles → affichage normal
+#
+#  Le st.rerun() est appelé UNE SEULE FOIS, à la toute fin, quand le DOM
+#  est stable et React a terminé tous ses effets.
 # ══════════════════════════════════════════════════════════════════════════════
 
 # ── Déconnexion ───────────────────────────────────────────────────────────────
@@ -1171,85 +1195,97 @@ if "_logout" in dir() and _logout:
         st.session_state[k] = DEFAULTS[k]
     st.rerun()
 
-# ── Actions suppression/remplacement ─────────────────────────────────────────
-_needs_rerun = False
-
-for _bt, _attr in [("pf","pf"),("ca","ca"),("sin","sin")]:
-    _action_key = f"_action_{_bt}"
-    if st.session_state.get(_action_key):
+# ── Suppressions / remplacements ──────────────────────────────────────────────
+_did_action = False
+for _bt in ["pf", "ca", "sin"]:
+    if st.session_state.pop(f"_action_{_bt}", None):
         delete_base(_bt)
-        setattr(st.session_state, _attr, None)
-        setattr(st.session_state, f"{_attr}_ok", False)
+        setattr(st.session_state, _bt, None)
+        setattr(st.session_state, f"{_bt}_ok", False)
         if _bt == "ca":
             st.session_state.ca_list_raw = []
             st.session_state["_ca_seen_ids"] = set()
-        st.session_state[_action_key] = None
-        _needs_rerun = True
+        _did_action = True
+if _did_action:
+    st.rerun()
 
-# ── Traitement fichiers uploadés en attente ───────────────────────────────────
-# Portefeuille
+# ── Traitement fichiers en attente ────────────────────────────────────────────
+# Zone de progression visible pendant le traitement (avant le rendu principal)
+_processed = False
+
 if st.session_state.get("_pending_pf") is not None:
-    _f = st.session_state["_pending_pf"]
-    st.session_state["_pending_pf"] = None   # consommer le pending
-    _ph = st.empty()
-    with _ph.container():
-        with st.spinner("⏳ Portefeuille : lecture et nettoyage des colonnes utiles…"):
-            try:
-                _df = load_pf(_f)
-                _ok = save_base("pf", _df, _f.name, user["nom"])
-                if _ok:
-                    st.session_state.pf    = _df
-                    st.session_state.pf_ok = True
-                    _needs_rerun = True
-            except Exception as _e:
-                st.error(f"❌ Portefeuille : {_e}")
-    _ph.empty()
+    _f = st.session_state.pop("_pending_pf")
+    with st.status("⏳ Chargement du Portefeuille…", expanded=True) as _st:
+        try:
+            st.write("📖 Lecture du fichier (colonnes utiles uniquement)…")
+            _df = load_pf(_f)
+            st.write(f"✅ {len(_df):,} polices · {len(_df.columns)} colonnes")
+            st.write("💾 Sauvegarde en base centralisée…")
+            _ok = save_base("pf", _df, _f.name, user["nom"])
+            if _ok:
+                st.session_state.pf    = _df
+                st.session_state.pf_ok = True
+                _processed = True
+                _st.update(label=f"✅ Portefeuille chargé — {len(_df):,} polices",
+                           state="complete")
+            else:
+                _st.update(label="❌ Erreur sauvegarde Portefeuille", state="error")
+        except Exception as _e:
+            _st.update(label=f"❌ {_e}", state="error")
 
-# Base CA
 if st.session_state.get("_pending_ca") is not None:
-    _f = st.session_state["_pending_ca"]
-    _ca_id = f"{_f.name}_{_f.size}"
-    st.session_state["_pending_ca"] = None
-    _ph = st.empty()
-    with _ph.container():
-        with st.spinner("⏳ CA : chargement…"):
-            try:
-                _df_new = load_ca(_f)
-                _seen = st.session_state.get("_ca_seen_ids", set())
-                _seen.add(_ca_id)
-                st.session_state["_ca_seen_ids"] = _seen
-                st.session_state.ca_list_raw.append(_df_new)
-                _merged = (_df_new if len(st.session_state.ca_list_raw)==1
-                           else pd.concat(st.session_state.ca_list_raw, ignore_index=True))
-                _ok = save_base("ca", _merged, _f.name, user["nom"])
-                if _ok:
-                    st.session_state.ca    = _merged
-                    st.session_state.ca_ok = True
-                    _needs_rerun = True
-            except Exception as _e:
-                st.error(f"❌ CA : {_e}")
-    _ph.empty()
+    _f   = st.session_state.pop("_pending_ca")
+    _cid = f"{_f.name}_{_f.size}"
+    with st.status("⏳ Chargement de la Base CA…", expanded=True) as _st:
+        try:
+            st.write("📖 Lecture du fichier CA…")
+            _df_new = load_ca(_f)
+            st.write(f"✅ {len(_df_new):,} quittances lues")
+            _seen = st.session_state.get("_ca_seen_ids", set())
+            _seen.add(_cid)
+            st.session_state["_ca_seen_ids"] = _seen
+            st.session_state.ca_list_raw.append(_df_new)
+            _merged = (_df_new if len(st.session_state.ca_list_raw) == 1
+                       else pd.concat(st.session_state.ca_list_raw, ignore_index=True))
+            st.write("💾 Sauvegarde en base centralisée…")
+            _ok = save_base("ca", _merged, _f.name, user["nom"])
+            if _ok:
+                st.session_state.ca    = _merged
+                st.session_state.ca_ok = True
+                _processed = True
+                _yrs = (sorted(_merged["ANNEE"].dropna().unique().astype(int).tolist())
+                        if "ANNEE" in _merged.columns else [])
+                _st.update(label=f"✅ CA chargé — {len(_merged):,} quittances · {', '.join(map(str,_yrs))}",
+                           state="complete")
+            else:
+                _st.update(label="❌ Erreur sauvegarde CA", state="error")
+        except Exception as _e:
+            _st.update(label=f"❌ {_e}", state="error")
 
-# Prestations
 if st.session_state.get("_pending_sin") is not None:
-    _f = st.session_state["_pending_sin"]
-    st.session_state["_pending_sin"] = None
-    _ph = st.empty()
-    with _ph.container():
-        with st.spinner("⏳ Prestations : chargement…"):
-            try:
-                _df = load_sin(_f)
-                _ok = save_base("sin", _df, _f.name, user["nom"])
-                if _ok:
-                    st.session_state.sin    = _df
-                    st.session_state.sin_ok = True
-                    _needs_rerun = True
-            except Exception as _e:
-                st.error(f"❌ Prestations : {_e}")
-    _ph.empty()
+    _f = st.session_state.pop("_pending_sin")
+    with st.status("⏳ Chargement des Prestations…", expanded=True) as _st:
+        try:
+            st.write("📖 Lecture du fichier Prestations…")
+            _df = load_sin(_f)
+            st.write(f"✅ {len(_df):,} dossiers lus")
+            st.write("💾 Sauvegarde en base centralisée…")
+            _ok = save_base("sin", _df, _f.name, user["nom"])
+            if _ok:
+                st.session_state.sin    = _df
+                st.session_state.sin_ok = True
+                _processed = True
+                _st.update(label=f"✅ Prestations chargées — {len(_df):,} dossiers",
+                           state="complete")
+            else:
+                _st.update(label="❌ Erreur sauvegarde Prestations", state="error")
+        except Exception as _e:
+            _st.update(label=f"❌ {_e}", state="error")
 
-# ── Rerun unique — tout est traité, React peut se ré-initialiser proprement ───
-if _needs_rerun:
+# ── Rerun final — uniquement si un traitement a eu lieu ──────────────────────
+# À ce point, TOUT le DOM est stable : sidebar rendue, widgets stabilisés,
+# traitements terminés. st.rerun() est sûr.
+if _processed:
     st.rerun()
 
 # ─────────────────────────────────────────────
