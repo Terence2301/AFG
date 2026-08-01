@@ -369,9 +369,9 @@ def generer_pdf_rapport(pf, ca, sin, period_lbl, user_nom,
         story.append(Paragraph("4. SINISTRES & PROVISIONS", s_h1))
         if "Nature Sinistre" in sin.columns:
             nat = sin.groupby("Nature Sinistre").agg(
-                Nb=("Nature Sinistre","count"),
-                Regle=("Réglement Total","sum"),
-                SAP=("SAP au 31/12/2025","sum")
+                Nb=(_c_nat_,"count") if _c_nat_ else ("POLICE_KEY","count"),
+                Regle=(_c_regle_,"sum") if _c_regle_ else ("CHIFAFFA","count"),
+                SAP=(_c_sap_,"sum") if "_c_sap_" in dir() and _c_sap_ else ("CHIFAFFA","count")
             ).reset_index().sort_values("Regle",ascending=False)
             rows_sin = [["Nature","Nb dossiers","Montant réglé","SAP résiduel","Charge totale"]]
             for _,r in nat.iterrows():
@@ -2211,44 +2211,57 @@ elif "Portefeuille" in page:
         b.download_button("📥 Excel",dl_xlsx(fi[COLS_SHOW].head(50000)),f"pf_{period_lbl}.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_pf_xl")
 
     with t2:
-        sc1,sc2=st.columns(2)
-        with sc1:
-            if "LIBECATE" in fi.columns:
-                pc_=fi.groupby("LIBECATE").agg(Nb=("LIBECATE","count"),CA=("MONTENCA","sum")).reset_index().sort_values("Nb",ascending=False)
-                fig=go.Figure(go.Bar(x=pc_["Nb"],y=pc_["LIBECATE"].str[:24],orientation="h",
-                    marker=dict(color=pc_["Nb"],colorscale=[[0,MINT],[1,GREEN2]],showscale=False),
-                    text=pc_["Nb"].astype(str),textposition="outside",textfont_size=10))
-                fig.update_layout(yaxis=dict(autorange="reversed"))
-                fig_style(fig,380,"📦 Polices par produit")
-                st.plotly_chart(fig,use_container_width=True)
-        with sc2:
-            if "ETAT_POLICE" in fi.columns:
-                etat_c_={"ACTIF":GREEN,"RESILIE":RED,"INACTIF":AMBER,"ECHU":"#5A6478","ASSURE ECHU":"#2C3E50","SUSPENDU":BLUE}
-                ec=fi["ETAT_POLICE"].str.strip().value_counts().reset_index(); ec.columns=["État","Nb"]
-                fig2=go.Figure(go.Pie(labels=ec["État"],values=ec["Nb"],hole=.44,
-                    marker_colors=[etat_c_.get(e,"#888") for e in ec["État"]],
-                    textinfo="percent+label",textfont_size=11))
-                fig_style(fig2,380,"🔵 États du portefeuille filtré")
-                st.plotly_chart(fig2,use_container_width=True)
-        sc3,sc4=st.columns(2)
-        with sc3:
-            if "CODEPERI" in fi.columns:
-                per=fi["CODEPERI"].map(CODEPERI_MAP).fillna("Autre").value_counts().reset_index(); per.columns=["Périodicité","Nb"]
-                fig3=go.Figure(go.Pie(labels=per["Périodicité"],values=per["Nb"],hole=.44,marker_colors=PAL,textinfo="percent+label",textfont_size=11))
-                fig_style(fig3,320,"📅 Périodicité cotisations")
-                st.plotly_chart(fig3,use_container_width=True)
-        with sc4:
-            if "LIBEVILL" in fi.columns:
-                vl=fi["LIBEVILL"].value_counts().head(10).reset_index(); vl.columns=["Ville","Nb"]
-                _pal_vl = PAL[:len(vl)]
-                fig4=go.Figure(go.Bar(x=vl["Nb"],y=vl["Ville"].str[:18],orientation="h",
-                    marker_color=_pal_vl,
-                    text=vl["Nb"].astype(str),textposition="outside",textfont_size=10))
-                fig4.update_layout(yaxis=dict(autorange="reversed"))
-                fig_style(fig4,320,"📍 Top 10 villes")
-                st.plotly_chart(fig4,use_container_width=True)
-        a,b=st.columns(2)
-        a.download_button("📥 CSV stats",dl_csv(pc_ if "LIBECATE" in fi.columns else fi),"stats_pf.csv","text/csv",use_container_width=True,key="dl_stats_pf")
+        try:
+            sc1,sc2=st.columns(2)
+            with sc1:
+                if "LIBECATE" in fi.columns and not fi.empty:
+                    _pc_agg = {"Nb":("LIBECATE","count")}
+                    if "MONTENCA" in fi.columns: _pc_agg["CA"] = ("MONTENCA","sum")
+                    pc_=fi.groupby("LIBECATE").agg(**_pc_agg).reset_index().sort_values("Nb",ascending=False)
+                    if "CA" not in pc_.columns: pc_["CA"] = 0
+                    fig=go.Figure(go.Bar(x=pc_["Nb"],y=pc_["LIBECATE"].astype(str).str[:24],
+                        orientation="h",
+                        marker=dict(color=pc_["Nb"],colorscale=[[0,MINT],[1,GREEN2]],showscale=False),
+                        text=pc_["Nb"].astype(str),textposition="outside",textfont_size=10))
+                    fig.update_layout(yaxis=dict(autorange="reversed"))
+                    fig_style(fig,380,"Polices par produit")
+                    st.plotly_chart(fig,use_container_width=True)
+            with sc2:
+                if "ETAT_POLICE" in fi.columns and not fi.empty:
+                    etat_c_={"ACTIF":GREEN,"RESILIE":RED,"INACTIF":AMBER,
+                             "ECHU":"#5A6478","ASSURE ECHU":"#2C3E50","SUSPENDU":BLUE}
+                    ec=fi["ETAT_POLICE"].str.strip().value_counts().reset_index()
+                    ec.columns=["Etat","Nb"]
+                    fig2=go.Figure(go.Pie(labels=ec["Etat"],values=ec["Nb"],hole=.44,
+                        marker_colors=[etat_c_.get(e,"#888") for e in ec["Etat"]],
+                        textinfo="percent+label",textfont_size=11))
+                    fig_style(fig2,380,"Etats du portefeuille")
+                    st.plotly_chart(fig2,use_container_width=True)
+            sc3,sc4=st.columns(2)
+            with sc3:
+                if "CODEPERI" in fi.columns and not fi.empty:
+                    per=fi["CODEPERI"].map(CODEPERI_MAP).fillna("Autre").value_counts().reset_index()
+                    per.columns=["Periodicite","Nb"]
+                    fig3=go.Figure(go.Pie(labels=per["Periodicite"],values=per["Nb"],
+                        hole=.44,marker_colors=PAL,textinfo="percent+label",textfont_size=11))
+                    fig_style(fig3,320,"Periodicite cotisations")
+                    st.plotly_chart(fig3,use_container_width=True)
+            with sc4:
+                if "LIBEVILL" in fi.columns and not fi.empty:
+                    vl=fi["LIBEVILL"].value_counts().head(10).reset_index()
+                    vl.columns=["Ville","Nb"]
+                    fig4=go.Figure(go.Bar(x=vl["Nb"],y=vl["Ville"].astype(str).str[:18],
+                        orientation="h",marker_color=PAL[:len(vl)],
+                        text=vl["Nb"].astype(str),textposition="outside",textfont_size=10))
+                    fig4.update_layout(yaxis=dict(autorange="reversed"))
+                    fig_style(fig4,320,"Top 10 villes")
+                    st.plotly_chart(fig4,use_container_width=True)
+            _pc_stat = pc_ if "pc_" in dir() else fi
+            a,b=st.columns(2)
+            a.download_button("📥 CSV stats",dl_csv(_pc_stat),"stats_pf.csv",
+                "text/csv",use_container_width=True,key="dl_stats_pf")
+        except Exception as _e_t2:
+            alert(f"Erreur Statistiques portefeuille : {_e_t2}","danger")
 
     with t3:
         if "DATESOUS" in df_all.columns:
@@ -2271,10 +2284,23 @@ elif "Portefeuille" in page:
         if ca is not None and "POLICE_KEY" in fi.columns and "POLICE_KEY" in ca.columns:
             section(f"🔗 Polices avec CA — {period_lbl}","JOINTURE PF × CA")
             _ca_tmp = ca_f(); _ca_join = _ca_tmp if _ca_tmp is not None and not _ca_tmp.empty else ca
-            ca_pf=_ca_join.merge(fi[["POLICE_KEY","LIBECATE","ETAT_POLICE","NOM_ASSU","LIBEVILL","NOM_APP"]].drop_duplicates("POLICE_KEY"),on="POLICE_KEY",how="inner",suffixes=("_CA","_PF"))
-            tp=ca_pf.groupby(["POLICE_KEY","LIBECATE","ETAT_POLICE","NOM_ASSU","NOM_APP"]).agg(CA=("CHIFAFFA","sum"),NbQ=("CHIFAFFA","count")).reset_index().sort_values("CA",ascending=False).head(25)
-            tp_d=tp.copy(); tp_d["CA"]=tp_d["CA"].apply(fmt)
-            st.dataframe(tp_d,use_container_width=True,hide_index=True)
+            # Merge avec suffixes : colonnes PF ont suffixe _PF si conflit
+            _fi_join = fi[["POLICE_KEY","LIBECATE","ETAT_POLICE","NOM_ASSU","LIBEVILL","NOM_APP"]].drop_duplicates("POLICE_KEY")
+            ca_pf = _ca_join.merge(_fi_join, on="POLICE_KEY", how="inner", suffixes=("","_PF"))
+            # Résolution dynamique des noms de colonnes après merge
+            _libe = "LIBECATE_PF" if "LIBECATE_PF" in ca_pf.columns else "LIBECATE"
+            _etat = "ETAT_POLICE_PF" if "ETAT_POLICE_PF" in ca_pf.columns else "ETAT_POLICE"
+            _nom  = "NOM_ASSU_PF"  if "NOM_ASSU_PF"  in ca_pf.columns else "NOM_ASSU"
+            _app  = "NOM_APP_PF"   if "NOM_APP_PF"   in ca_pf.columns else "NOM_APP"
+            _grp_cols = [c for c in ["POLICE_KEY",_libe,_etat,_nom,_app] if c in ca_pf.columns]
+            tp = (ca_pf.groupby(_grp_cols)
+                       .agg(CA=("CHIFAFFA","sum"), NbQ=("CHIFAFFA","count"))
+                       .reset_index()
+                       .sort_values("CA", ascending=False)
+                       .head(25))
+            tp.columns = [c.replace("_PF","") for c in tp.columns]
+            tp_d = tp.copy(); tp_d["CA"] = tp_d["CA"].apply(fmt)
+            st.dataframe(tp_d, use_container_width=True, hide_index=True)
             a,b=st.columns(2)
             a.download_button("📥 CSV jointure",dl_csv(tp),"jointure_pf_ca.csv","text/csv",use_container_width=True,key="dl_join_pf")
         else: alert("Chargez la Base CA pour voir la jointure PF × CA.","info")
@@ -2795,13 +2821,23 @@ elif "Clients" in page:
 # ═══════════════════════════════════════════════════════════════════════════════
 elif "Sinistres" in page:
     if sin is None: alert("Chargez le fichier Prestations.","warn"); st.stop()
-    df_s=sin  # tout le fichier pour les provisions historiques
-    df_sf=sin_f()  # filtré par période
+    df_s=sin  # tout le fichier
+    df_sf=sin_f()
+    # Resolution dynamique colonnes sinistres (accents variables selon encodage)
+    _c_regle_ = next((c for c in sin.columns if "glement" in c.lower() and "otal" in c.lower()), None)
+    _c_sap_   = next((c for c in sin.columns if c.upper().startswith("SAP")), None)
+    _c_hon_   = next((c for c in sin.columns if "glement" in c.lower() and "onnor" in c.lower()), None)
+    _c_nat_   = next((c for c in sin.columns if "ature" in c.lower() and "ini" in c.lower()), None)
+    _c_sort_  = next((c for c in sin.columns if "ort" in c.lower() and "ini" in c.lower()), None)
+    _c_cat_   = next((c for c in sin.columns if "at" in c.lower() and "gorie" in c.lower()), None)
 
     section(f"⚠️ Sinistres & Provisions — {period_lbl}","ANALYSE ACTUARIELLE · SAP · S/P")
-    tot_sin=float(sin["Réglement Total"].fillna(0).sum()) if "Réglement Total" in sin.columns else 0
-    tot_sap=float(sin["SAP au 31/12/2025"].fillna(0).sum()) if "SAP au 31/12/2025" in sin.columns else 0
-    tot_hon=float(sin["Réglement Honoraires"].fillna(0).sum()) if "Réglement Honoraires" in sin.columns else 0
+    _c_tot  = next((c for c in sin.columns if "glement" in c and "otal" in c), None)
+    _c_sap  = next((c for c in sin.columns if "SAP" in c), None)
+    _c_hon  = next((c for c in sin.columns if "glement" in c and "onnor" in c), None)
+    tot_sin = float(sin[_c_tot].fillna(0).sum()) if _c_tot else 0
+    tot_sap = float(sin[_c_sap].fillna(0).sum()) if _c_sap else 0
+    tot_hon = float(sin[_c_hon].fillna(0).sum()) if _c_hon else 0
     charge_u=tot_sin+tot_sap+tot_hon
     nb_sin=len(sin); nb_clos=int((sin["Sort Sinistre"]=="Cloturé").sum()) if "Sort Sinistre" in sin.columns else 0
     nb_ouv=int((sin["Sort Sinistre"]=="Ouvert").sum()) if "Sort Sinistre" in sin.columns else 0
@@ -2824,31 +2860,63 @@ elif "Sinistres" in page:
     t_n,t_e,t_p,t_tri,t_r=st.tabs(["🏷️ Par nature","📈 Évolution","🛒 Par produit","📐 Triangle dev.","🔍 Données brutes"])
 
     with t_n:
-        if "Nature Sinistre" in sin.columns:
-            nat=sin.groupby("Nature Sinistre").agg(
-                Nb=("Nature Sinistre","count"),Regle=("Réglement Total","sum"),SAP=("SAP au 31/12/2025","sum")).reset_index().sort_values("Regle",ascending=False)
-            nat["Charge"]=nat["Regle"]+nat["SAP"]; nat["Coût moy"]=nat["Regle"]/nat["Nb"].replace(0,np.nan)
-            c1,c2=st.columns(2)
-            with c1:
-                fig=go.Figure()
-                fig.add_bar(y=nat["Nature Sinistre"].str[:22],x=nat["Regle"],name="Réglé",marker_color=RED,orientation="h")
-                fig.add_bar(y=nat["Nature Sinistre"].str[:22],x=nat["SAP"],name="SAP",marker_color=AMBER,orientation="h")
-                fig.update_layout(barmode="stack",yaxis=dict(autorange="reversed"))
-                fig_style(fig,360,"💊 Réglé + SAP par nature"); st.plotly_chart(fig,use_container_width=True)
-            with c2:
-                fig2=px.treemap(nat,path=["Nature Sinistre"],values="Charge",color="Nb",
-                    color_continuous_scale=[[0,MINT],[.5,AMBER],[1,RED]])
-                fig2.update_layout(height=360,margin=dict(l=5,r=5,t=20,b=5)); st.plotly_chart(fig2,use_container_width=True)
-            nat_d=nat.copy()
-            for c_ in ["Regle","SAP","Charge","Coût moy"]: nat_d[c_]=nat_d[c_].apply(fmt)
-            st.dataframe(nat_d,use_container_width=True,hide_index=True)
-            a,b=st.columns(2)
-            a.download_button("📥 CSV",dl_csv(nat),"sin_nature.csv","text/csv",use_container_width=True,key="dl_sin_nat")
-            b.download_button("📥 Excel",dl_xlsx(nat),"sin_nature.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_sin_nat_xl")
+        # Resolution dynamique des colonnes sin (accents variables selon encodage)
+        _col_regle = next((c for c in sin.columns if "glement" in c and "otal" in c), None)
+        _col_sap   = next((c for c in sin.columns if "SAP" in c or "sap" in c.lower()), None)
+        _col_nat   = next((c for c in sin.columns if "ature" in c and "ini" in c), None)
+        _col_sort  = next((c for c in sin.columns if "ort" in c and "ini" in c), None)
+
+        if _col_nat and _col_regle:
+            try:
+                _agg_nat = {"Nb": (_col_nat,"count")}
+                if _col_regle: _agg_nat["Regle"] = (_col_regle,"sum")
+                if _col_sap:   _agg_nat["SAP"]   = (_col_sap,"sum")
+                nat = sin.groupby(_col_nat).agg(**_agg_nat).reset_index()
+                if "Regle" not in nat.columns: nat["Regle"] = 0
+                if "SAP"   not in nat.columns: nat["SAP"]   = 0
+                nat = nat.sort_values("Regle", ascending=False)
+                nat["Charge"]   = nat["Regle"] + nat["SAP"]
+                nat["Cout moy"] = nat["Regle"] / nat["Nb"].replace(0, np.nan)
+                c1,c2 = st.columns(2)
+                with c1:
+                    fig = go.Figure()
+                    fig.add_bar(y=nat[_col_nat].astype(str).str[:22], x=nat["Regle"],
+                        name="Regle", marker_color=RED, orientation="h")
+                    fig.add_bar(y=nat[_col_nat].astype(str).str[:22], x=nat["SAP"],
+                        name="SAP",   marker_color=AMBER, orientation="h")
+                    fig.update_layout(barmode="stack", yaxis=dict(autorange="reversed"))
+                    fig_style(fig, 360, "Regle + SAP par nature")
+                    st.plotly_chart(fig, use_container_width=True)
+                with c2:
+                    fig2 = px.treemap(nat, path=[_col_nat], values="Charge", color="Nb",
+                        color_continuous_scale=[[0,MINT],[.5,AMBER],[1,RED]])
+                    fig2.update_layout(height=360, margin=dict(l=5,r=5,t=20,b=5))
+                    st.plotly_chart(fig2, use_container_width=True)
+                nat_d = nat.copy()
+                for c_ in ["Regle","SAP","Charge","Cout moy"]:
+                    if c_ in nat_d.columns: nat_d[c_] = nat_d[c_].apply(fmt)
+                st.dataframe(nat_d, use_container_width=True, hide_index=True)
+                a,b = st.columns(2)
+                a.download_button("📥 CSV", dl_csv(nat), "sin_nature.csv",
+                    "text/csv", use_container_width=True, key="dl_sin_nat")
+                b.download_button("📥 Excel", dl_xlsx(nat), "sin_nature.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True, key="dl_sin_nat_xl")
+            except Exception as _e:
+                alert(f"Erreur onglet 'Par nature' : {_e}", "danger")
+        else:
+            alert("Colonnes 'Nature Sinistre' ou 'Reglement Total' non trouvees dans le fichier.", "warn")
 
     with t_e:
         if "ANNEE_SIN" in sin.columns:
-            evo=sin.groupby("ANNEE_SIN").agg(Nb=("ANNEE_SIN","count"),Regle=("Réglement Total","sum"),SAP=("SAP au 31/12/2025","sum")).reset_index()
+            _cr = next((c for c in sin.columns if "glement" in c and "otal" in c), None)
+            _cs = next((c for c in sin.columns if "SAP" in c), None)
+            _agg_e = {"Nb":("ANNEE_SIN","count")}
+            if _cr: _agg_e["Regle"] = (_cr,"sum")
+            if _cs: _agg_e["SAP"]   = (_cs,"sum")
+            evo=sin.groupby("ANNEE_SIN").agg(**_agg_e).reset_index()
+            if "Regle" not in evo.columns: evo["Regle"] = 0
+            if "SAP"   not in evo.columns: evo["SAP"]   = 0
             evo=evo[evo["ANNEE_SIN"].between(1997,2025)].sort_values("ANNEE_SIN")
             fig=make_subplots(specs=[[{"secondary_y":True}]])
             fig.add_bar(x=evo["ANNEE_SIN"].astype(str),y=evo["Regle"],name="Réglé",marker_color=RED,opacity=.82)
@@ -2869,7 +2937,15 @@ elif "Sinistres" in page:
                       if "cat" in c.lower() and ("gorie" in c.lower() or "g" in c.lower())),
                      "Libéllé Catégorie")
         if cat_c in sin.columns:
-            sp2=sin.groupby(cat_c).agg(Nb=(cat_c,"count"),Regle=("Réglement Total","sum"),SAP=("SAP au 31/12/2025","sum")).reset_index().sort_values("Regle",ascending=False)
+            _cr2 = next((c for c in sin.columns if "glement" in c and "otal" in c), None)
+            _cs2 = next((c for c in sin.columns if "SAP" in c), None)
+            _agg_p = {"Nb":(cat_c,"count")}
+            if _cr2: _agg_p["Regle"] = (_cr2,"sum")
+            if _cs2: _agg_p["SAP"]   = (_cs2,"sum")
+            sp2=sin.groupby(cat_c).agg(**_agg_p).reset_index()
+            if "Regle" not in sp2.columns: sp2["Regle"] = 0
+            if "SAP"   not in sp2.columns: sp2["SAP"]   = 0
+            sp2 = sp2.sort_values("Regle",ascending=False)
             sp2["Charge"]=sp2["Regle"]+sp2["SAP"]
             fig=go.Figure()
             fig.add_bar(x=sp2["Regle"],y=sp2[cat_c].str[:24],name="Réglé",marker_color=RED,orientation="h")
@@ -2887,7 +2963,12 @@ elif "Sinistres" in page:
         if "ANNEE_SIN" in sin.columns and "Date Survenance" in sin.columns:
             sin2=sin.copy()
             sin2["DEV_YEAR"]=pd.to_datetime(sin2["Date Survenance"],errors="coerce").dt.year.astype("Int64")
-            tri=sin2.pivot_table(index="ANNEE_SIN",columns="DEV_YEAR",values="Réglement Total",aggfunc="sum",fill_value=0)
+            _cr3 = next((c for c in sin2.columns if "glement" in c and "otal" in c), None)
+            _tri_val = _cr3 if _cr3 else (sin2.columns[-1] if len(sin2.columns)>0 else None)
+            if _tri_val:
+                tri=sin2.pivot_table(index="ANNEE_SIN",columns="DEV_YEAR",values=_tri_val,aggfunc="sum",fill_value=0)
+            else:
+                tri=pd.DataFrame()
             tri_d=tri.copy().astype(float)
             for col_ in tri_d.columns: tri_d[col_]=tri_d[col_].apply(fmt)
             alert("Triangle des montants réglés par exercice sinistre (lignes) et année de survenance (colonnes).","info")
@@ -2897,10 +2978,19 @@ elif "Sinistres" in page:
         else: alert("Colonnes ANNEE_SIN et Date Survenance requises.","info")
 
     with t_r:
-        _sin_raw_want = ["Date Survenance","Nature Sinistre","Sort Sinistre","Souscripteur",
-            "Désignation risque","Réglement Total","SAP au 31/12/2025",
-            "Date Déclaration","Date validation","Nom Bénéficiaire",
-            "Exercice Sinistre","POLICE_KEY"]
+        # Résolution dynamique : évite les KeyError sur colonnes accentuées
+        _sin_raw_want = []
+        for _want in ["Date Survenance","Nature Sinistre","Sort Sinistre","Souscripteur",
+                      "Designation risque","Reglement Total","SAP",
+                      "Date Declaration","Date validation","Nom Beneficiaire",
+                      "Exercice Sinistre","POLICE_KEY"]:
+            # Cherche la colonne réelle (correspondance partielle insensible casse)
+            _found = next((c for c in sin.columns
+                          if _want.lower().replace(" ","") in c.lower().replace(" ","")),
+                         None)
+            if _found and _found not in _sin_raw_want:
+                _sin_raw_want.append(_found)
+        _sin_raw_want_orig = _sin_raw_want
         # Ajouter la colonne catégorie quelle que soit son orthographe
         _cat_col = next((c for c in sin.columns if "cat" in c.lower()),None)
         if _cat_col and _cat_col not in _sin_raw_want: _sin_raw_want.insert(1, _cat_col)
@@ -2963,8 +3053,8 @@ elif "Actuariat" in page:
         if sin is None: alert("Chargez les Prestations.","warn")
         else:
             prov=sin.groupby("Nature Sinistre").agg(
-                Nb=("Nature Sinistre","count"),Regle=("Réglement Total","sum"),
-                SAP=("SAP au 31/12/2025","sum"),Ouvert=("Sort Sinistre",lambda x:(x=="Ouvert").sum())
+                Nb=(_c_nat_,"count") if _c_nat_ else ("POLICE_KEY","count"),Regle=(_c_regle_,"sum") if _c_regle_ else ("CHIFAFFA","count"),
+                SAP=(_cs_a,"sum") if "_cs_a" in dir() and _cs_a else ("CHIFAFFA","count"),Ouvert=(_cso_a,lambda x:(x=="Ouvert").sum()) if "_cso_a" in dir() and _cso_a else ("CHIFAFFA","count")
             ).reset_index()
             prov["Charge"]=prov["Regle"]+prov["SAP"]
             prov["Ratio SAP/Charge"]=prov["SAP"]/prov["Charge"].replace(0,np.nan)*100
@@ -2996,7 +3086,7 @@ elif "Actuariat" in page:
             pf_lk=pf[["POLICE_KEY","LIBECATE","ETAT_POLICE","NOM_ASSU","LIBEVILL","NOM_APP"]].drop_duplicates("POLICE_KEY")
             ca_pf=ca.merge(pf_lk,on="POLICE_KEY",how="inner",suffixes=("","_PF"))
             if sin is not None and "POLICE_KEY" in sin.columns:
-                sin_agg=sin.groupby("POLICE_KEY").agg(Regle=("Réglement Total","sum"),SAP=("SAP au 31/12/2025","sum"),NbSin=("POLICE_KEY","count")).reset_index()
+                sin_agg=sin.groupby("POLICE_KEY").agg(Regle=(_c_regle_,"sum") if _c_regle_ else ("CHIFAFFA","count"),SAP=(_c_sap_,"sum") if _c_sap_ else ("CHIFAFFA","count"),NbSin=("POLICE_KEY","count")).reset_index()
                 ca_pf=ca_pf.merge(sin_agg,on="POLICE_KEY",how="left")
             else:
                 ca_pf["Regle"]=np.nan; ca_pf["SAP"]=np.nan; ca_pf["NbSin"]=np.nan
@@ -3941,7 +4031,7 @@ elif "Sinistres" in page:
     with t_n:
         if "Nature Sinistre" in sin.columns:
             nat=sin.groupby("Nature Sinistre").agg(
-                Nb=("Nature Sinistre","count"),Regle=("Réglement Total","sum"),SAP=("SAP au 31/12/2025","sum")).reset_index().sort_values("Regle",ascending=False)
+                Nb=(_c_nat_,"count") if _c_nat_ else ("POLICE_KEY","count"),Regle=(_c_regle_,"sum") if _c_regle_ else ("CHIFAFFA","count"),SAP=(_c_sap_,"sum") if _c_sap_ else ("CHIFAFFA","count")).reset_index().sort_values("Regle",ascending=False)
             nat["Charge"]=nat["Regle"]+nat["SAP"]; nat["Coût moy"]=nat["Regle"]/nat["Nb"].replace(0,np.nan)
             c1,c2=st.columns(2)
             with c1:
@@ -3963,7 +4053,7 @@ elif "Sinistres" in page:
 
     with t_e:
         if "ANNEE_SIN" in sin.columns:
-            evo=sin.groupby("ANNEE_SIN").agg(Nb=("ANNEE_SIN","count"),Regle=("Réglement Total","sum"),SAP=("SAP au 31/12/2025","sum")).reset_index()
+            evo=sin.groupby("ANNEE_SIN").agg(Nb=("ANNEE_SIN","count"),Regle=(_c_regle_,"sum") if _c_regle_ else ("CHIFAFFA","count"),SAP=(_c_sap_,"sum") if _c_sap_ else ("CHIFAFFA","count")).reset_index()
             evo=evo[evo["ANNEE_SIN"].between(1997,2025)].sort_values("ANNEE_SIN")
             fig=make_subplots(specs=[[{"secondary_y":True}]])
             fig.add_bar(x=evo["ANNEE_SIN"].astype(str),y=evo["Regle"],name="Réglé",marker_color=RED,opacity=.82)
@@ -3981,7 +4071,7 @@ elif "Sinistres" in page:
     with t_p:
         cat_c="Libéllé Catégorie" if "Libéllé Catégorie" in sin.columns else "Libellé Catégorie"
         if cat_c in sin.columns:
-            sp2=sin.groupby(cat_c).agg(Nb=(cat_c,"count"),Regle=("Réglement Total","sum"),SAP=("SAP au 31/12/2025","sum")).reset_index().sort_values("Regle",ascending=False)
+            sp2=sin.groupby(cat_c).agg(Nb=(cat_c,"count"),Regle=(_c_regle_,"sum") if _c_regle_ else ("CHIFAFFA","count"),SAP=(_c_sap_,"sum") if _c_sap_ else ("CHIFAFFA","count")).reset_index().sort_values("Regle",ascending=False)
             sp2["Charge"]=sp2["Regle"]+sp2["SAP"]
             fig=go.Figure()
             fig.add_bar(x=sp2["Regle"],y=sp2[cat_c].str[:24],name="Réglé",marker_color=RED,orientation="h")
@@ -3999,7 +4089,7 @@ elif "Sinistres" in page:
         if "ANNEE_SIN" in sin.columns and "Date Survenance" in sin.columns:
             sin2=sin.copy()
             sin2["DEV_YEAR"]=pd.to_datetime(sin2["Date Survenance"],errors="coerce").dt.year.astype("Int64")
-            tri=sin2.pivot_table(index="ANNEE_SIN",columns="DEV_YEAR",values="Réglement Total",aggfunc="sum",fill_value=0)
+            tri=sin2.pivot_table(index="ANNEE_SIN",columns="DEV_YEAR",values=_c_regle_,aggfunc="sum",fill_value=0)
             tri_d=tri.copy().astype(float)
             for col_ in tri_d.columns: tri_d[col_]=tri_d[col_].apply(fmt)
             alert("Triangle des montants réglés par exercice sinistre (lignes) et année de survenance (colonnes).","info")
@@ -4068,8 +4158,8 @@ elif "Actuariat" in page:
         if sin is None: alert("Chargez les Prestations.","warn")
         else:
             prov=sin.groupby("Nature Sinistre").agg(
-                Nb=("Nature Sinistre","count"),Regle=("Réglement Total","sum"),
-                SAP=("SAP au 31/12/2025","sum"),Ouvert=("Sort Sinistre",lambda x:(x=="Ouvert").sum())
+                Nb=(_c_nat_,"count") if _c_nat_ else ("POLICE_KEY","count"),Regle=(_c_regle_,"sum") if _c_regle_ else ("CHIFAFFA","count"),
+                SAP=(_c_sap_,"sum") if "_c_sap_" in dir() and _c_sap_ else ("CHIFAFFA","count"),Ouvert=(_c_sort_,lambda x:(x=="Ouvert").sum()) if "_c_sort_" in dir() and _c_sort_ else ("CHIFAFFA","count")
             ).reset_index()
             prov["Charge"]=prov["Regle"]+prov["SAP"]
             prov["Ratio SAP/Charge"]=prov["SAP"]/prov["Charge"].replace(0,np.nan)*100
@@ -4101,7 +4191,7 @@ elif "Actuariat" in page:
             pf_lk=pf[["POLICE_KEY","LIBECATE","ETAT_POLICE","NOM_ASSU","LIBEVILL","NOM_APP"]].drop_duplicates("POLICE_KEY")
             ca_pf=ca.merge(pf_lk,on="POLICE_KEY",how="inner",suffixes=("","_PF"))
             if sin is not None and "POLICE_KEY" in sin.columns:
-                sin_agg=sin.groupby("POLICE_KEY").agg(Regle=("Réglement Total","sum"),SAP=("SAP au 31/12/2025","sum"),NbSin=("POLICE_KEY","count")).reset_index()
+                sin_agg=sin.groupby("POLICE_KEY").agg(Regle=(_c_regle_,"sum") if _c_regle_ else ("CHIFAFFA","count"),SAP=(_c_sap_,"sum") if _c_sap_ else ("CHIFAFFA","count"),NbSin=("POLICE_KEY","count")).reset_index()
                 ca_pf=ca_pf.merge(sin_agg,on="POLICE_KEY",how="left")
             else:
                 ca_pf["Regle"]=np.nan; ca_pf["SAP"]=np.nan; ca_pf["NbSin"]=np.nan
