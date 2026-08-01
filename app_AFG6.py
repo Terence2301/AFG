@@ -2924,7 +2924,7 @@ elif "Sinistres" in page:
     _c_cat_   = _find_col(sin, "Libéllé Catégorie",   "Libellé Catégorie",    "Libelle Categorie")
     _c_souscr = _find_col(sin, "Souscripteur")
     _c_exo    = _find_col(sin, "Exercice Sinistre")
-    _c_surv   = _find_col(sin, "Date Survenance")
+    _c_surv_  = _find_col(sin, "Date Survenance")
     _c_decl   = _find_col(sin, "Date Déclaration",    "Date Declaration")
     _c_compt  = _find_col(sin, "Réglement Comptable",  "Reglement Comptable")
     _c_rae    = _find_col(sin, "RAE Cie au 31/12/2025")
@@ -3052,23 +3052,40 @@ elif "Sinistres" in page:
             a.download_button("📥 CSV",dl_csv(sp2),"sin_prod.csv","text/csv",use_container_width=True,key="dl_sin_p")
 
     with t_tri:
-        section("📐 Triangle de développement des sinistres","EXERCICE × SURVENANCE")
-        if "ANNEE_SIN" in sin.columns and "Date Survenance" in sin.columns:
-            sin2=sin.copy()
-            sin2["DEV_YEAR"]=pd.to_datetime(sin2["Date Survenance"],errors="coerce").dt.year.astype("Int64")
-            _cr3 = next((c for c in sin2.columns if "glement" in c and "otal" in c), None)
-            _tri_val = _cr3 if _cr3 else (sin2.columns[-1] if len(sin2.columns)>0 else None)
-            if _tri_val:
-                tri=sin2.pivot_table(index="ANNEE_SIN",columns="DEV_YEAR",values=_tri_val,aggfunc="sum",fill_value=0)
-            else:
-                tri=pd.DataFrame()
-            tri_d=tri.copy().astype(float)
-            for col_ in tri_d.columns: tri_d[col_]=tri_d[col_].apply(fmt)
-            alert("Triangle des montants réglés par exercice sinistre (lignes) et année de survenance (colonnes).","info")
-            st.dataframe(tri_d,use_container_width=True,height=380)
-            a,_=st.columns(2)
-            a.download_button("📥 CSV triangle",dl_csv(tri.reset_index()),"triangle.csv","text/csv",use_container_width=True,key="dl_tri")
-        else: alert("Colonnes ANNEE_SIN et Date Survenance requises.","info")
+        section("Triangle de developpement des sinistres","EXERCICE x SURVENANCE")
+        # _c_regle_ et _c_surv déjà résolus en haut de la page Sinistres
+        _surv_col = _c_surv_ if "_c_surv_" in dir() and _c_surv_ else (
+                    "Date Survenance" if "Date Survenance" in sin.columns else None)
+        if "ANNEE_SIN" in sin.columns and _surv_col and _c_regle_:
+            try:
+                sin2 = sin[["ANNEE_SIN", _surv_col, _c_regle_]].copy()
+                sin2["DEV_YEAR"] = pd.to_datetime(
+                    sin2[_surv_col], errors="coerce").dt.year.astype("Int64")
+                sin2[_c_regle_]  = pd.to_numeric(sin2[_c_regle_], errors="coerce").fillna(0)
+                sin2 = sin2.dropna(subset=["ANNEE_SIN","DEV_YEAR"])
+                if sin2.empty:
+                    alert("Pas de données pour le triangle.", "warn")
+                else:
+                    tri = sin2.pivot_table(
+                        index="ANNEE_SIN", columns="DEV_YEAR",
+                        values=_c_regle_, aggfunc="sum", fill_value=0)
+                    tri = tri.loc[
+                        tri.index.dropna(),
+                        [c for c in sorted(tri.columns) if pd.notna(c)]]
+                    alert("Montants regles par exercice sinistre (lignes) x annee de survenance (colonnes).","info")
+                    tri_d = tri.copy()
+                    for col_ in tri_d.columns:
+                        tri_d[col_] = tri_d[col_].apply(fmt)
+                    st.dataframe(tri_d, use_container_width=True, height=380)
+                    a,_ = st.columns(2)
+                    a.download_button("📥 CSV triangle",
+                        dl_csv(tri.reset_index()), "triangle.csv",
+                        "text/csv", use_container_width=True, key="dl_tri")
+            except Exception as _e_tri:
+                alert(f"Erreur triangle : {_e_tri}", "danger")
+        else:
+            alert(f"Colonnes requises : ANNEE_SIN={('ANNEE_SIN' in sin.columns)}, "
+                  f"Date Survenance={_surv_col!r}, Reglement={_c_regle_!r}", "info")
 
     with t_r:
         # Colonnes brutes — noms EXACTS confirmés sur fichier AFG
