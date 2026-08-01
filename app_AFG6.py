@@ -954,12 +954,22 @@ CA_COLS = {
     "NOM_INTERMEDIAIRE","CODEAPPO","CHIFAFFA","PRIMNETT","COMMAPPO",
     "COMMGEST","TYPEMOUV","SORTQUIT",
 }
+# Colonnes Prestations — noms EXACTS vérifiés sur le fichier réel AFG
+# Libéllé Catégorie : double 'l' (particularité AFG)
+# Réglement : un seul 'è' (sans accent sur le 'e' final)
 SIN_COLS = {
-    "Int police","No Police","Date Survenance","Date Déclaration","Date validation",
-    "Date Emission","Date Comptabilisation","Libéllé Catégorie","Nature Sinistre",
-    "Sort Sinistre","Souscripteur","Désignation risque","Nom Bénéficiaire",
-    "Exercice Sinistre","Réglement Total","Réglement Principal",
-    "SAP au 31/12/2025","Réglement Honoraires",
+    "Int police","No Police",
+    "Exercice Sinistre","No Sinistre",
+    "Date Survenance","Date Déclaration","Date validation",
+    "Date Emission","Date Comptabilisation","Date Création",
+    "Libéllé Catégorie","Libellé Garantie","Garantie",
+    "Nature Sinistre","Sort Sinistre",
+    "Souscripteur","Désignation risque","Nom Bénéficiaire",
+    "Réglement Total","Réglement Principal","Réglement Honoraires",
+    "Réglement Comptable","SAP au 31/12/2025",
+    "RAE Cie au 31/12/2025",
+    "Libellé branche","Code branche",
+    "Raison Sociale Int","Libellé Unité",
 }
 
 def _excel_sheet(path: str, preferred: str) -> str:
@@ -1715,10 +1725,32 @@ def _bytes_to_df_sin(raw: bytes, fname: str) -> pd.DataFrame:
     if "Exercice Sinistre" in df.columns:
         df["ANNEE_SIN"] = pd.to_numeric(
             df["Exercice Sinistre"], errors="coerce").astype("Int64")
+    # Nettoyer les espaces dans les noms de colonnes (ex: "Code Unité ")
+    df.columns = [c.strip() for c in df.columns]
+
+    # Nettoyage Unicode sur colonnes texte clés
     for _tc in ["Nature Sinistre","Sort Sinistre","Libéllé Catégorie",
-               "Souscripteur","Désignation risque","Nom Bénéficiaire"]:
+                "Souscripteur","Désignation risque","Nom Bénéficiaire",
+                "Libellé branche","Libellé Garantie","Raison Sociale Int",
+                "Libellé Unité"]:
         if _tc in df.columns:
             df[_tc] = clean_str_col(df[_tc])
+
+    # Convertir colonnes monétaires en numérique
+    for _mc in ["Réglement Total","Réglement Principal","Réglement Honoraires",
+                "Réglement Comptable","SAP au 31/12/2025","RAE Cie au 31/12/2025"]:
+        if _mc in df.columns:
+            df[_mc] = clean_num(df[_mc])
+
+    # Exercice sinistre en entier
+    if "Exercice Sinistre" in df.columns:
+        df["ANNEE_SIN"] = pd.to_numeric(df["Exercice Sinistre"], errors="coerce").astype("Int64")
+
+    # Clé de jointure
+    if "Int police" in df.columns and "No Police" in df.columns:
+        df["POLICE_KEY"] = (df["Int police"].astype(str).str.strip()
+                            + "-" + df["No Police"].astype(str).str.strip())
+
     return df.loc[:, df.notna().any(axis=0)]
 
 # ── Traitement des bytes stockés — parsing et sauvegarde ─────────────────────
@@ -1814,6 +1846,54 @@ if st.session_state.get("_pending_sin_bytes") is not None:
 # traitements terminés. st.rerun() est sûr.
 if _processed:
     st.rerun()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  FONCTIONS CACHÉES — évite de recalculer à chaque clic d'onglet
+#  @st.cache_data : résultat mis en cache selon les paramètres (hash du df)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@st.cache_data(show_spinner=False, ttl=600)
+def _cached_pf_stats(pf_hash: int, df_json: str):
+    """Calcule les stats portefeuille en cache (10 min)."""
+    import json
+    df = pd.read_json(df_json, orient="split")
+    res = {}
+    if "ETAT_POLICE" in df.columns:
+        vc = df["ETAT_POLICE"].str.strip().value_counts()
+        res["actifs"] = int(vc.get("ACTIF", 0))
+        res["resil"]  = int(vc.get("RESILIE", 0))
+        res["inact"]  = int(vc.get("INACTIF", 0))
+        res["echu"]   = int(vc.get("ECHU", 0) + vc.get("ASSURE ECHU", 0))
+    res["nb"]     = len(df)
+    res["monten"] = float(df["MONTENCA"].fillna(0).sum()) if "MONTENCA" in df.columns else 0
+    res["nb_app"] = int(df["NOM_APP"].nunique()) if "NOM_APP" in df.columns else 0
+    return res
+
+@st.cache_data(show_spinner=False, ttl=600)
+def _cached_ca_stats(ca_hash: int, df_json: str):
+    """Calcule les stats CA en cache."""
+    df = pd.read_json(df_json, orient="split")
+    res = {}
+    res["chifaffa"] = float(df["CHIFAFFA"].fillna(0).sum()) if "CHIFAFFA" in df.columns else 0
+    res["commappo"] = float(df["COMMAPPO"].fillna(0).sum()) if "COMMAPPO" in df.columns else 0
+    res["primnett"] = float(df["PRIMNETT"].fillna(0).sum()) if "PRIMNETT" in df.columns else 0
+    res["nb_q"]     = len(df)
+    return res
+
+def _safe_groupby(df, by, agg_dict, sort_col=None, asc=False):
+    """groupby robuste : ignore les colonnes absentes dans agg_dict."""
+    safe_agg = {k: v for k, v in agg_dict.items()
+                if isinstance(v, tuple) and v[0] in df.columns}
+    if not safe_agg:
+        return pd.DataFrame()
+    try:
+        res = df.groupby(by).agg(**safe_agg).reset_index()
+        if sort_col and sort_col in res.columns:
+            res = res.sort_values(sort_col, ascending=asc)
+        return res
+    except Exception as _e:
+        return pd.DataFrame()
 
 # ─────────────────────────────────────────────
 #  RACCOURCIS
@@ -2823,24 +2903,44 @@ elif "Sinistres" in page:
     if sin is None: alert("Chargez le fichier Prestations.","warn"); st.stop()
     df_s=sin  # tout le fichier
     df_sf=sin_f()
-    # Resolution dynamique colonnes sinistres (accents variables selon encodage)
-    _c_regle_ = next((c for c in sin.columns if "glement" in c.lower() and "otal" in c.lower()), None)
-    _c_sap_   = next((c for c in sin.columns if c.upper().startswith("SAP")), None)
-    _c_hon_   = next((c for c in sin.columns if "glement" in c.lower() and "onnor" in c.lower()), None)
-    _c_nat_   = next((c for c in sin.columns if "ature" in c.lower() and "ini" in c.lower()), None)
-    _c_sort_  = next((c for c in sin.columns if "ort" in c.lower() and "ini" in c.lower()), None)
-    _c_cat_   = next((c for c in sin.columns if "at" in c.lower() and "gorie" in c.lower()), None)
+    # Résolution colonnes sinistres — noms exacts vérifiés sur fichier AFG réel
+    def _find_col(df, *candidates):
+        """Retourne la 1ère colonne trouvée parmi les candidats (strip des espaces)."""
+        cols_stripped = {c.strip(): c for c in df.columns}
+        for cand in candidates:
+            if cand in df.columns:           return cand
+            if cand.strip() in cols_stripped: return cols_stripped[cand.strip()]
+            # Fallback fuzzy
+            for col in df.columns:
+                if all(k in col.lower() for k in cand.lower().split()[:2]):
+                    return col
+        return None
+
+    _c_regle_ = _find_col(sin, "Réglement Total",     "Reglement Total")
+    _c_sap_   = _find_col(sin, "SAP au 31/12/2025",   "SAP")
+    _c_hon_   = _find_col(sin, "Réglement Honoraires", "Reglement Honoraires")
+    _c_nat_   = _find_col(sin, "Nature Sinistre")
+    _c_sort_  = _find_col(sin, "Sort Sinistre")
+    _c_cat_   = _find_col(sin, "Libéllé Catégorie",   "Libellé Catégorie",    "Libelle Categorie")
+    _c_souscr = _find_col(sin, "Souscripteur")
+    _c_exo    = _find_col(sin, "Exercice Sinistre")
+    _c_surv   = _find_col(sin, "Date Survenance")
+    _c_decl   = _find_col(sin, "Date Déclaration",    "Date Declaration")
+    _c_compt  = _find_col(sin, "Réglement Comptable",  "Reglement Comptable")
+    _c_rae    = _find_col(sin, "RAE Cie au 31/12/2025")
+    _c_branch = _find_col(sin, "Libellé branche")
 
     section(f"⚠️ Sinistres & Provisions — {period_lbl}","ANALYSE ACTUARIELLE · SAP · S/P")
-    _c_tot  = next((c for c in sin.columns if "glement" in c and "otal" in c), None)
-    _c_sap  = next((c for c in sin.columns if "SAP" in c), None)
-    _c_hon  = next((c for c in sin.columns if "glement" in c and "onnor" in c), None)
-    tot_sin = float(sin[_c_tot].fillna(0).sum()) if _c_tot else 0
-    tot_sap = float(sin[_c_sap].fillna(0).sum()) if _c_sap else 0
-    tot_hon = float(sin[_c_hon].fillna(0).sum()) if _c_hon else 0
+    # Noms exacts vérifiés sur fichier AFG réel
+    _c_tot  = "Réglement Total"     if "Réglement Total"     in sin.columns else next((c for c in sin.columns if "glement" in c and "otal" in c), None)
+    _c_sap  = "SAP au 31/12/2025"  if "SAP au 31/12/2025"  in sin.columns else next((c for c in sin.columns if c.startswith("SAP")), None)
+    _c_hon  = "Réglement Honoraires" if "Réglement Honoraires" in sin.columns else next((c for c in sin.columns if "glement" in c and "onnor" in c), None)
+    tot_sin = float(sin[_c_tot].fillna(0).sum()) if _c_tot and _c_tot in sin.columns else 0
+    tot_sap = float(sin[_c_sap].fillna(0).sum()) if _c_sap and _c_sap in sin.columns else 0
+    tot_hon = float(sin[_c_hon].fillna(0).sum()) if _c_hon and _c_hon in sin.columns else 0
     charge_u=tot_sin+tot_sap+tot_hon
-    nb_sin=len(sin); nb_clos=int((sin["Sort Sinistre"]=="Cloturé").sum()) if "Sort Sinistre" in sin.columns else 0
-    nb_ouv=int((sin["Sort Sinistre"]=="Ouvert").sum()) if "Sort Sinistre" in sin.columns else 0
+    nb_sin=len(sin); nb_clos=int((sin[_c_sort_]=="Cloturé").sum()) if _c_sort_ and _c_sort_ in sin.columns else 0
+    nb_ouv=int((sin[_c_sort_]=="Ouvert").sum()) if _c_sort_ and _c_sort_ in sin.columns else 0
     ca_all=float(ca["CHIFAFFA"].fillna(0).sum()) if ca is not None and "CHIFAFFA" in ca.columns else 0
     sp=tot_sin/max(ca_all,1)*100; cout_m=tot_sin/max(nb_clos,1)
     actifs_n=int((pf["ETAT_POLICE"].str.strip()=="ACTIF").sum()) if pf is not None and "ETAT_POLICE" in pf.columns else 1
@@ -2860,38 +2960,34 @@ elif "Sinistres" in page:
     t_n,t_e,t_p,t_tri,t_r=st.tabs(["🏷️ Par nature","📈 Évolution","🛒 Par produit","📐 Triangle dev.","🔍 Données brutes"])
 
     with t_n:
-        # Resolution dynamique des colonnes sin (accents variables selon encodage)
-        _col_regle = next((c for c in sin.columns if "glement" in c and "otal" in c), None)
-        _col_sap   = next((c for c in sin.columns if "SAP" in c or "sap" in c.lower()), None)
-        _col_nat   = next((c for c in sin.columns if "ature" in c and "ini" in c), None)
-        _col_sort  = next((c for c in sin.columns if "ort" in c and "ini" in c), None)
-
-        if _col_nat and _col_regle:
+        if _c_nat_ and _c_regle_:
             try:
-                _agg_nat = {"Nb": (_col_nat,"count")}
-                if _col_regle: _agg_nat["Regle"] = (_col_regle,"sum")
-                if _col_sap:   _agg_nat["SAP"]   = (_col_sap,"sum")
-                nat = sin.groupby(_col_nat).agg(**_agg_nat).reset_index()
-                if "Regle" not in nat.columns: nat["Regle"] = 0
-                if "SAP"   not in nat.columns: nat["SAP"]   = 0
-                nat = nat.sort_values("Regle", ascending=False)
+                nat = _safe_groupby(sin, _c_nat_,
+                    {"Nb":(_c_nat_,"count"),
+                     "Regle":(_c_regle_,"sum"),
+                     **( {"SAP":(_c_sap_,"sum")} if _c_sap_ else {})},
+                    sort_col="Regle")
+                if "Regle" not in nat.columns: nat["Regle"] = 0.0
+                if "SAP"   not in nat.columns: nat["SAP"]   = 0.0
                 nat["Charge"]   = nat["Regle"] + nat["SAP"]
                 nat["Cout moy"] = nat["Regle"] / nat["Nb"].replace(0, np.nan)
                 c1,c2 = st.columns(2)
                 with c1:
                     fig = go.Figure()
-                    fig.add_bar(y=nat[_col_nat].astype(str).str[:22], x=nat["Regle"],
-                        name="Regle", marker_color=RED, orientation="h")
-                    fig.add_bar(y=nat[_col_nat].astype(str).str[:22], x=nat["SAP"],
-                        name="SAP",   marker_color=AMBER, orientation="h")
+                    fig.add_bar(y=nat[_c_nat_].astype(str).str[:24],
+                        x=nat["Regle"], name="Regle", marker_color=RED, orientation="h")
+                    fig.add_bar(y=nat[_c_nat_].astype(str).str[:24],
+                        x=nat["SAP"],   name="SAP",   marker_color=AMBER, orientation="h")
                     fig.update_layout(barmode="stack", yaxis=dict(autorange="reversed"))
-                    fig_style(fig, 360, "Regle + SAP par nature")
+                    fig_style(fig, 380, "Reglement + SAP par nature de sinistre")
                     st.plotly_chart(fig, use_container_width=True)
                 with c2:
-                    fig2 = px.treemap(nat, path=[_col_nat], values="Charge", color="Nb",
-                        color_continuous_scale=[[0,MINT],[.5,AMBER],[1,RED]])
-                    fig2.update_layout(height=360, margin=dict(l=5,r=5,t=20,b=5))
-                    st.plotly_chart(fig2, use_container_width=True)
+                    _nat_c = nat[nat["Charge"]>0]
+                    if not _nat_c.empty:
+                        fig2 = px.treemap(_nat_c, path=[_c_nat_], values="Charge",
+                            color="Nb", color_continuous_scale=[[0,MINT],[.5,AMBER],[1,RED]])
+                        fig2.update_layout(height=380, margin=dict(l=5,r=5,t=20,b=5))
+                        st.plotly_chart(fig2, use_container_width=True)
                 nat_d = nat.copy()
                 for c_ in ["Regle","SAP","Charge","Cout moy"]:
                     if c_ in nat_d.columns: nat_d[c_] = nat_d[c_].apply(fmt)
@@ -2903,18 +2999,16 @@ elif "Sinistres" in page:
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True, key="dl_sin_nat_xl")
             except Exception as _e:
-                alert(f"Erreur onglet 'Par nature' : {_e}", "danger")
+                alert(f"Erreur 'Par nature' : {_e}", "danger")
         else:
-            alert("Colonnes 'Nature Sinistre' ou 'Reglement Total' non trouvees dans le fichier.", "warn")
+            alert("Colonne 'Nature Sinistre' ou 'Reglement Total' absente du fichier.", "warn")
 
     with t_e:
         if "ANNEE_SIN" in sin.columns:
-            _cr = next((c for c in sin.columns if "glement" in c and "otal" in c), None)
-            _cs = next((c for c in sin.columns if "SAP" in c), None)
-            _agg_e = {"Nb":("ANNEE_SIN","count")}
-            if _cr: _agg_e["Regle"] = (_cr,"sum")
-            if _cs: _agg_e["SAP"]   = (_cs,"sum")
-            evo=sin.groupby("ANNEE_SIN").agg(**_agg_e).reset_index()
+            evo = _safe_groupby(sin, "ANNEE_SIN",
+                {"Nb":("ANNEE_SIN","count"),
+                 "Regle":(_c_regle_,"sum") if _c_regle_ else None,
+                 "SAP":(_c_sap_,"sum") if _c_sap_ else None})
             if "Regle" not in evo.columns: evo["Regle"] = 0
             if "SAP"   not in evo.columns: evo["SAP"]   = 0
             evo=evo[evo["ANNEE_SIN"].between(1997,2025)].sort_values("ANNEE_SIN")
@@ -2936,16 +3030,15 @@ elif "Sinistres" in page:
         cat_c = next((c for c in sin.columns
                       if "cat" in c.lower() and ("gorie" in c.lower() or "g" in c.lower())),
                      "Libéllé Catégorie")
-        if cat_c in sin.columns:
-            _cr2 = next((c for c in sin.columns if "glement" in c and "otal" in c), None)
-            _cs2 = next((c for c in sin.columns if "SAP" in c), None)
-            _agg_p = {"Nb":(cat_c,"count")}
-            if _cr2: _agg_p["Regle"] = (_cr2,"sum")
-            if _cs2: _agg_p["SAP"]   = (_cs2,"sum")
-            sp2=sin.groupby(cat_c).agg(**_agg_p).reset_index()
+        if _c_cat_ and _c_cat_ in sin.columns:
+            cat_c = _c_cat_
+            sp2 = _safe_groupby(sin, cat_c,
+                {"Nb":(cat_c,"count"),
+                 "Regle":(_c_regle_,"sum") if _c_regle_ else None,
+                 "SAP":(_c_sap_,"sum") if _c_sap_ else None},
+                sort_col="Regle")
             if "Regle" not in sp2.columns: sp2["Regle"] = 0
             if "SAP"   not in sp2.columns: sp2["SAP"]   = 0
-            sp2 = sp2.sort_values("Regle",ascending=False)
             sp2["Charge"]=sp2["Regle"]+sp2["SAP"]
             fig=go.Figure()
             fig.add_bar(x=sp2["Regle"],y=sp2[cat_c].str[:24],name="Réglé",marker_color=RED,orientation="h")
@@ -2978,18 +3071,14 @@ elif "Sinistres" in page:
         else: alert("Colonnes ANNEE_SIN et Date Survenance requises.","info")
 
     with t_r:
-        # Résolution dynamique : évite les KeyError sur colonnes accentuées
-        _sin_raw_want = []
-        for _want in ["Date Survenance","Nature Sinistre","Sort Sinistre","Souscripteur",
-                      "Designation risque","Reglement Total","SAP",
-                      "Date Declaration","Date validation","Nom Beneficiaire",
-                      "Exercice Sinistre","POLICE_KEY"]:
-            # Cherche la colonne réelle (correspondance partielle insensible casse)
-            _found = next((c for c in sin.columns
-                          if _want.lower().replace(" ","") in c.lower().replace(" ","")),
-                         None)
-            if _found and _found not in _sin_raw_want:
-                _sin_raw_want.append(_found)
+        # Colonnes brutes — noms EXACTS confirmés sur fichier AFG
+        _sin_raw_want = [c for c in [
+            "Date Survenance", _c_cat_, _c_nat_, _c_sort_, "Souscripteur",
+            "Désignation risque", _c_regle_, _c_sap_, _c_hon_,
+            "Date Déclaration", "Date validation", "Nom Bénéficiaire",
+            "Exercice Sinistre", "POLICE_KEY", "No Sinistre",
+            "Réglement Comptable", "RAE Cie au 31/12/2025"
+        ] if c is not None and c in sin.columns]
         _sin_raw_want_orig = _sin_raw_want
         # Ajouter la colonne catégorie quelle que soit son orthographe
         _cat_col = next((c for c in sin.columns if "cat" in c.lower()),None)
