@@ -877,6 +877,7 @@ def load_base(base_type: str):
     """
     Charge un DataFrame depuis la base centralisée.
     Retourne (DataFrame, metadata_dict) ou (None, None) si absent.
+    Strip systématique des noms de colonnes après désérialisation Parquet.
     """
     try:
         conn = get_conn()
@@ -890,6 +891,8 @@ def load_base(base_type: str):
         if not row:
             return None, None
         df = _parquet_bytes_to_df(row[0])
+        # Strip systématique des noms de colonnes (espaces parasites dans fichiers AFG)
+        df.columns = [str(c).strip() for c in df.columns]
         meta = {"updated_at": row[1]}
         return df, meta
     except Exception as e:
@@ -977,11 +980,55 @@ def _excel_sheet(path: str, preferred: str) -> str:
     xl = pd.ExcelFile(path, engine="openpyxl")
     if preferred in xl.sheet_names:
         return preferred
-    # Cherche une feuille dont le nom contient 'liste' (insensible casse)
     for s in xl.sheet_names:
         if "liste" in s.lower():
             return s
     return xl.sheet_names[0]
+
+def _detect_encoding(raw: bytes) -> str:
+    """
+    Détecte l'encodage d'un fichier CSV.
+    Les exports AFG (Megasoft/Orass) sont en Windows-1252 (latin-1).
+    Stratégie : essayer utf-8-sig → utf-8 → latin-1 (fallback universel).
+    """
+    # Essayer utf-8 avec BOM
+    try:
+        raw.decode('utf-8-sig')
+        return 'utf-8-sig'
+    except UnicodeDecodeError:
+        pass
+    # Essayer utf-8 strict
+    try:
+        raw.decode('utf-8')
+        # Vérifier que les accents français sont bien lisibles
+        txt = raw.decode('utf-8')
+        if 'R\xef\xbf\xbd' not in txt and 'R\xc3\xa9' not in txt[:500]:
+            return 'utf-8'
+    except UnicodeDecodeError:
+        pass
+    # Fallback latin-1 (Windows-1252) — universel pour fichiers AFG
+    return 'latin-1'
+
+def _read_csv_auto(raw: bytes) -> pd.DataFrame:
+    """
+    Lit un CSV avec détection automatique de l'encodage et du séparateur.
+    Gère les fichiers AFG exportés en latin-1/Windows-1252.
+    """
+    # Détecter l'encodage
+    enc = _detect_encoding(raw)
+    txt = raw.decode(enc, errors='replace')
+
+    # Détecter le séparateur sur la première ligne
+    first = txt.split('\n')[0]
+    sep   = ';' if first.count(';') > first.count(',') else ','
+
+    df = pd.read_csv(
+        io.StringIO(txt), sep=sep, dtype=str,
+        low_memory=False, encoding=None)
+
+    # Strip systématique des noms de colonnes (espaces parasites)
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
 
 def _keep_cols(df: pd.DataFrame, wanted: set) -> pd.DataFrame:
     """Conserve uniquement les colonnes présentes ET utiles."""
@@ -1004,10 +1051,7 @@ def load_pf(f) -> pd.DataFrame:
     name = getattr(f, "name", "f.xlsx").lower()
 
     if name.endswith(".csv"):
-        raw = data.decode("utf-8", errors="replace")
-        sep = ";" if ";" in raw.split("\n")[0] else ","
-        df  = pd.read_csv(io.StringIO(raw), sep=sep, dtype=str, low_memory=False)
-        df.columns = [str(c).strip() for c in df.columns]
+        df = _read_csv_auto(data)
         df = _keep_cols(df, PF_COLS)
     else:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
@@ -1062,10 +1106,7 @@ def load_ca(f) -> pd.DataFrame:
     name = getattr(f, "name", "f.xlsx").lower()
 
     if name.endswith(".csv"):
-        raw = data.decode("utf-8", errors="replace")
-        sep = ";" if ";" in raw.split("\n")[0] else ","
-        df  = pd.read_csv(io.StringIO(raw), sep=sep, dtype=str, low_memory=False)
-        df.columns = [str(c).strip() for c in df.columns]
+        df = _read_csv_auto(data)
         df = _keep_cols(df, CA_COLS)
     else:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
@@ -1115,10 +1156,7 @@ def load_sin(f) -> pd.DataFrame:
     name = getattr(f, "name", "f.xlsx").lower()
 
     if name.endswith(".csv"):
-        raw = data.decode("utf-8", errors="replace")
-        sep = ";" if ";" in raw.split("\n")[0] else ","
-        df  = pd.read_csv(io.StringIO(raw), sep=sep, dtype=str, low_memory=False)
-        df.columns = [str(c).strip() for c in df.columns]
+        df = _read_csv_auto(data)
         df = _keep_cols(df, SIN_COLS)
     else:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
@@ -1126,11 +1164,15 @@ def load_sin(f) -> pd.DataFrame:
         try:
             sh  = _excel_sheet(path, "Liste")
             xl  = pd.ExcelFile(path, engine="openpyxl")
-            hdr = pd.read_excel(xl, sheet_name=sh, nrows=0)
-            hdr.columns = [str(c).strip() for c in hdr.columns]
-            use = [c for c in hdr.columns if c in SIN_COLS] or None
-            del hdr
+            # Lire les headers bruts pour construire usecols
+            hdr_raw = pd.read_excel(xl, sheet_name=sh, nrows=0)
+            # Matcher avec strip : "Raison Sociale Int " → "Raison Sociale Int"
+            use = [c for c in hdr_raw.columns
+                   if str(c).strip() in SIN_COLS or str(c) in SIN_COLS]
+            if not use:
+                use = None  # fallback : lire toutes les colonnes
             df  = pd.read_excel(xl, sheet_name=sh, dtype=str, usecols=use)
+            # Strip systématique des noms de colonnes
             df.columns = [str(c).strip() for c in df.columns]
             xl.close()
         finally:
@@ -1610,10 +1652,8 @@ _processed = False
 def _bytes_to_df_pf(raw: bytes, fname: str) -> pd.DataFrame:
     """Parse bytes (CSV ou XLSX) en DataFrame PF filtré."""
     if fname.lower().endswith(".csv"):
-        txt = raw.decode("utf-8", errors="replace")
-        sep = ";" if ";" in txt.split("\n")[0] else ","
-        df  = pd.read_csv(io.StringIO(txt), sep=sep, dtype=str, low_memory=False)
-        df.columns = [str(c).strip() for c in df.columns]
+        df = _read_csv_auto(raw)
+        df = _keep_cols(df, PF_COLS)
         df = _keep_cols(df, PF_COLS)
     else:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
@@ -1647,10 +1687,8 @@ def _bytes_to_df_pf(raw: bytes, fname: str) -> pd.DataFrame:
 def _bytes_to_df_ca(raw: bytes, fname: str) -> pd.DataFrame:
     """Parse bytes (CSV ou XLSX) en DataFrame CA filtré."""
     if fname.lower().endswith(".csv"):
-        txt = raw.decode("utf-8", errors="replace")
-        sep = ";" if ";" in txt.split("\n")[0] else ","
-        df  = pd.read_csv(io.StringIO(txt), sep=sep, dtype=str, low_memory=False)
-        df.columns = [str(c).strip() for c in df.columns]
+        df = _read_csv_auto(raw)
+        df = _keep_cols(df, CA_COLS)
         df = _keep_cols(df, CA_COLS)
     else:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
@@ -1691,10 +1729,8 @@ def _bytes_to_df_ca(raw: bytes, fname: str) -> pd.DataFrame:
 def _bytes_to_df_sin(raw: bytes, fname: str) -> pd.DataFrame:
     """Parse bytes (CSV ou XLSX) en DataFrame Prestations filtré."""
     if fname.lower().endswith(".csv"):
-        txt = raw.decode("utf-8", errors="replace")
-        sep = ";" if ";" in txt.split("\n")[0] else ","
-        df  = pd.read_csv(io.StringIO(txt), sep=sep, dtype=str, low_memory=False)
-        df.columns = [str(c).strip() for c in df.columns]
+        df = _read_csv_auto(raw)
+        df = _keep_cols(df, SIN_COLS)
         df = _keep_cols(df, SIN_COLS)
     else:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
@@ -1702,10 +1738,12 @@ def _bytes_to_df_sin(raw: bytes, fname: str) -> pd.DataFrame:
         try:
             sh  = _excel_sheet(path, "Liste")
             xl  = pd.ExcelFile(path, engine="openpyxl")
-            hdr = pd.read_excel(xl, sheet_name=sh, nrows=0)
-            hdr.columns = [str(c).strip() for c in hdr.columns]
-            use = [c for c in hdr.columns if c in SIN_COLS] or None
-            del hdr
+            hdr_raw = pd.read_excel(xl, sheet_name=sh, nrows=0)
+            # Match avec strip pour gérer espaces parasites dans noms AFG
+            use = [c for c in hdr_raw.columns
+                   if str(c).strip() in SIN_COLS or str(c) in SIN_COLS]
+            if not use:
+                use = None
             df  = pd.read_excel(xl, sheet_name=sh, dtype=str, usecols=use)
             df.columns = [str(c).strip() for c in df.columns]
             xl.close()
@@ -2905,30 +2943,57 @@ elif "Sinistres" in page:
     df_sf=sin_f()
     # Résolution colonnes sinistres — noms exacts vérifiés sur fichier AFG réel
     def _find_col(df, *candidates):
-        """Retourne la 1ère colonne trouvée parmi les candidats (strip des espaces)."""
-        cols_stripped = {c.strip(): c for c in df.columns}
+        """
+        Retourne la 1ère colonne trouvée parmi les candidats.
+        Stratégie : exact → strip → lower+strip → fuzzy.
+        """
+        # Index normalisé : {nom_lowercase_sans_espaces: nom_réel}
+        cols_norm = {c.strip().lower().replace(" ",""): c for c in df.columns}
         for cand in candidates:
-            if cand in df.columns:           return cand
-            if cand.strip() in cols_stripped: return cols_stripped[cand.strip()]
-            # Fallback fuzzy
+            # 1. Correspondance exacte
+            if cand in df.columns:
+                return cand
+            # 2. Après strip des deux côtés
+            cand_strip = cand.strip()
             for col in df.columns:
-                if all(k in col.lower() for k in cand.lower().split()[:2]):
+                if col.strip() == cand_strip:
+                    return col
+            # 3. Normalisé lowercase sans espaces
+            cand_norm = cand.strip().lower().replace(" ","")
+            if cand_norm in cols_norm:
+                return cols_norm[cand_norm]
+            # 4. Fuzzy : tous les mots du candidat présents dans la colonne
+            cand_words = [w for w in cand.lower().split() if len(w) > 2]
+            for col in df.columns:
+                col_l = col.lower()
+                if cand_words and all(w in col_l for w in cand_words):
                     return col
         return None
 
-    _c_regle_ = _find_col(sin, "Réglement Total",     "Reglement Total")
-    _c_sap_   = _find_col(sin, "SAP au 31/12/2025",   "SAP")
-    _c_hon_   = _find_col(sin, "Réglement Honoraires", "Reglement Honoraires")
-    _c_nat_   = _find_col(sin, "Nature Sinistre")
+    # Noms EXACTS confirmés sur le fichier Prestations_au_31122025.xlsx
+    # + fallbacks pour robustesse si encodage différent
+    _c_regle_ = _find_col(sin, "Réglement Total",      "Reglement Total",      "Règlement Total")
+    _c_sap_   = _find_col(sin, "SAP au 31/12/2025",    "SAP")
+    _c_hon_   = _find_col(sin, "Réglement Honoraires",  "Reglement Honoraires", "Règlement Honoraires")
+    _c_nat_   = _find_col(sin, "Nature Sinistre",       "Nature Sinstre")
     _c_sort_  = _find_col(sin, "Sort Sinistre")
-    _c_cat_   = _find_col(sin, "Libéllé Catégorie",   "Libellé Catégorie",    "Libelle Categorie")
+    _c_cat_   = _find_col(sin, "Libéllé Catégorie",    "Libellé Catégorie",    "Libelle Categorie", "Libéllé Catégorie risque")
     _c_souscr = _find_col(sin, "Souscripteur")
     _c_exo    = _find_col(sin, "Exercice Sinistre")
     _c_surv_  = _find_col(sin, "Date Survenance")
-    _c_decl   = _find_col(sin, "Date Déclaration",    "Date Declaration")
-    _c_compt  = _find_col(sin, "Réglement Comptable",  "Reglement Comptable")
+    _c_decl   = _find_col(sin, "Date Déclaration",     "Date Declaration")
+    _c_compt  = _find_col(sin, "Réglement Comptable",   "Reglement Comptable")
     _c_rae    = _find_col(sin, "RAE Cie au 31/12/2025")
     _c_branch = _find_col(sin, "Libellé branche")
+
+    # Debug : afficher ce qui a été trouvé (si colonnes manquantes)
+    _missing_cols = [n for n,v in [
+        ("Réglement Total",_c_regle_),("SAP",_c_sap_),
+        ("Nature Sinistre",_c_nat_),("Sort Sinistre",_c_sort_),
+        ("Libéllé Catégorie",_c_cat_)] if v is None]
+    if _missing_cols:
+        st.warning(f"⚠️ Colonnes non trouvées : {_missing_cols} | "
+                   f"Colonnes disponibles : {list(sin.columns[:10])}")
 
     section(f"⚠️ Sinistres & Provisions — {period_lbl}","ANALYSE ACTUARIELLE · SAP · S/P")
     # Noms exacts vérifiés sur fichier AFG réel
