@@ -2162,9 +2162,12 @@ elif "Analyse CA" in page:
                         saison.columns=["Mois","CA moyen"]
                         saison["Label"]=saison["Mois"].apply(lambda m:MOIS_FR[int(m)-1] if pd.notna(m) else "")
                         moy_g = saison["CA moyen"].mean()
-                        fig2=go.Figure(go.Bar(x=saison["Label"],y=saison["CA moyen"],
-                            marker_color=[GREEN if v>=moy_g else f"{GREEN}55" for v in saison["CA moyen"]],
-                            text=[fmt(v) for v in saison["CA moyen"]],textposition="outside",textfont_size=9))
+                        _mc = [GREEN if v >= moy_g else "rgba(26,127,110,0.35)" for v in saison["CA moyen"]]
+                        fig2=go.Figure(go.Bar(
+                            x=saison["Label"], y=saison["CA moyen"],
+                            marker_color=_mc,
+                            text=[fmt(v) for v in saison["CA moyen"]],
+                            textposition="outside", textfont=dict(size=9)))
                         fig2.add_hline(y=moy_g,line_dash="dash",line_color=RED,
                             annotation_text=f"Moy. {fmt(moy_g)}",annotation_font_size=9)
                         fig_style(fig2,380,"📅 Saisonnalité — CA moyen par mois")
@@ -2194,7 +2197,7 @@ elif "Analyse CA" in page:
                     fig=go.Figure(go.Bar(x=cp["CA"],y=cp["LIBECATE"].str[:26],orientation="h",
                         marker=dict(color=cp["Tx comm"],colorscale=[[0,MINT],[.5,GREEN],[1,GREEN2]],showscale=True,
                             colorbar=dict(title="Tx comm%",len=.6,thickness=12)),
-                        text=[fmt(v) for v in cp["CA"]],textposition="outside",textfont_size=10))
+                        text=[fmt(v) for v in cp["CA"]],textposition="outside", textfont=dict(size=10)))
                     fig.update_layout(yaxis=dict(autorange="reversed"))
                     fig_style(fig,400,f"💰 CA + taux commission · {period_lbl}")
                     st.plotly_chart(fig,use_container_width=True)
@@ -2340,7 +2343,7 @@ elif "Portefeuille" in page:
                     fig=go.Figure(go.Bar(x=pc_["Nb"],y=pc_["LIBECATE"].astype(str).str[:24],
                         orientation="h",
                         marker=dict(color=pc_["Nb"],colorscale=[[0,MINT],[1,GREEN2]],showscale=False),
-                        text=pc_["Nb"].astype(str),textposition="outside",textfont_size=10))
+                        text=pc_["Nb"].astype(str),textposition="outside", textfont=dict(size=10)))
                     fig.update_layout(yaxis=dict(autorange="reversed"))
                     fig_style(fig,380,"Polices par produit")
                     st.plotly_chart(fig,use_container_width=True)
@@ -2352,7 +2355,7 @@ elif "Portefeuille" in page:
                     ec.columns=["Etat","Nb"]
                     fig2=go.Figure(go.Pie(labels=ec["Etat"],values=ec["Nb"],hole=.44,
                         marker_colors=[etat_c_.get(e,"#888") for e in ec["Etat"]],
-                        textinfo="percent+label",textfont_size=11))
+                        textinfo="percent+label", textfont=dict(size=11)))
                     fig_style(fig2,380,"Etats du portefeuille")
                     st.plotly_chart(fig2,use_container_width=True)
             sc3,sc4=st.columns(2)
@@ -2361,7 +2364,7 @@ elif "Portefeuille" in page:
                     per=fi["CODEPERI"].map(CODEPERI_MAP).fillna("Autre").value_counts().reset_index()
                     per.columns=["Periodicite","Nb"]
                     fig3=go.Figure(go.Pie(labels=per["Periodicite"],values=per["Nb"],
-                        hole=.44,marker_colors=PAL,textinfo="percent+label",textfont_size=11))
+                        hole=.44,marker_colors=PAL,textinfo="percent+label", textfont=dict(size=11)))
                     fig_style(fig3,320,"Periodicite cotisations")
                     st.plotly_chart(fig3,use_container_width=True)
             with sc4:
@@ -2370,7 +2373,7 @@ elif "Portefeuille" in page:
                     vl.columns=["Ville","Nb"]
                     fig4=go.Figure(go.Bar(x=vl["Nb"],y=vl["Ville"].astype(str).str[:18],
                         orientation="h",marker_color=PAL[:len(vl)],
-                        text=vl["Nb"].astype(str),textposition="outside",textfont_size=10))
+                        text=vl["Nb"].astype(str),textposition="outside", textfont=dict(size=10)))
                     fig4.update_layout(yaxis=dict(autorange="reversed"))
                     fig_style(fig4,320,"Top 10 villes")
                     st.plotly_chart(fig4,use_container_width=True)
@@ -2512,7 +2515,7 @@ elif "Produits" in page:
                 with c1:
                     fig=go.Figure(go.Bar(x=cp["CA"],y=cp["LIBECATE"].str[:26],orientation="h",
                         marker=dict(color=cp["Tx comm"],colorscale=[[0,MINT],[.5,GREEN],[1,GREEN2]],showscale=True),
-                        text=[fmt(v) for v in cp["CA"]],textposition="outside",textfont_size=10))
+                        text=[fmt(v) for v in cp["CA"]],textposition="outside", textfont=dict(size=10)))
                     fig.update_layout(yaxis=dict(autorange="reversed"))
                     fig_style(fig,400,"💰 CA + taux commission")
                     st.plotly_chart(fig,use_container_width=True)
@@ -2663,7 +2666,7 @@ elif "Commerciaux" in page and "Partenaires" not in page:
                     y=[str(i)[:22] for i in heat_piv.index],
                     colorscale=[[0,MINT],[.5,GREEN],[1,GREEN2]],
                     text=[[fmt(v) for v in row] for row in heat_piv.values],
-                    texttemplate="%{text}", textfont_size=9))
+                    texttemplate="%{text}", textfont=dict(size=9)))
                 fig3.update_layout(height=420,margin=dict(l=140,r=20,t=40,b=80))
                 fig3.update_layout(title=dict(text="CA par commercial × produit (Top 10)",
                     font=dict(size=12,color=NAVY),x=.01))
@@ -2744,7 +2747,7 @@ elif "Partenaires" in page:
                 fig = go.Figure(go.Bar(x=dp["CA"],y=dp["CODEAPPO_STR"],orientation="h",
                     marker=dict(color=dp["CA"],colorscale=[[0,MINT],[1,BLUE]],showscale=False),
                     text=[fmt(v)+" ("+pct(p)+")" for v,p in zip(dp["CA"],dp["Part %"])],
-                    textposition="outside",textfont_size=10))
+                    textposition="outside", textfont=dict(size=10)))
                 fig.update_layout(yaxis=dict(autorange="reversed"))
                 fig_style(fig,400,f"🏦 CA par partenaire — {period_lbl}")
                 st.plotly_chart(fig,use_container_width=True)
@@ -2768,7 +2771,7 @@ elif "Partenaires" in page:
             labels=["Réseau interne","Partenaires financiers"],
             values=[ca_ri_tot,ca_pf_tot],hole=.44,
             marker_colors=[GREEN,BLUE],
-            textinfo="percent+label+value",textfont_size=12))
+            textinfo="percent+label+value", textfont=dict(size=12)))
         fig_style(fig3,380,"🥧 Réseau interne vs Partenaires financiers")
         st.plotly_chart(fig3,use_container_width=True)
         # Évolution partenaires vs réseau
@@ -2815,7 +2818,7 @@ elif "Clients" in page:
                 vl=df.groupby("LIBEVILL").agg(Nb=("LIBEVILL","count"),CA=("MONTENCA","sum")).reset_index().sort_values("Nb",ascending=False).head(15)
                 fig=go.Figure(go.Bar(x=vl["Nb"],y=vl["LIBEVILL"].str[:18],orientation="h",
                     marker=dict(color=vl["Nb"],colorscale=[[0,MINT],[1,GREEN2]],showscale=False),
-                    text=vl["Nb"].astype(str),textposition="outside",textfont_size=10))
+                    text=vl["Nb"].astype(str),textposition="outside", textfont=dict(size=10)))
                 fig.update_layout(yaxis=dict(autorange="reversed"))
                 fig_style(fig,400,"📍 Top 15 villes — Polices")
                 st.plotly_chart(fig,use_container_width=True)
@@ -2823,7 +2826,7 @@ elif "Clients" in page:
                 vl_ca=df.groupby("LIBEVILL")["MONTENCA"].sum().reset_index().sort_values("MONTENCA",ascending=False).head(12)
                 fig2=go.Figure(go.Bar(x=vl_ca["MONTENCA"],y=vl_ca["LIBEVILL"].str[:18],orientation="h",
                     marker=dict(color=vl_ca["MONTENCA"],colorscale=[[0,MINT],[1,GREEN2]],showscale=False),
-                    text=[fmt(v) for v in vl_ca["MONTENCA"]],textposition="outside",textfont_size=10))
+                    text=[fmt(v) for v in vl_ca["MONTENCA"]],textposition="outside", textfont=dict(size=10)))
                 fig2.update_layout(yaxis=dict(autorange="reversed"))
                 fig_style(fig2,400,"💰 Top 12 villes — CA (MONTENCA)")
                 st.plotly_chart(fig2,use_container_width=True)
@@ -2838,18 +2841,18 @@ elif "Clients" in page:
         with c1:
             if "SEXERISQ" in df.columns:
                 sx=df["SEXERISQ"].map({"M":"Hommes","F":"Femmes"}).value_counts().reset_index(); sx.columns=["Sexe","Nb"]
-                fig=go.Figure(go.Pie(labels=sx["Sexe"],values=sx["Nb"],hole=.44,marker_colors=[BLUE,GREEN],textinfo="percent+label+value",textfont_size=12))
+                fig=go.Figure(go.Pie(labels=sx["Sexe"],values=sx["Nb"],hole=.44,marker_colors=[BLUE,GREEN],textinfo="percent+label+value", textfont=dict(size=12)))
                 fig_style(fig,320,"👥 Répartition H/F"); st.plotly_chart(fig,use_container_width=True)
         with c2:
             if "CODEPERI" in df.columns:
                 per=df["CODEPERI"].map(CODEPERI_MAP).fillna("Autre").value_counts().reset_index(); per.columns=["Périodicité","Nb"]
-                fig2=go.Figure(go.Pie(labels=per["Périodicité"],values=per["Nb"],hole=.44,marker_colors=PAL,textinfo="percent+label",textfont_size=11))
+                fig2=go.Figure(go.Pie(labels=per["Périodicité"],values=per["Nb"],hole=.44,marker_colors=PAL,textinfo="percent+label", textfont=dict(size=11)))
                 fig_style(fig2,320,"📅 Périodicité cotisations"); st.plotly_chart(fig2,use_container_width=True)
         with c3:
             if "NOM_APP" in df.columns:
                 ap=df[df["ETAT_POLICE"].str.strip()=="ACTIF"]["NOM_APP"].value_counts().head(10).reset_index() if "ETAT_POLICE" in df.columns else df["NOM_APP"].value_counts().head(10).reset_index()
                 ap.columns=["Apporteur","Nb actifs"]
-                fig3=go.Figure(go.Bar(y=ap["Apporteur"].str[:18],x=ap["Nb actifs"],orientation="h",marker_color=GREEN,text=ap["Nb actifs"].astype(str),textposition="outside",textfont_size=10))
+                fig3=go.Figure(go.Bar(y=ap["Apporteur"].str[:18],x=ap["Nb actifs"],orientation="h",marker_color=GREEN,text=ap["Nb actifs"].astype(str),textposition="outside", textfont=dict(size=10)))
                 fig3.update_layout(yaxis=dict(autorange="reversed"))
                 fig_style(fig3,320,"🏆 Top apporteurs (polices actives)"); st.plotly_chart(fig3,use_container_width=True)
     with t_a:
@@ -2863,8 +2866,8 @@ elif "Clients" in page:
             pyr=da.groupby(["tranch","SEXERISQ"]).size().unstack(fill_value=0).reset_index()
             if "M" in pyr.columns and "F" in pyr.columns:
                 fig=go.Figure()
-                fig.add_bar(y=pyr["tranch"],x=-pyr["M"],name="Hommes",orientation="h",marker_color=BLUE,text=pyr["M"].astype(str),textposition="outside",textfont_size=9)
-                fig.add_bar(y=pyr["tranch"],x=pyr["F"],name="Femmes",orientation="h",marker_color=GREEN,text=pyr["F"].astype(str),textposition="outside",textfont_size=9)
+                fig.add_bar(y=pyr["tranch"],x=-pyr["M"],name="Hommes",orientation="h",marker_color=BLUE,text=pyr["M"].astype(str),textposition="outside", textfont=dict(size=9))
+                fig.add_bar(y=pyr["tranch"],x=pyr["F"],name="Femmes",orientation="h",marker_color=GREEN,text=pyr["F"].astype(str),textposition="outside", textfont=dict(size=9))
                 fig.update_layout(barmode="overlay",xaxis=dict(tickvals=list(range(-4000,4001,500)),ticktext=[str(abs(x)) for x in range(-4000,4001,500)]))
                 fig_style(fig,520,"🎂 Pyramide des âges (tranches quinquennales)")
                 st.plotly_chart(fig,use_container_width=True)
@@ -3322,9 +3325,10 @@ elif "Prévisions" in page:
         saison=src2.groupby("MOIS")[ca_k].mean().reset_index(); saison.columns=["Mois","CA moyen"]
         saison["Label"]=saison["Mois"].apply(lambda m:MOIS_FR[int(m)-1] if pd.notna(m) else "")
         moy_g=saison["CA moyen"].mean()
+        _mc = [GREEN if v >= moy_g else "rgba(26,127,110,0.3)" for v in saison["CA moyen"]]
         fig2=go.Figure(go.Bar(x=saison["Label"],y=saison["CA moyen"],
-            marker_color=[GREEN if v>=moy_g else f"{GREEN}55" for v in saison["CA moyen"]],
-            text=[fmt(v) for v in saison["CA moyen"]],textposition="outside",textfont_size=10))
+            marker_color=_mc,
+            text=[fmt(v) for v in saison["CA moyen"]],textposition="outside", textfont=dict(size=10)))
         fig2.add_hline(y=moy_g,line_dash="dash",line_color=RED,annotation_text=f"Moy. {fmt(moy_g)}",annotation_font_size=10)
         fig_style(fig2,360,"📅 Saisonnalité — CA moyen par mois")
         st.plotly_chart(fig2,use_container_width=True)
@@ -3846,13 +3850,13 @@ elif "Base BIA" in page:
     with g1:
         by_st=df_bia["statut"].value_counts().reset_index(); by_st.columns=["Statut","Nb"]
         fig=go.Figure(go.Pie(labels=by_st["Statut"],values=by_st["Nb"],hole=.44,
-            marker_colors=[GREEN,AMBER,RED,BLUE],textinfo="percent+label+value",textfont_size=12))
+            marker_colors=[GREEN,AMBER,RED,BLUE],textinfo="percent+label+value", textfont=dict(size=12)))
         fig_style(fig,260,"📊 Répartition par statut"); st.plotly_chart(fig,use_container_width=True)
     with g2:
         if "produit" in df_bia.columns:
             by_p=df_bia.groupby("produit").agg(Nb=("produit","count"),Cot=("cotisation","sum")).reset_index().sort_values("Cot",ascending=False).head(8)
             fig2=go.Figure(go.Bar(x=by_p["Cot"],y=by_p["produit"].str[:22],orientation="h",
-                marker_color=GREEN,text=[fmt(v) for v in by_p["Cot"]],textposition="outside",textfont_size=10))
+                marker_color=GREEN,text=[fmt(v) for v in by_p["Cot"]],textposition="outside", textfont=dict(size=10)))
             fig2.update_layout(yaxis=dict(autorange="reversed"))
             fig_style(fig2,260,"💰 Cotisations BIA par produit"); st.plotly_chart(fig2,use_container_width=True)
     # Valider brouillons
@@ -3924,7 +3928,7 @@ elif "Base BIA" in page:
                 pc_=fi.groupby("LIBECATE").agg(Nb=("LIBECATE","count"),CA=("MONTENCA","sum")).reset_index().sort_values("Nb",ascending=False)
                 fig=go.Figure(go.Bar(x=pc_["Nb"],y=pc_["LIBECATE"].str[:24],orientation="h",
                     marker=dict(color=pc_["Nb"],colorscale=[[0,MINT],[1,GREEN2]],showscale=False),
-                    text=pc_["Nb"].astype(str),textposition="outside",textfont_size=10))
+                    text=pc_["Nb"].astype(str),textposition="outside", textfont=dict(size=10)))
                 fig.update_layout(yaxis=dict(autorange="reversed"))
                 fig_style(fig,380,"📦 Polices par produit")
                 st.plotly_chart(fig,use_container_width=True)
@@ -3934,14 +3938,14 @@ elif "Base BIA" in page:
                 ec=fi["ETAT_POLICE"].str.strip().value_counts().reset_index(); ec.columns=["État","Nb"]
                 fig2=go.Figure(go.Pie(labels=ec["État"],values=ec["Nb"],hole=.44,
                     marker_colors=[etat_c_.get(e,"#888") for e in ec["État"]],
-                    textinfo="percent+label",textfont_size=11))
+                    textinfo="percent+label", textfont=dict(size=11)))
                 fig_style(fig2,380,"🔵 États du portefeuille filtré")
                 st.plotly_chart(fig2,use_container_width=True)
         sc3,sc4=st.columns(2)
         with sc3:
             if "CODEPERI" in fi.columns:
                 per=fi["CODEPERI"].map(CODEPERI_MAP).fillna("Autre").value_counts().reset_index(); per.columns=["Périodicité","Nb"]
-                fig3=go.Figure(go.Pie(labels=per["Périodicité"],values=per["Nb"],hole=.44,marker_colors=PAL,textinfo="percent+label",textfont_size=11))
+                fig3=go.Figure(go.Pie(labels=per["Périodicité"],values=per["Nb"],hole=.44,marker_colors=PAL,textinfo="percent+label", textfont=dict(size=11)))
                 fig_style(fig3,320,"📅 Périodicité cotisations")
                 st.plotly_chart(fig3,use_container_width=True)
         with sc4:
@@ -3949,7 +3953,7 @@ elif "Base BIA" in page:
                 vl=fi["LIBEVILL"].value_counts().head(10).reset_index(); vl.columns=["Ville","Nb"]
                 fig4=go.Figure(go.Bar(x=vl["Nb"],y=vl["Ville"].str[:18],orientation="h",
                     marker_color=PAL[:len(vl)],
-                    text=vl["Nb"].astype(str),textposition="outside",textfont_size=10))
+                    text=vl["Nb"].astype(str),textposition="outside", textfont=dict(size=10)))
                 fig4.update_layout(yaxis=dict(autorange="reversed"))
                 fig_style(fig4,320,"📍 Top 10 villes")
                 st.plotly_chart(fig4,use_container_width=True)
@@ -4002,7 +4006,7 @@ elif "Produits" in page:
                 with c1:
                     fig=go.Figure(go.Bar(x=cp["CA"],y=cp["LIBECATE"].str[:26],orientation="h",
                         marker=dict(color=cp["Tx comm"],colorscale=[[0,MINT],[.5,GREEN],[1,GREEN2]],showscale=True),
-                        text=[fmt(v) for v in cp["CA"]],textposition="outside",textfont_size=10))
+                        text=[fmt(v) for v in cp["CA"]],textposition="outside", textfont=dict(size=10)))
                     fig.update_layout(yaxis=dict(autorange="reversed"))
                     fig_style(fig,400,"💰 CA + taux commission")
                     st.plotly_chart(fig,use_container_width=True)
@@ -4082,7 +4086,7 @@ elif "Commerciaux" in page:
     with t_p:
         t30=grp.head(30)
         fig=go.Figure(go.Bar(x=t30["CA"],y=t30[ag_k].str[:22],name="CA",marker_color=GREEN,orientation="h",
-            text=[fmt(v) for v in t30["CA"]],textposition="outside",textfont_size=10))
+            text=[fmt(v) for v in t30["CA"]],textposition="outside", textfont=dict(size=10)))
         fig.update_layout(yaxis=dict(autorange="reversed"))
         fig_style(fig,500,"📊 Pareto CA — Top 30")
         st.plotly_chart(fig,use_container_width=True)
@@ -4108,7 +4112,7 @@ elif "Clients" in page:
                 vl=df.groupby("LIBEVILL").agg(Nb=("LIBEVILL","count"),CA=("MONTENCA","sum")).reset_index().sort_values("Nb",ascending=False).head(15)
                 fig=go.Figure(go.Bar(x=vl["Nb"],y=vl["LIBEVILL"].str[:18],orientation="h",
                     marker=dict(color=vl["Nb"],colorscale=[[0,MINT],[1,GREEN2]],showscale=False),
-                    text=vl["Nb"].astype(str),textposition="outside",textfont_size=10))
+                    text=vl["Nb"].astype(str),textposition="outside", textfont=dict(size=10)))
                 fig.update_layout(yaxis=dict(autorange="reversed"))
                 fig_style(fig,400,"📍 Top 15 villes — Polices")
                 st.plotly_chart(fig,use_container_width=True)
@@ -4116,7 +4120,7 @@ elif "Clients" in page:
                 vl_ca=df.groupby("LIBEVILL")["MONTENCA"].sum().reset_index().sort_values("MONTENCA",ascending=False).head(12)
                 fig2=go.Figure(go.Bar(x=vl_ca["MONTENCA"],y=vl_ca["LIBEVILL"].str[:18],orientation="h",
                     marker=dict(color=vl_ca["MONTENCA"],colorscale=[[0,MINT],[1,GREEN2]],showscale=False),
-                    text=[fmt(v) for v in vl_ca["MONTENCA"]],textposition="outside",textfont_size=10))
+                    text=[fmt(v) for v in vl_ca["MONTENCA"]],textposition="outside", textfont=dict(size=10)))
                 fig2.update_layout(yaxis=dict(autorange="reversed"))
                 fig_style(fig2,400,"💰 Top 12 villes — CA (MONTENCA)")
                 st.plotly_chart(fig2,use_container_width=True)
@@ -4131,18 +4135,18 @@ elif "Clients" in page:
         with c1:
             if "SEXERISQ" in df.columns:
                 sx=df["SEXERISQ"].map({"M":"Hommes","F":"Femmes"}).value_counts().reset_index(); sx.columns=["Sexe","Nb"]
-                fig=go.Figure(go.Pie(labels=sx["Sexe"],values=sx["Nb"],hole=.44,marker_colors=[BLUE,GREEN],textinfo="percent+label+value",textfont_size=12))
+                fig=go.Figure(go.Pie(labels=sx["Sexe"],values=sx["Nb"],hole=.44,marker_colors=[BLUE,GREEN],textinfo="percent+label+value", textfont=dict(size=12)))
                 fig_style(fig,320,"👥 Répartition H/F"); st.plotly_chart(fig,use_container_width=True)
         with c2:
             if "CODEPERI" in df.columns:
                 per=df["CODEPERI"].map(CODEPERI_MAP).fillna("Autre").value_counts().reset_index(); per.columns=["Périodicité","Nb"]
-                fig2=go.Figure(go.Pie(labels=per["Périodicité"],values=per["Nb"],hole=.44,marker_colors=PAL,textinfo="percent+label",textfont_size=11))
+                fig2=go.Figure(go.Pie(labels=per["Périodicité"],values=per["Nb"],hole=.44,marker_colors=PAL,textinfo="percent+label", textfont=dict(size=11)))
                 fig_style(fig2,320,"📅 Périodicité cotisations"); st.plotly_chart(fig2,use_container_width=True)
         with c3:
             if "NOM_APP" in df.columns:
                 ap=df[df["ETAT_POLICE"].str.strip()=="ACTIF"]["NOM_APP"].value_counts().head(10).reset_index() if "ETAT_POLICE" in df.columns else df["NOM_APP"].value_counts().head(10).reset_index()
                 ap.columns=["Apporteur","Nb actifs"]
-                fig3=go.Figure(go.Bar(y=ap["Apporteur"].str[:18],x=ap["Nb actifs"],orientation="h",marker_color=GREEN,text=ap["Nb actifs"].astype(str),textposition="outside",textfont_size=10))
+                fig3=go.Figure(go.Bar(y=ap["Apporteur"].str[:18],x=ap["Nb actifs"],orientation="h",marker_color=GREEN,text=ap["Nb actifs"].astype(str),textposition="outside", textfont=dict(size=10)))
                 fig3.update_layout(yaxis=dict(autorange="reversed"))
                 fig_style(fig3,320,"🏆 Top apporteurs (polices actives)"); st.plotly_chart(fig3,use_container_width=True)
     with t_a:
@@ -4156,8 +4160,8 @@ elif "Clients" in page:
             pyr=da.groupby(["tranch","SEXERISQ"]).size().unstack(fill_value=0).reset_index()
             if "M" in pyr.columns and "F" in pyr.columns:
                 fig=go.Figure()
-                fig.add_bar(y=pyr["tranch"],x=-pyr["M"],name="Hommes",orientation="h",marker_color=BLUE,text=pyr["M"].astype(str),textposition="outside",textfont_size=9)
-                fig.add_bar(y=pyr["tranch"],x=pyr["F"],name="Femmes",orientation="h",marker_color=GREEN,text=pyr["F"].astype(str),textposition="outside",textfont_size=9)
+                fig.add_bar(y=pyr["tranch"],x=-pyr["M"],name="Hommes",orientation="h",marker_color=BLUE,text=pyr["M"].astype(str),textposition="outside", textfont=dict(size=9))
+                fig.add_bar(y=pyr["tranch"],x=pyr["F"],name="Femmes",orientation="h",marker_color=GREEN,text=pyr["F"].astype(str),textposition="outside", textfont=dict(size=9))
                 fig.update_layout(barmode="overlay",xaxis=dict(tickvals=list(range(-4000,4001,500)),ticktext=[str(abs(x)) for x in range(-4000,4001,500)]))
                 fig_style(fig,520,"🎂 Pyramide des âges (tranches quinquennales)")
                 st.plotly_chart(fig,use_container_width=True)
@@ -4427,9 +4431,10 @@ elif "Prévisions" in page:
         saison=src2.groupby("MOIS")[ca_k].mean().reset_index(); saison.columns=["Mois","CA moyen"]
         saison["Label"]=saison["Mois"].apply(lambda m:MOIS_FR[int(m)-1] if pd.notna(m) else "")
         moy_g=saison["CA moyen"].mean()
+        _mc = [GREEN if v >= moy_g else "rgba(26,127,110,0.3)" for v in saison["CA moyen"]]
         fig2=go.Figure(go.Bar(x=saison["Label"],y=saison["CA moyen"],
-            marker_color=[GREEN if v>=moy_g else f"{GREEN}55" for v in saison["CA moyen"]],
-            text=[fmt(v) for v in saison["CA moyen"]],textposition="outside",textfont_size=10))
+            marker_color=_mc,
+            text=[fmt(v) for v in saison["CA moyen"]],textposition="outside", textfont=dict(size=10)))
         fig2.add_hline(y=moy_g,line_dash="dash",line_color=RED,annotation_text=f"Moy. {fmt(moy_g)}",annotation_font_size=10)
         fig_style(fig2,360,"📅 Saisonnalité — CA moyen par mois")
         st.plotly_chart(fig2,use_container_width=True)
@@ -4951,13 +4956,13 @@ elif "Base BIA" in page:
     with g1:
         by_st=df_bia["statut"].value_counts().reset_index(); by_st.columns=["Statut","Nb"]
         fig=go.Figure(go.Pie(labels=by_st["Statut"],values=by_st["Nb"],hole=.44,
-            marker_colors=[GREEN,AMBER,RED,BLUE],textinfo="percent+label+value",textfont_size=12))
+            marker_colors=[GREEN,AMBER,RED,BLUE],textinfo="percent+label+value", textfont=dict(size=12)))
         fig_style(fig,260,"📊 Répartition par statut"); st.plotly_chart(fig,use_container_width=True)
     with g2:
         if "produit" in df_bia.columns:
             by_p=df_bia.groupby("produit").agg(Nb=("produit","count"),Cot=("cotisation","sum")).reset_index().sort_values("Cot",ascending=False).head(8)
             fig2=go.Figure(go.Bar(x=by_p["Cot"],y=by_p["produit"].str[:22],orientation="h",
-                marker_color=GREEN,text=[fmt(v) for v in by_p["Cot"]],textposition="outside",textfont_size=10))
+                marker_color=GREEN,text=[fmt(v) for v in by_p["Cot"]],textposition="outside", textfont=dict(size=10)))
             fig2.update_layout(yaxis=dict(autorange="reversed"))
             fig_style(fig2,260,"💰 Cotisations BIA par produit"); st.plotly_chart(fig2,use_container_width=True)
     # Valider brouillons
