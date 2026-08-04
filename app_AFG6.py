@@ -1313,12 +1313,7 @@ if not st.session_state.auth:
           <p style="color:#8899AA;font-size:12px;margin-top:6px">Tableau de bord actuariel expert · Conforme CIMA</p>
         </div>""", unsafe_allow_html=True)
         with st.container(border=True):
-            st.markdown(f"""<div style="background:linear-gradient(135deg,{NAVY},{GREEN2});
-                border-radius:8px;padding:10px 14px;margin-bottom:12px;">
-              <b style="color:{MINT};font-size:12px">🔑 Codes de démonstration</b><br>
-              <span style="color:rgba(255,255,255,.65);font-size:11px">
-              PDG AFG → 1001 &nbsp;·&nbsp; ADMIN → 1003 &nbsp;·&nbsp; ACTUAIRE → 1005 &nbsp;·&nbsp; DEMO → 0000
-              </span></div>""", unsafe_allow_html=True)
+
             ident = st.text_input("👤 Identifiant", placeholder="Ex : PDG AFG")
             code  = st.text_input("🔑 Code PIN (4 chiffres)", type="password", max_chars=4)
             if st.button("🔐 Accéder au système", use_container_width=True, type="primary"):
@@ -1529,7 +1524,7 @@ with st.sidebar:
     else:
         period_lbl = str(sel_date.year)
 
-    st.markdown(f"<div style='background:{GREEN};color:white;text-align:center;border-radius:7px;padding:5px;margin:5px 4px;font-weight:700;font-size:11px'>{period_lbl}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div style='background:white;color:#0D1F3C;text-align:center;border-radius:7px;padding:5px;margin:5px 4px;font-weight:800;font-size:12px;border:1.5px solid #1A7F6E'>{period_lbl}</div>", unsafe_allow_html=True)
     st.markdown("<hr>", unsafe_allow_html=True)
 
     # ── Statut des bases (lecture seule, visible par tous) ───────────────────
@@ -2005,7 +2000,7 @@ st.markdown(f"""
       CA: <b style="color:{MINT}">{ca_ct}</b> &nbsp;·&nbsp;
       SIN: <b style="color:{MINT}">{sin_ct}</b>
     </div>
-    <div style="background:rgba(26,127,110,.22);border:1px solid {GREEN};border-radius:7px;padding:4px 12px;color:{MINT};font-size:11px;font-weight:700">{period_lbl}</div>
+    <div style="background:white;border:1.5px solid {GREEN};border-radius:7px;padding:4px 12px;color:#0D1F3C;font-size:11px;font-weight:800">{period_lbl}</div>
     <div style="background:rgba(255,255,255,.08);border-radius:7px;padding:4px 11px;color:white;font-size:11px">{user['nom']}</div>
   </div>
 </div>""", unsafe_allow_html=True)
