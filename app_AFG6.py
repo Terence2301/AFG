@@ -1524,7 +1524,7 @@ with st.sidebar:
     else:
         period_lbl = str(sel_date.year)
 
-    st.markdown(f"<div style='background:white;color:#0D1F3C;text-align:center;border-radius:7px;padding:5px;margin:5px 4px;font-weight:800;font-size:12px;border:1.5px solid #1A7F6E'>{period_lbl}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div style='background:#C0392B;color:white;text-align:center;border-radius:7px;padding:5px;margin:5px 4px;font-weight:800;font-size:12px'>{period_lbl}</div>", unsafe_allow_html=True)
     st.markdown("<hr>", unsafe_allow_html=True)
 
     # ── Statut des bases (lecture seule, visible par tous) ───────────────────
@@ -2000,7 +2000,7 @@ st.markdown(f"""
       CA: <b style="color:{MINT}">{ca_ct}</b> &nbsp;·&nbsp;
       SIN: <b style="color:{MINT}">{sin_ct}</b>
     </div>
-    <div style="background:white;border:1.5px solid {GREEN};border-radius:7px;padding:4px 12px;color:#0D1F3C;font-size:11px;font-weight:800">{period_lbl}</div>
+    <div style="background:#C0392B;border-radius:7px;padding:4px 12px;color:white;font-size:11px;font-weight:800">{period_lbl}</div>
     <div style="background:rgba(255,255,255,.08);border-radius:7px;padding:4px 11px;color:white;font-size:11px">{user['nom']}</div>
   </div>
 </div>""", unsafe_allow_html=True)
