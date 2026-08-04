@@ -935,10 +935,18 @@ def get_bases_meta() -> dict:
         return {}
 
 # ── Rôles admin (seuls ces rôles peuvent charger/supprimer les bases) ─────────
-ADMIN_ROLES = {"PDG", "DG", "ADMIN"}
+# Rôles autorisés à charger/gérer les bases de données
+UPLOAD_ROLES    = {"PDG", "ACTUAIRE"}   # peuvent charger PF, CA, Prestations
+# Rôles autorisés à voir les onglets analytiques
+ANALYTICS_ROLES = {"PDG", "ACTUAIRE"}   # voient le dashboard complet
 
 def is_admin(user_dict: dict) -> bool:
-    return user_dict.get("role","").upper() in ADMIN_ROLES
+    """Peut charger et gérer les bases de données."""
+    return user_dict.get("role","").upper() in UPLOAD_ROLES
+
+def can_see_analytics(user_dict: dict) -> bool:
+    """Peut accéder aux onglets analytiques (dashboard complet)."""
+    return user_dict.get("role","").upper() in ANALYTICS_ROLES
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  CHARGEMENT OPTIMISÉ — lecture directe, colonnes filtrées, typage minimal
@@ -1357,8 +1365,13 @@ VISIBLE_DEFAULT = ["📝  Saisie BIA"]
 # RÈGLE : Saisie BIA toujours visible.
 #         Dès qu'AU MOINS une base est chargée → toutes les pages se débloquent.
 #         Ce calcul est fait à chaque rendu (pas besoin de bouton).
-_any_data = (st.session_state.pf_ok or st.session_state.ca_ok or st.session_state.sin_ok)
-pages_visible = ALL_PAGES if _any_data else VISIBLE_DEFAULT
+_any_data     = (st.session_state.pf_ok or st.session_state.ca_ok or st.session_state.sin_ok)
+_can_analysis = can_see_analytics(user)   # PDG ou ACTUAIRE uniquement
+
+# Règle d'accès :
+# • PDG / ACTUAIRE + bases chargées → tous les onglets
+# • Tous les autres → Saisie BIA uniquement (toujours)
+pages_visible = ALL_PAGES if (_any_data and _can_analysis) else VISIBLE_DEFAULT
 
 # Sécurité : si la page courante a disparu (ex. données effacées), revenir à BIA
 if st.session_state.current_page not in pages_visible:
@@ -1406,18 +1419,29 @@ with st.sidebar:
     </div>""", unsafe_allow_html=True)
 
     # ── Message d'état navigation ─────────────────────────────────────────────
-    if not _any_data:
+    if not _can_analysis:
+        # Rôle sans accès analytique — message informatif
         st.markdown(f"""
         <div style="background:rgba(202,111,30,.15);border:1px solid {AMBER};border-radius:8px;
              padding:8px 10px;margin:6px 4px 4px;font-size:10px;color:rgba(255,255,255,.7);line-height:1.5">
-          🔒 <b style="color:{MINT}">Accès limité</b><br>
-          Chargez au moins une base pour accéder aux tableaux de bord analytiques.
+          🔒 <b style="color:{MINT}">Accès Saisie BIA</b><br>
+          Votre profil est limité à la saisie des bulletins d'adhésion.
+        </div>""", unsafe_allow_html=True)
+    elif not _any_data:
+        # Rôle analytique mais aucune base chargée
+        st.markdown(f"""
+        <div style="background:rgba(202,111,30,.15);border:1px solid {AMBER};border-radius:8px;
+             padding:8px 10px;margin:6px 4px 4px;font-size:10px;color:rgba(255,255,255,.7);line-height:1.5">
+          ⏳ <b style="color:{MINT}">Aucune base chargée</b><br>
+          Chargez au moins une base pour accéder aux tableaux de bord.
         </div>""", unsafe_allow_html=True)
     else:
+        # Rôle analytique + bases disponibles
+        _nb_bases = sum([st.session_state.pf_ok, st.session_state.ca_ok, st.session_state.sin_ok])
         st.markdown(f"""
         <div style="background:rgba(26,127,110,.15);border:1px solid {GREEN};border-radius:8px;
              padding:8px 10px;margin:6px 4px 4px;font-size:10px;color:rgba(255,255,255,.7);line-height:1.5">
-          ✅ <b style="color:{MINT}">{sum([st.session_state.pf_ok, st.session_state.ca_ok, st.session_state.sin_ok])}/3 base(s)</b> chargée(s) — tous les onglets sont disponibles.
+          ✅ <b style="color:{MINT}">{_nb_bases}/3 base(s)</b> chargée(s) — tableau de bord complet disponible.
         </div>""", unsafe_allow_html=True)
 
     st.markdown("<hr>", unsafe_allow_html=True)
