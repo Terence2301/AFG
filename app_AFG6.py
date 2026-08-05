@@ -114,7 +114,22 @@ PRODUITS = [
     {"code":"220","nom":"ASSURTOUS Vigninou","grp":"Groupe 1","cat":"Décès"},
     {"code":"221","nom":"ASSURTOUS AVIGBO","grp":"Groupe 1","cat":"Décès"},
     {"code":"EP0","nom":"Épargne","grp":"Groupe 2","cat":"Épargne"},
+    {"code":"PA0","nom":"Prévoyance Auto","grp":"Groupe 1","cat":"Décès"},
 ]
+
+# ── Barème Prévoyance Auto ────────────────────────────────────────
+# Prime annuelle → Capital garanti décès
+PA_BAREME = {
+    500:  100_000,
+    1000: 225_000,
+    1500: 350_000,
+    2000: 500_000,
+}
+
+# Rôle courtier — accès Saisie BIA uniquement, produit PA0 uniquement
+COURTIER_ROLE = "COURTIER"
+def is_courtier(user_dict: dict) -> bool:
+    return user_dict.get("role","").upper() == COURTIER_ROLE
 
 # ── Barèmes AVIGBO (capital garanti selon prime) ──────────────────────────────
 # Structure : {prime_mensuelle: (capital, prime_unique)}
@@ -478,6 +493,7 @@ USERS = {
     "MANAGER AFG":   hashlib.sha256(b"1004").hexdigest(),
     "ACTUAIRE AFG":  hashlib.sha256(b"1005").hexdigest(),
     "DEMO VISITEUR": hashlib.sha256(b"0000").hexdigest(),
+    "COURTIER AFG":  hashlib.sha256(b"2001").hexdigest(),  # Courtiers — accès PA0 uniquement
 }
 
 # ─────────────────────────────────────────────
@@ -1377,11 +1393,13 @@ VISIBLE_DEFAULT = ["📝  Saisie BIA"]
 #         Ce calcul est fait à chaque rendu (pas besoin de bouton).
 _any_data     = (st.session_state.pf_ok or st.session_state.ca_ok or st.session_state.sin_ok)
 _can_analysis = can_see_analytics(user)   # PDG ou ACTUAIRE uniquement
+_is_courtier  = is_courtier(user)         # Courtiers → Saisie BIA uniquement
 
 # Règle d'accès :
 # • PDG / ACTUAIRE + bases chargées → tous les onglets
-# • Tous les autres → Saisie BIA uniquement (toujours)
-pages_visible = ALL_PAGES if (_any_data and _can_analysis) else VISIBLE_DEFAULT
+# • COURTIER → Saisie BIA uniquement (produit PA0)
+# • Tous les autres → Saisie BIA uniquement
+pages_visible = ALL_PAGES if (_any_data and _can_analysis and not _is_courtier) else VISIBLE_DEFAULT
 
 # Sécurité : si la page courante a disparu (ex. données effacées), revenir à BIA
 if st.session_state.current_page not in pages_visible:
@@ -1427,7 +1445,15 @@ with st.sidebar:
     </div>""", unsafe_allow_html=True)
 
     # ── Message d'état navigation ─────────────────────────────────────────────
-    if not _can_analysis:
+    if _is_courtier:
+        # Courtier — message spécifique
+        st.markdown(f"""
+        <div style="background:rgba(26,127,110,.15);border:1px solid {GREEN};border-radius:8px;
+             padding:8px 10px;margin:6px 4px 4px;font-size:10px;color:rgba(255,255,255,.8);line-height:1.5">
+          📋 <b style="color:{MINT}">Espace Courtier</b><br>
+          Saisie BIA — Prévoyance Auto
+        </div>""", unsafe_allow_html=True)
+    elif not _can_analysis:
         # Rôle sans accès analytique — message informatif
         st.markdown(f"""
         <div style="background:rgba(202,111,30,.15);border:1px solid {AMBER};border-radius:8px;
@@ -3373,22 +3399,112 @@ elif "Prévisions" in page:
 # PAGE — SAISIE BIA (7 étapes)
 # ═══════════════════════════════════════════════════════════════════════════════
 elif "Saisie BIA" in page:
-    # Compteurs BIA (compatibles PG et SQLite via bia_all())
+    # Compteurs BIA — filtrés sur PA0 pour les courtiers
     _df_bia_hdr = bia_all()
+    _is_crt_bia = is_courtier(user)
+    if _is_crt_bia and not _df_bia_hdr.empty and "code_produit" in _df_bia_hdr.columns:
+        _df_bia_hdr = _df_bia_hdr[_df_bia_hdr["code_produit"] == "PA0"]
     nb_bia  = len(_df_bia_hdr)
     cot_tot = float(_df_bia_hdr["cotisation"].fillna(0).astype(float).sum()) if not _df_bia_hdr.empty else 0
     nb_val  = int((_df_bia_hdr["statut"]=="Validé").sum()) if not _df_bia_hdr.empty else 0
+    _titre_kpi = "BIA Prévoyance Auto" if _is_crt_bia else "BIA enregistrés"
     c1,c2,c3=st.columns(3)
-    kpi(c1,"BIA enregistrés",str(nb_bia),"Total base BIA","teal",icon="📋")
+    kpi(c1, _titre_kpi, str(nb_bia), "Prévoyance Auto" if _is_crt_bia else "Total base BIA","teal",icon="📋")
     kpi(c2,"Validés",str(nb_val),f"{nb_val/max(nb_bia,1)*100:.0f}%","",icon="✅")
-    kpi(c3,"Cotisations BIA",fmt(cot_tot),"Total","blue",icon="💰")
+    kpi(c3,"Cotisations",fmt(cot_tot),"Total FCFA","blue",icon="💰")
 
     # ── Étape 1 : Sélection du produit ────────────────────────────────────────
-    section("Étape 1 — Sélection du produit","AFG ASSURANCES BÉNIN VIE")
-    GC={"Groupe 1":RED,"Groupe 2":GREEN}
+    # COURTIER : ne voit que Prévoyance Auto (PA0)
+    _is_crt_step = is_courtier(user)
 
-    # Groupe 1 — Décès
-    with st.expander("🛡️ Groupe 1 — Décès & Vie", expanded=True):
+    if _is_crt_step:
+        # Sélection automatique PA0 pour les courtiers
+        section("Prévoyance Auto — BIA","AFG ASSURANCES BÉNIN VIE")
+        # Champ courtier libre (nom ou sigle)
+        _nom_courtier = st.text_input(
+            "🏢 Courtier (nom ou sigle) *",
+            value=st.session_state.get("f_courtier_nom",""),
+            placeholder="Ex: ATLANTIQUE COURTAGE, ABC...",
+            key="inp_courtier")
+        st.session_state["f_courtier_nom"] = _nom_courtier
+
+        # Sélection du barème PA0
+        st.markdown(f"""
+        <div style="background:{RED}10;border:1.5px solid {RED};border-radius:10px;
+             padding:14px 16px;margin:10px 0">
+          <div style="font-size:10px;color:{RED};font-weight:700;text-transform:uppercase;
+               letter-spacing:.06em;margin-bottom:10px">Barème Prévoyance Auto</div>
+          <div style="font-size:12px;color:{NAVY};line-height:2">
+            500 FCFA/an → Capital <b>100 000 FCFA</b><br>
+            1 000 FCFA/an → Capital <b>225 000 FCFA</b><br>
+            1 500 FCFA/an → Capital <b>350 000 FCFA</b><br>
+            2 000 FCFA/an → Capital <b>500 000 FCFA</b>
+          </div>
+        </div>""", unsafe_allow_html=True)
+
+        _pa_opts = {
+            "500 FCFA/an → Capital 100 000 FCFA":  (500,  100_000),
+            "1 000 FCFA/an → Capital 225 000 FCFA": (1000, 225_000),
+            "1 500 FCFA/an → Capital 350 000 FCFA": (1500, 350_000),
+            "2 000 FCFA/an → Capital 500 000 FCFA": (2000, 500_000),
+        }
+        _pa_list = list(_pa_opts.keys())
+        _cur_pa  = st.session_state.get("f_pa_opt", _pa_list[0])
+        if _cur_pa not in _pa_list: _cur_pa = _pa_list[0]
+        _pa_sel  = st.radio("Prime annuelle *", _pa_list,
+                            index=_pa_list.index(_cur_pa), key="pa_bar_r")
+        st.session_state["f_pa_opt"] = _pa_sel
+        _pa_prime, _pa_capital = _pa_opts[_pa_sel]
+        st.session_state["f_coti"] = _pa_prime
+        st.session_state["f_cap"]  = _pa_capital
+        st.session_state["f_peri"] = "Annuelle"
+        st.session_state["f_gar"]  = "Avec garantie décès"
+        st.session_state["f_duree"] = 1
+
+        st.markdown(f"""
+        <div style="background:linear-gradient(135deg,{RED},{AMBER});border-radius:10px;
+             padding:12px 16px;margin:10px 0;display:flex;align-items:center;gap:20px">
+          <div>
+            <div style="color:rgba(255,255,255,.7);font-size:9px">PRIME ANNUELLE</div>
+            <div style="color:white;font-size:18px;font-weight:800">{_pa_prime:,} FCFA</div>
+          </div>
+          <div style="background:rgba(255,255,255,.2);width:1px;height:40px"></div>
+          <div>
+            <div style="color:rgba(255,255,255,.7);font-size:9px">CAPITAL GARANTI DÉCÈS</div>
+            <div style="color:white;font-size:18px;font-weight:800">{_pa_capital:,} FCFA</div>
+          </div>
+          <div style="background:rgba(255,255,255,.2);width:1px;height:40px"></div>
+
+        </div>""", unsafe_allow_html=True)
+
+        if not st.session_state.get("bia_prod"):
+            st.session_state["bia_prod"] = "PA0"
+            st.session_state["bia_step"] = 2
+            st.session_state["f_code_appo"] = _nom_courtier
+            st.session_state["f_nom_appo"]  = _nom_courtier
+
+        if st.button("▶ Saisir le BIA", type="primary", use_container_width=True, key="pa_go"):
+            st.session_state["bia_prod"]    = "PA0"
+            st.session_state["bia_step"]    = 2
+            st.session_state["f_code_appo"] = _nom_courtier
+            st.session_state["f_nom_appo"]  = _nom_courtier
+            st.rerun()
+
+        if "bia_prod" not in st.session_state or st.session_state.get("bia_prod") != "PA0":
+            st.stop()
+
+        prod = next((p for p in PRODUITS if p["code"] == "PA0"), None)
+        gc   = RED
+        step = st.session_state.get("bia_step", 2)
+        is_avigbo = is_vigninou = is_deces = False
+        is_epargne = False
+    else:
+        section("Étape 1 — Sélection du produit","AFG ASSURANCES BÉNIN VIE")
+        GC={"Groupe 1":RED,"Groupe 2":GREEN}
+
+    # Groupe 1 — Décès (affiché uniquement pour non-courtiers)
+    if not _is_crt_step:
+     with st.expander("🛡️ Groupe 1 — Décès & Vie", expanded=True):
         col_a, col_b = st.columns(2)
         # AVIGBO
         with col_a:
@@ -3508,6 +3624,16 @@ elif "Saisie BIA" in page:
 
     elif step==4:
         section("Étape 4 — Assuré(e) & Bénéficiaires")
+        # PA0 : bénéficiaires optionnels — bouton pour passer directement
+        if prod["code"] == "PA0":
+            alert("Les informations bénéficiaires sont optionnelles pour ce produit.", "info")
+            _b1, _b2, _b3 = st.columns(3)
+            if _b1.button("← Retour", key="ret_4_pa"):
+                st.session_state["bia_step"] = 3; st.rerun()
+            if _b3.button("Passer cette étape ▶", key="skip_4_pa", type="primary"):
+                st.session_state["f_bc"] = True
+                st.session_state["bia_step"] = 5; st.rerun()
+            st.markdown("---")
         if st.session_state.get("f_ass_meme",True):
             st.success(f"✅ Assuré(e) = {st.session_state.get('f_c_tit','')} {st.session_state.get('f_c_nom','').upper()} {st.session_state.get('f_c_prn','')} — reprises du souscripteur.")
         else:
@@ -3541,6 +3667,74 @@ elif "Saisie BIA" in page:
         if isinstance(cur_e,str):
             try: cur_e=date.fromisoformat(cur_e)
             except: cur_e=today
+
+        # ══ PA0 — Prévoyance Auto ══════════════════════════════════════════
+        if prod["code"] == "PA0":
+            from dateutil.relativedelta import relativedelta
+            section("Étape 5 — Caractéristiques du Contrat")
+            alert("Prévoyance Auto · Date terme = Date effet + 1 an (calculée automatiquement)","info")
+
+            c1, c2 = st.columns(2)
+            with c1:
+                st.session_state["f_deff"] = st.date_input(
+                    "Date d'effet *", value=cur_e, key="eff_d_pa")
+            # Date terme = date effet + 1 an (automatique)
+            _deff_pa  = st.session_state["f_deff"]
+            if isinstance(_deff_pa, str):
+                try: _deff_pa = date.fromisoformat(_deff_pa)
+                except: _deff_pa = today
+            try:
+                _terme_pa = _deff_pa + relativedelta(years=1)
+            except Exception:
+                from datetime import timedelta
+                _terme_pa = _deff_pa.replace(year=_deff_pa.year+1)
+
+            with c2:
+                st.markdown(f"""
+                <div style="background:{GREEN}10;border:1px solid {GREEN};border-radius:8px;
+                     padding:10px 14px;margin-top:4px">
+                  <div style="font-size:9px;color:#888;text-transform:uppercase">Date terme (auto)</div>
+                  <div style="font-size:16px;font-weight:800;color:{NAVY}">{_terme_pa.strftime('%d/%m/%Y')}</div>
+                  <div style="font-size:10px;color:#888">Date effet + 1 an</div>
+                </div>""", unsafe_allow_html=True)
+
+            st.session_state["f_duree"] = 1
+            st.session_state["f_terme_auto"] = str(_terme_pa)
+
+            # Récap prime + capital déjà choisis à l'étape 1
+            _prime_pa = st.session_state.get("f_coti", 600)
+            _cap_pa   = st.session_state.get("f_cap", 100_000)
+            st.markdown(f"""
+            <div style="background:{RED}08;border:1.5px solid {RED};border-radius:10px;
+                 padding:12px 16px;margin:12px 0;display:flex;gap:24px;align-items:center">
+              <div>
+                <div style="font-size:9px;color:#888;text-transform:uppercase">Prime annuelle</div>
+                <div style="font-size:18px;font-weight:800;color:{RED}">{_prime_pa:,} FCFA</div>
+              </div>
+              <div>
+                <div style="font-size:9px;color:#888;text-transform:uppercase">Capital garanti</div>
+                <div style="font-size:18px;font-weight:800;color:{NAVY}">{_cap_pa:,} FCFA</div>
+              </div>
+            </div>""", unsafe_allow_html=True)
+
+            # Mode de règlement
+            section("Mode de règlement")
+            m_o=["","Mobile Monnaie","Par chèque","Par virement bancaire","Par Espèce"]
+            cur_m=st.session_state.get("f_mode","")
+            st.session_state["f_mode"]=st.radio("Mode *",m_o,horizontal=True,
+                index=m_o.index(cur_m) if cur_m in m_o else 0, key="mode_r_pa",
+                format_func=lambda x:"— Choisir —" if x=="" else x)
+            if st.session_state["f_mode"]:
+                ref_l={"Mobile Monnaie":"📱 N° Tel Mobile Money","Par chèque":"📄 N° Chèque",
+                       "Par virement bancaire":"🏦 N° Compte","Par Espèce":"💵 Référence reçu"}.get(
+                       st.session_state["f_mode"],"Référence")
+                ti("f_mref", ref_l)
+
+            b1,b2=st.columns(2)
+            if b1.button("← Retour"): st.session_state["bia_step"]=4; st.rerun()
+            if b2.button("Suivant ▶", type="primary"): st.session_state["bia_step"]=6; st.rerun()
+            # Sortir du elif/else normal
+            st.stop() if False else None
 
         # ══════════════════════════════════════════════════════════════════════
         # AVIGBO — barème fixe, 3 options, durée libre
