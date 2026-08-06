@@ -3413,160 +3413,185 @@ elif "Saisie BIA" in page:
     kpi(c2,"Validés",str(nb_val),f"{nb_val/max(nb_bia,1)*100:.0f}%","",icon="✅")
     kpi(c3,"Cotisations",fmt(cot_tot),"Total FCFA","blue",icon="💰")
 
-    # ── Étape 1 : Sélection du produit ────────────────────────────────────────
-    # COURTIER : ne voit que Prévoyance Auto (PA0)
+    # ── Étape 1 : Sélection du produit ─────────────────────────────────────────
     _is_crt_step = is_courtier(user)
+    GC = {"Groupe 1": RED, "Groupe 2": GREEN}   # défini AVANT tout usage
 
     if _is_crt_step:
-        # Sélection automatique PA0 pour les courtiers
+        # ── COURTIER : flux PA0 uniquement ───────────────────────────────────
         section("Prévoyance Auto — BIA","AFG ASSURANCES BÉNIN VIE")
-        # Champ courtier libre (nom ou sigle)
+
+        st.markdown(f"""
+        <div style="background:linear-gradient(135deg,{RED}18,{AMBER}10);
+             border:1.5px solid {RED};border-radius:12px;padding:14px 18px;margin:10px 0">
+          <div style="font-size:11px;font-weight:800;color:{RED};text-transform:uppercase;
+               letter-spacing:.06em;margin-bottom:10px">Prévoyance Auto — Barème</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+            <div style="background:white;border-radius:8px;padding:10px;text-align:center">
+              <div style="font-size:10px;color:#888">Prime annuelle</div>
+              <div style="font-size:15px;font-weight:800;color:{RED}">500 FCFA</div>
+              <div style="font-size:11px;color:{NAVY};font-weight:700">→ 100 000 FCFA</div>
+            </div>
+            <div style="background:white;border-radius:8px;padding:10px;text-align:center">
+              <div style="font-size:10px;color:#888">Prime annuelle</div>
+              <div style="font-size:15px;font-weight:800;color:{RED}">1 000 FCFA</div>
+              <div style="font-size:11px;color:{NAVY};font-weight:700">→ 225 000 FCFA</div>
+            </div>
+            <div style="background:white;border-radius:8px;padding:10px;text-align:center">
+              <div style="font-size:10px;color:#888">Prime annuelle</div>
+              <div style="font-size:15px;font-weight:800;color:{RED}">1 500 FCFA</div>
+              <div style="font-size:11px;color:{NAVY};font-weight:700">→ 350 000 FCFA</div>
+            </div>
+            <div style="background:white;border-radius:8px;padding:10px;text-align:center">
+              <div style="font-size:10px;color:#888">Prime annuelle</div>
+              <div style="font-size:15px;font-weight:800;color:{RED}">2 000 FCFA</div>
+              <div style="font-size:11px;color:{NAVY};font-weight:700">→ 500 000 FCFA</div>
+            </div>
+          </div>
+        </div>""", unsafe_allow_html=True)
+
         _nom_courtier = st.text_input(
-            "🏢 Courtier (nom ou sigle) *",
+            "Courtier (nom ou sigle)",
             value=st.session_state.get("f_courtier_nom",""),
-            placeholder="Ex: ATLANTIQUE COURTAGE, ABC...",
+            placeholder="Ex: ATLANTIQUE COURTAGE, ABC Assurances...",
             key="inp_courtier")
         st.session_state["f_courtier_nom"] = _nom_courtier
 
-        # Sélection du barème PA0
-        st.markdown(f"""
-        <div style="background:{RED}10;border:1.5px solid {RED};border-radius:10px;
-             padding:14px 16px;margin:10px 0">
-          <div style="font-size:10px;color:{RED};font-weight:700;text-transform:uppercase;
-               letter-spacing:.06em;margin-bottom:10px">Barème Prévoyance Auto</div>
-          <div style="font-size:12px;color:{NAVY};line-height:2">
-            500 FCFA/an → Capital <b>100 000 FCFA</b><br>
-            1 000 FCFA/an → Capital <b>225 000 FCFA</b><br>
-            1 500 FCFA/an → Capital <b>350 000 FCFA</b><br>
-            2 000 FCFA/an → Capital <b>500 000 FCFA</b>
-          </div>
-        </div>""", unsafe_allow_html=True)
+        # Logo du courtier — recherche via DuckDuckGo logo API
+        if _nom_courtier and len(_nom_courtier) >= 3:
+            _logo_q = _nom_courtier.strip().replace(" ", "+")
+            _logo_url = f"https://logo.clearbit.com/{_nom_courtier.lower().replace(' ','').replace('.','')+'.com'}"
+            _fallback  = f"https://ui-avatars.com/api/?name={_logo_q}&background=C0392B&color=fff&size=128&bold=true&format=png"
+            st.markdown(f"""
+            <div style="text-align:center;margin:8px 0 14px">
+              <img src="{_logo_url}"
+                   onerror="this.onerror=null;this.src='{_fallback}'"
+                   style="height:72px;object-fit:contain;border-radius:10px;
+                          box-shadow:0 2px 12px rgba(0,0,0,.12)"
+                   alt="{_nom_courtier}"/>
+              <div style="font-size:11px;color:#888;margin-top:5px">{_nom_courtier}</div>
+            </div>""", unsafe_allow_html=True)
 
-        _pa_opts = {
-            "500 FCFA/an → Capital 100 000 FCFA":  (500,  100_000),
-            "1 000 FCFA/an → Capital 225 000 FCFA": (1000, 225_000),
-            "1 500 FCFA/an → Capital 350 000 FCFA": (1500, 350_000),
-            "2 000 FCFA/an → Capital 500 000 FCFA": (2000, 500_000),
-        }
-        _pa_list = list(_pa_opts.keys())
-        _cur_pa  = st.session_state.get("f_pa_opt", _pa_list[0])
-        if _cur_pa not in _pa_list: _cur_pa = _pa_list[0]
-        _pa_sel  = st.radio("Prime annuelle *", _pa_list,
-                            index=_pa_list.index(_cur_pa), key="pa_bar_r")
-        st.session_state["f_pa_opt"] = _pa_sel
-        _pa_prime, _pa_capital = _pa_opts[_pa_sel]
-        st.session_state["f_coti"] = _pa_prime
-        st.session_state["f_cap"]  = _pa_capital
-        st.session_state["f_peri"] = "Annuelle"
-        st.session_state["f_gar"]  = "Avec garantie décès"
-        st.session_state["f_duree"] = 1
-
-        st.markdown(f"""
-        <div style="background:linear-gradient(135deg,{RED},{AMBER});border-radius:10px;
-             padding:12px 16px;margin:10px 0;display:flex;align-items:center;gap:20px">
-          <div>
-            <div style="color:rgba(255,255,255,.7);font-size:9px">PRIME ANNUELLE</div>
-            <div style="color:white;font-size:18px;font-weight:800">{_pa_prime:,} FCFA</div>
-          </div>
-          <div style="background:rgba(255,255,255,.2);width:1px;height:40px"></div>
-          <div>
-            <div style="color:rgba(255,255,255,.7);font-size:9px">CAPITAL GARANTI DÉCÈS</div>
-            <div style="color:white;font-size:18px;font-weight:800">{_pa_capital:,} FCFA</div>
-          </div>
-          <div style="background:rgba(255,255,255,.2);width:1px;height:40px"></div>
-
-        </div>""", unsafe_allow_html=True)
-
-        if not st.session_state.get("bia_prod"):
-            st.session_state["bia_prod"] = "PA0"
-            st.session_state["bia_step"] = 2
-            st.session_state["f_code_appo"] = _nom_courtier
-            st.session_state["f_nom_appo"]  = _nom_courtier
-
-        if st.button("▶ Saisir le BIA", type="primary", use_container_width=True, key="pa_go"):
+        if st.button("▶ Commencer la saisie BIA", type="primary",
+                     use_container_width=True, key="pa_go"):
             st.session_state["bia_prod"]    = "PA0"
             st.session_state["bia_step"]    = 2
+            st.session_state["f_peri"]      = "Annuelle"
+            st.session_state["f_gar"]       = "Avec garantie décès"
+            st.session_state["f_duree"]     = 1
             st.session_state["f_code_appo"] = _nom_courtier
             st.session_state["f_nom_appo"]  = _nom_courtier
             st.rerun()
 
-        if "bia_prod" not in st.session_state or st.session_state.get("bia_prod") != "PA0":
+        # Si BIA pas encore démarré → arrêter ici
+        if st.session_state.get("bia_prod") != "PA0":
             st.stop()
 
-        prod = next((p for p in PRODUITS if p["code"] == "PA0"), None)
-        gc   = RED
-        step = st.session_state.get("bia_step", 2)
-        is_avigbo = is_vigninou = is_deces = False
-        is_epargne = False
+        prod      = next(p for p in PRODUITS if p["code"] == "PA0")
+        gc        = RED
+        step      = st.session_state.get("bia_step", 2)
+        is_avigbo = is_vigninou = is_deces = is_epargne = False
+
     else:
+        # ── NON-COURTIER : sélection normale des produits ────────────────────
         section("Étape 1 — Sélection du produit","AFG ASSURANCES BÉNIN VIE")
-        GC={"Groupe 1":RED,"Groupe 2":GREEN}
 
-    # Groupe 1 — Décès (affiché uniquement pour non-courtiers)
-    if not _is_crt_step:
-     with st.expander("🛡️ Groupe 1 — Décès & Vie", expanded=True):
-        col_a, col_b = st.columns(2)
-        # AVIGBO
-        with col_a:
-            st.markdown(f"""<div style="border:2px solid {RED}44;border-radius:10px;padding:12px 14px;margin-bottom:6px">
-              <span style="background:{RED};color:white;font-size:9px;font-weight:700;padding:2px 7px;border-radius:3px">221</span>
-              <div style="font-size:13px;font-weight:700;margin-top:6px;color:{NAVY}">ASSURTOUS AVIGBO</div>
-              <div style="font-size:11px;color:#666;margin-top:3px">Décès · Barème fixe</div>
-              <div style="font-size:10px;color:#888;margin-top:5px;line-height:1.6">
-                100 F/mois → Capital 100 000 F  (unique : 1 000 F)<br>
-                200 F/mois → Capital 200 000 F  (unique : 2 000 F)<br>
-                300 F/mois → Capital 300 000 F  (unique : 3 000 F)
-              </div>
+        with st.expander("🛡️ Groupe 1 — Décès & Vie", expanded=True):
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.markdown(f"""<div style="border:2px solid {RED}44;border-radius:10px;
+                  padding:12px 14px;margin-bottom:6px">
+                  <span style="background:{RED};color:white;font-size:9px;font-weight:700;
+                        padding:2px 7px;border-radius:3px">221</span>
+                  <div style="font-size:13px;font-weight:700;margin-top:6px;color:{NAVY}">ASSURTOUS AVIGBO</div>
+                  <div style="font-size:11px;color:#666;margin-top:3px">Décès · Barème fixe</div>
+                  <div style="font-size:10px;color:#888;margin-top:5px;line-height:1.7">
+                    100 F/mois → Capital 100 000 F  (unique : 1 000 F)<br>
+                    200 F/mois → Capital 200 000 F  (unique : 2 000 F)<br>
+                    300 F/mois → Capital 300 000 F  (unique : 3 000 F)
+                  </div></div>""", unsafe_allow_html=True)
+                if st.button("Choisir AVIGBO (221)", key="bp_221", use_container_width=True):
+                    st.session_state["bia_prod"]="221"
+                    st.session_state["bia_step"]=2; st.rerun()
+            with col_b:
+                st.markdown(f"""<div style="border:2px solid {RED}44;border-radius:10px;
+                  padding:12px 14px;margin-bottom:6px">
+                  <span style="background:{RED};color:white;font-size:9px;font-weight:700;
+                        padding:2px 7px;border-radius:3px">220</span>
+                  <div style="font-size:13px;font-weight:700;margin-top:6px;color:{NAVY}">ASSURTOUS VIGNINOU</div>
+                  <div style="font-size:11px;color:#666;margin-top:3px">Décès · Durée max 12 mois · Barème fixe</div>
+                  <div style="font-size:10px;color:#888;margin-top:5px;line-height:1.7">
+                    400 F/mois → Capital 500 000 F  (unique : 48 000 F)<br>
+                    800 F/mois → Capital 1 000 000 F (unique : 96 000 F)<br>
+                    1 200 F/mois → Capital 1 500 000 F (unique : 144 000 F)
+                  </div></div>""", unsafe_allow_html=True)
+                if st.button("Choisir VIGNINOU (220)", key="bp_220", use_container_width=True):
+                    st.session_state["bia_prod"]="220"
+                    st.session_state["bia_step"]=2; st.rerun()
+
+        with st.expander("💰 Groupe 2 — Épargne & Capitalisation", expanded=True):
+            st.markdown(f"""<div style="border:2px solid {GREEN}44;border-radius:10px;
+              padding:12px 14px;margin-bottom:6px">
+              <span style="background:{GREEN};color:white;font-size:9px;font-weight:700;
+                    padding:2px 7px;border-radius:3px">EP0</span>
+              <div style="font-size:13px;font-weight:700;margin-top:6px;color:{NAVY}">Épargne</div>
+              <div style="font-size:11px;color:#666;margin-top:3px">Épargne vie · Périodicité libre · Capital calculé à la souscription</div>
+              <div style="font-size:10px;color:#888;margin-top:5px">
+                Périodicités : Journalière · Hebdomadaire · Mensuelle · Trimestrielle · Semestrielle · Annuelle · Unique<br>
+                Chargements : 1% acquisition + 0.5% gestion · Taux technique : 3.5%
+              </div></div>""", unsafe_allow_html=True)
+            if st.button("Choisir Épargne", key="bp_EP0", use_container_width=True):
+                st.session_state["bia_prod"]="EP0"
+                st.session_state["bia_step"]=2; st.rerun()
+
+        if "bia_prod" not in st.session_state:
+            alert("Sélectionnez un produit pour afficher le formulaire BIA.","info")
+            st.stop()
+
+        prod = next((p for p in PRODUITS if p["code"]==st.session_state.get("bia_prod")), None)
+        if not prod:
+            st.session_state.pop("bia_prod", None); st.rerun()
+
+        gc        = GC.get(prod["grp"], BLUE)
+        step      = st.session_state.get("bia_step", 2)
+        is_avigbo   = prod["code"] == "221"
+        is_vigninou = prod["code"] == "220"
+        is_deces    = prod["code"] in ("220", "221")
+        is_epargne  = prod["code"] == "EP0"
+
+    # ── Logo courtier affiché en haut ────────────────────────────────────────
+    if _is_crt_step:
+        _crt_n = st.session_state.get("f_courtier_nom","")
+        if _crt_n and len(_crt_n) >= 3:
+            _logo_u = f"https://logo.clearbit.com/{_crt_n.lower().replace(' ','').replace('.','')+'.com'}"
+            _fallback_u = f"https://ui-avatars.com/api/?name={_crt_n.replace(' ','+')}&background=C0392B&color=fff&size=128&bold=true&format=png"
+            st.markdown(f"""
+            <div style="text-align:center;padding:10px 0 6px">
+              <img src="{_logo_u}"
+                   onerror="this.onerror=null;this.src='{_fallback_u}'"
+                   style="height:68px;object-fit:contain;border-radius:10px;
+                          box-shadow:0 2px 14px rgba(0,0,0,.13)"
+                   alt="{_crt_n}"/>
+              <div style="font-size:10px;color:#888;margin-top:4px;font-weight:600">{_crt_n}</div>
             </div>""", unsafe_allow_html=True)
-            if st.button("Choisir AVIGBO (221)", key="bp_221", use_container_width=True):
-                st.session_state["bia_prod"]="221"; st.session_state["bia_step"]=2; st.rerun()
-        # VIGNINOU
-        with col_b:
-            st.markdown(f"""<div style="border:2px solid {RED}44;border-radius:10px;padding:12px 14px;margin-bottom:6px">
-              <span style="background:{RED};color:white;font-size:9px;font-weight:700;padding:2px 7px;border-radius:3px">220</span>
-              <div style="font-size:13px;font-weight:700;margin-top:6px;color:{NAVY}">ASSURTOUS VIGNINOU</div>
-              <div style="font-size:11px;color:#666;margin-top:3px">Décès · Durée max 12 mois · Barème fixe</div>
-              <div style="font-size:10px;color:#888;margin-top:5px;line-height:1.6">
-                400 F/mois → Capital 500 000 F  (unique : 48 000 F)<br>
-                800 F/mois → Capital 1 000 000 F (unique : 96 000 F)<br>
-                1 200 F/mois → Capital 1 500 000 F (unique : 144 000 F)
-              </div>
-            </div>""", unsafe_allow_html=True)
-            if st.button("Choisir VIGNINOU (220)", key="bp_220", use_container_width=True):
-                st.session_state["bia_prod"]="220"; st.session_state["bia_step"]=2; st.rerun()
-
-    # Groupe 2 — Épargne
-    with st.expander("💰 Groupe 2 — Épargne & Capitalisation", expanded=True):
-        st.markdown(f"""<div style="border:2px solid {GREEN}44;border-radius:10px;padding:12px 14px;margin-bottom:6px">
-          <span style="background:{GREEN};color:white;font-size:9px;font-weight:700;padding:2px 7px;border-radius:3px">EP0</span>
-          <div style="font-size:13px;font-weight:700;margin-top:6px;color:{NAVY}">Épargne</div>
-          <div style="font-size:11px;color:#666;margin-top:3px">Épargne vie · Périodicité libre · Capital calculé à la souscription</div>
-          <div style="font-size:10px;color:#888;margin-top:5px">
-            Périodicités disponibles : Journalière · Hebdomadaire · Mensuelle · Trimestrielle · Semestrielle · Annuelle · Unique<br>
-            Chargements : 1% acquisition + 0.5% gestion · Taux technique : 3.5%
-          </div>
-        </div>""", unsafe_allow_html=True)
-        if st.button("Choisir Épargne", key="bp_EP0", use_container_width=True):
-            st.session_state["bia_prod"]="EP0"; st.session_state["bia_step"]=2; st.rerun()
-
-    if "bia_prod" not in st.session_state:
-        alert("Sélectionnez un produit pour afficher le formulaire BIA.","info"); st.stop()
-    prod=next((p for p in PRODUITS if p["code"]==st.session_state.get("bia_prod")),None)
-    if not prod: st.session_state.pop("bia_prod",None); st.rerun()
-    gc=GC.get(prod["grp"],BLUE); step=st.session_state.get("bia_step",2)
-    is_avigbo   = prod["code"]=="221"
-    is_vigninou = prod["code"]=="220"
-    is_deces    = prod["code"] in ("220","221")
-    is_epargne  = prod["code"]=="EP0"
 
     st.markdown(f"""<div style="background:{NAVY};border-radius:10px;padding:10px 16px;margin:10px 0;display:flex;align-items:center;justify-content:space-between">
       <div><div style="color:rgba(255,255,255,.45);font-size:9px;letter-spacing:.1em">BIA — BULLETIN INDIVIDUEL D'ADHÉSION</div>
       <div style="color:white;font-size:14px;font-weight:700">{prod['nom']}</div></div>
       <span style="background:{gc};color:white;font-size:12px;font-weight:700;padding:5px 12px;border-radius:6px">{prod['code']}</span>
     </div>""",unsafe_allow_html=True)
-    if st.button("↩️ Changer de produit",key="chg_p"): st.session_state.pop("bia_prod",None); st.session_state.pop("bia_step",None); st.rerun()
-    SLBL={2:"Identification",3:"Souscripteur",4:"Assuré",5:"Contrat",6:"Médical",7:"Validation"}
-    st.progress((step-2)/5,text=f"Étape {step-1}/6 — {SLBL.get(step,'')}")
+
+    if st.button("↩️ Changer de produit",key="chg_p"):
+        st.session_state.pop("bia_prod",None); st.session_state.pop("bia_step",None); st.rerun()
+
+    # Étapes selon le type d'utilisateur
+    if _is_crt_step:
+        # Courtier PA0 : 4 étapes (pas d'identification, pas de médical)
+        SLBL = {2:"Souscripteur", 3:"Bénéficiaires", 4:"Contrat", 5:"Validation"}
+        st.progress((step-2)/3, text=f"Étape {step-1}/4 — {SLBL.get(step,'')}")
+    else:
+        SLBL={2:"Identification",3:"Souscripteur",4:"Assuré",5:"Contrat",6:"Médical",7:"Validation"}
+        st.progress((step-2)/5,text=f"Étape {step-1}/6 — {SLBL.get(step,'')}")
     st.markdown("")
 
     def ti(k,lbl,ph="",t="text"):
@@ -3576,8 +3601,46 @@ elif "Saisie BIA" in page:
         st.session_state[k]=st.selectbox(lbl,opts,index=idx,key=f"s_{k}")
 
     if step==2:
-        section("Étape 2 — Identification & Agence")
-        c1,c2,c3=st.columns(3)
+        if _is_crt_step:
+            # COURTIER PA0 — Étape 1/4 : Souscripteur / Assuré
+            section("Étape 1 / 4 — Souscripteur / Assuré","PRÉVOYANCE AUTO")
+            c1,c2,c3 = st.columns([1,2,2])
+            with c1: si("f_c_tit","Civilité *",["","M.","Mme","Mlle"])
+            with c2: ti("f_c_nom","Nom *","NOM EN MAJUSCULES")
+            with c3: ti("f_c_prn","Prénoms *","Prénoms")
+            c4,c5,c6 = st.columns(3)
+            with c4:
+                cur_d = st.session_state.get("f_c_ddn", date(1985,1,1))
+                if isinstance(cur_d,str):
+                    try: cur_d = date.fromisoformat(cur_d)
+                    except: cur_d = date(1985,1,1)
+                st.session_state["f_c_ddn"] = st.date_input(
+                    "Date de naissance *", value=cur_d,
+                    min_value=date(1930,1,1), max_value=today, key="ddn_c_pa")
+            with c5: ti("f_c_lieu","Lieu de naissance","Cotonou")
+            with c6: ti("f_c_nat","Nationalité","Béninoise")
+            if not st.session_state.get("f_c_nat"): st.session_state["f_c_nat"]="Béninoise"
+            c7,c8 = st.columns(2)
+            with c7: ti("f_c_prof","Profession")
+            with c8: ti("f_c_adr","Adresse / Quartier")
+            c9,c10 = st.columns(2)
+            with c9: ti("f_c_tel","Téléphone *","+229 97…")
+            with c10: ti("f_c_wapp","WhatsApp","+229 97…")
+            ti("f_c_npi","N° NPI / Passeport")
+            st.session_state["f_ass_meme"] = True  # souscripteur = assuré pour PA0
+            st.markdown("")
+            b1,b2 = st.columns(2)
+            if b1.button("← Retour", key="ret2_pa"):
+                st.session_state.pop("bia_prod",None)
+                st.session_state.pop("bia_step",None); st.rerun()
+            if b2.button("Suivant ▶", type="primary", key="nxt2_pa"):
+                if not st.session_state.get("f_c_nom","").strip():
+                    st.error("Le nom est obligatoire.")
+                else:
+                    st.session_state["bia_step"] = 3; st.rerun()
+        else:
+            section("Étape 2 — Identification & Agence")
+            c1,c2,c3=st.columns(3)
         with c1: si("f_agence","Agence",AGENCES)
         with c2: ti("f_code_appo","Code apporteur","Ex : AFG001")
         with c3: ti("f_nom_appo","Nom apporteur")
@@ -3588,8 +3651,30 @@ elif "Saisie BIA" in page:
         if st.button("Suivant ▶",type="primary"): st.session_state["bia_step"]=3; st.rerun()
 
     elif step==3:
-        section("Étape 3 — Souscripteur / Contractant")
-        c1,c2,c3=st.columns([1,2,2])
+        if _is_crt_step:
+            # COURTIER PA0 — Étape 2/4 : Bénéficiaires (optionnel)
+            section("Étape 2 / 4 — Bénéficiaires","OPTIONNEL — vous pouvez passer cette étape")
+            st.info("Les informations bénéficiaires sont optionnelles pour ce produit.")
+            section("Bénéficiaires")
+            _bc_opts = ["Oui","Non"]
+            _cur_bc  = "Oui" if st.session_state.get("f_bc", True) else "Non"
+            _bc_sel  = st.radio("Le conjoint est bénéficiaire ?",
+                                _bc_opts, horizontal=True,
+                                index=_bc_opts.index(_cur_bc), key="bc_r_pa")
+            st.session_state["f_bc"] = (_bc_sel == "Oui")
+            ti("f_ba","Autres bénéficiaires (nom, lien de parenté)","Ex: Jean MARTIN, fils")
+            st.markdown("")
+            b1,b2,b3 = st.columns(3)
+            if b1.button("← Retour", key="ret3_pa"):
+                st.session_state["bia_step"] = 2; st.rerun()
+            if b3.button("Suivant ▶", type="primary", key="nxt3_pa"):
+                st.session_state["bia_step"] = 4; st.rerun()
+            if b2.button("Passer cette étape", key="skip3_pa"):
+                st.session_state["f_bc"] = True
+                st.session_state["bia_step"] = 4; st.rerun()
+        else:
+            section("Étape 3 — Souscripteur / Contractant")
+            c1,c2,c3=st.columns([1,2,2])
         with c1: si("f_c_tit","Civilité *",["","M.","Mme","Mlle"])
         with c2: ti("f_c_nom","Nom *","NOM (majuscules)")
         with c3: ti("f_c_prn","Prénoms *")
@@ -3623,17 +3708,12 @@ elif "Saisie BIA" in page:
             else: st.session_state["bia_step"]=4; st.rerun()
 
     elif step==4:
-        section("Étape 4 — Assuré(e) & Bénéficiaires")
-        # PA0 : bénéficiaires optionnels — bouton pour passer directement
-        if prod["code"] == "PA0":
-            alert("Les informations bénéficiaires sont optionnelles pour ce produit.", "info")
-            _b1, _b2, _b3 = st.columns(3)
-            if _b1.button("← Retour", key="ret_4_pa"):
-                st.session_state["bia_step"] = 3; st.rerun()
-            if _b3.button("Passer cette étape ▶", key="skip_4_pa", type="primary"):
-                st.session_state["f_bc"] = True
-                st.session_state["bia_step"] = 5; st.rerun()
-            st.markdown("---")
+        if _is_crt_step:
+            # COURTIER PA0 — Étape 3/4 : Caractéristiques du contrat
+            # Rediriger vers step==5 où est défini le bloc PA0 contrat
+            st.session_state["bia_step"] = 5; st.rerun()
+        if not _is_crt_step:
+            section("Étape 4 — Assuré(e) & Bénéficiaires")
         if st.session_state.get("f_ass_meme",True):
             st.success(f"✅ Assuré(e) = {st.session_state.get('f_c_tit','')} {st.session_state.get('f_c_nom','').upper()} {st.session_state.get('f_c_prn','')} — reprises du souscripteur.")
         else:
@@ -3671,70 +3751,97 @@ elif "Saisie BIA" in page:
         # ══ PA0 — Prévoyance Auto ══════════════════════════════════════════
         if prod["code"] == "PA0":
             from dateutil.relativedelta import relativedelta
-            section("Étape 5 — Caractéristiques du Contrat")
-            alert("Prévoyance Auto · Date terme = Date effet + 1 an (calculée automatiquement)","info")
+            section("Étape 5 — Caractéristiques du Contrat","PRÉVOYANCE AUTO")
 
-            c1, c2 = st.columns(2)
-            with c1:
-                st.session_state["f_deff"] = st.date_input(
-                    "Date d'effet *", value=cur_e, key="eff_d_pa")
-            # Date terme = date effet + 1 an (automatique)
-            _deff_pa  = st.session_state["f_deff"]
-            if isinstance(_deff_pa, str):
-                try: _deff_pa = date.fromisoformat(_deff_pa)
-                except: _deff_pa = today
-            try:
-                _terme_pa = _deff_pa + relativedelta(years=1)
-            except Exception:
-                from datetime import timedelta
-                _terme_pa = _deff_pa.replace(year=_deff_pa.year+1)
+            # ── Sélection de la prime (ici, dans l'ordre du BIA) ─────────────
+            _pa_opts = {
+                "500 FCFA":   (500,   100_000),
+                "1 000 FCFA": (1000,  225_000),
+                "1 500 FCFA": (1500,  350_000),
+                "2 000 FCFA": (2000,  500_000),
+            }
+            _pa_labels = list(_pa_opts.keys())
+            _cur_lbl   = st.session_state.get("f_pa_lbl", _pa_labels[0])
+            if _cur_lbl not in _pa_labels: _cur_lbl = _pa_labels[0]
 
-            with c2:
-                st.markdown(f"""
-                <div style="background:{GREEN}10;border:1px solid {GREEN};border-radius:8px;
-                     padding:10px 14px;margin-top:4px">
-                  <div style="font-size:9px;color:#888;text-transform:uppercase">Date terme (auto)</div>
-                  <div style="font-size:16px;font-weight:800;color:{NAVY}">{_terme_pa.strftime('%d/%m/%Y')}</div>
-                  <div style="font-size:10px;color:#888">Date effet + 1 an</div>
-                </div>""", unsafe_allow_html=True)
+            st.markdown(f"<div style='font-size:12px;font-weight:700;color:{NAVY};margin-bottom:6px'>Prime annuelle *</div>", unsafe_allow_html=True)
+            _pa_sel = st.radio("Prime annuelle",
+                               _pa_labels,
+                               index=_pa_labels.index(_cur_lbl),
+                               horizontal=True,
+                               key="pa_prime_r5",
+                               label_visibility="collapsed")
+            st.session_state["f_pa_lbl"] = _pa_sel
+            _pa_prime, _pa_capital       = _pa_opts[_pa_sel]
+            st.session_state["f_coti"]   = _pa_prime
+            st.session_state["f_cap"]    = _pa_capital
 
-            st.session_state["f_duree"] = 1
-            st.session_state["f_terme_auto"] = str(_terme_pa)
-
-            # Récap prime + capital déjà choisis à l'étape 1
-            _prime_pa = st.session_state.get("f_coti", 600)
-            _cap_pa   = st.session_state.get("f_cap", 100_000)
+            # Badge prime → capital
             st.markdown(f"""
-            <div style="background:{RED}08;border:1.5px solid {RED};border-radius:10px;
-                 padding:12px 16px;margin:12px 0;display:flex;gap:24px;align-items:center">
+            <div style="background:linear-gradient(135deg,{RED},{AMBER});border-radius:10px;
+                 padding:12px 18px;margin:10px 0;display:flex;gap:24px;align-items:center">
               <div>
-                <div style="font-size:9px;color:#888;text-transform:uppercase">Prime annuelle</div>
-                <div style="font-size:18px;font-weight:800;color:{RED}">{_prime_pa:,} FCFA</div>
+                <div style="color:rgba(255,255,255,.7);font-size:9px;text-transform:uppercase">Prime annuelle</div>
+                <div style="color:white;font-size:20px;font-weight:800">{_pa_prime:,} FCFA</div>
               </div>
+              <div style="background:rgba(255,255,255,.25);width:1px;height:44px"></div>
               <div>
-                <div style="font-size:9px;color:#888;text-transform:uppercase">Capital garanti</div>
-                <div style="font-size:18px;font-weight:800;color:{NAVY}">{_cap_pa:,} FCFA</div>
+                <div style="color:rgba(255,255,255,.7);font-size:9px;text-transform:uppercase">Capital garanti décès</div>
+                <div style="color:white;font-size:20px;font-weight:800">{_pa_capital:,} FCFA</div>
               </div>
             </div>""", unsafe_allow_html=True)
 
-            # Mode de règlement
-            section("Mode de règlement")
-            m_o=["","Mobile Monnaie","Par chèque","Par virement bancaire","Par Espèce"]
-            cur_m=st.session_state.get("f_mode","")
-            st.session_state["f_mode"]=st.radio("Mode *",m_o,horizontal=True,
-                index=m_o.index(cur_m) if cur_m in m_o else 0, key="mode_r_pa",
-                format_func=lambda x:"— Choisir —" if x=="" else x)
-            if st.session_state["f_mode"]:
-                ref_l={"Mobile Monnaie":"📱 N° Tel Mobile Money","Par chèque":"📄 N° Chèque",
-                       "Par virement bancaire":"🏦 N° Compte","Par Espèce":"💵 Référence reçu"}.get(
-                       st.session_state["f_mode"],"Référence")
-                ti("f_mref", ref_l)
+            # ── Date d'effet + terme automatique ─────────────────────────────
+            c1, c2 = st.columns(2)
+            with c1:
+                _d_eff = st.date_input("Date d'effet *", value=cur_e, key="eff_d_pa")
+                st.session_state["f_deff"] = _d_eff
+            _deff_pa = _d_eff if isinstance(_d_eff, date) else today
+            try:
+                _terme_pa = _deff_pa + relativedelta(years=1)
+            except Exception:
+                _terme_pa = _deff_pa.replace(year=_deff_pa.year+1)
+            st.session_state["f_terme_auto"] = str(_terme_pa)
+            st.session_state["f_duree"]      = 1
 
-            b1,b2=st.columns(2)
-            if b1.button("← Retour"): st.session_state["bia_step"]=4; st.rerun()
-            if b2.button("Suivant ▶", type="primary"): st.session_state["bia_step"]=6; st.rerun()
-            # Sortir du elif/else normal
-            st.stop() if False else None
+            with c2:
+                st.markdown(f"""
+                <div style="background:{GREEN}12;border:1.5px solid {GREEN};border-radius:8px;
+                     padding:10px 14px;margin-top:4px">
+                  <div style="font-size:9px;color:#888;text-transform:uppercase">Date terme (automatique)</div>
+                  <div style="font-size:18px;font-weight:800;color:{NAVY}">{_terme_pa.strftime("%d/%m/%Y")}</div>
+                  <div style="font-size:10px;color:{GREEN}">Date d'effet + 1 an</div>
+                </div>""", unsafe_allow_html=True)
+
+            # ── Mode de règlement ─────────────────────────────────────────────
+            st.markdown("---")
+            st.markdown(f"<div style='font-size:12px;font-weight:700;color:{NAVY};margin-bottom:6px'>Mode de règlement *</div>", unsafe_allow_html=True)
+            _modes = ["Mobile Monnaie","Par chèque","Par virement bancaire","Par Espèce"]
+            _cur_m = st.session_state.get("f_mode", _modes[0])
+            if _cur_m not in _modes: _cur_m = _modes[0]
+            st.session_state["f_mode"] = st.radio(
+                "Mode", _modes, horizontal=True,
+                index=_modes.index(_cur_m), key="mode_r_pa",
+                label_visibility="collapsed")
+            _ref_labels = {
+                "Mobile Monnaie":       "N° Téléphone Mobile Money",
+                "Par chèque":           "N° Chèque",
+                "Par virement bancaire":"N° Compte bancaire",
+                "Par Espèce":           "Référence reçu",
+            }
+            ti("f_mref", _ref_labels.get(st.session_state["f_mode"], "Référence"))
+
+            st.markdown("")
+            st.markdown("")
+            b1, b2 = st.columns(2)
+            if b1.button("← Retour", key="ret5_pa"):
+                # Courtier : retour à l'étape bénéficiaires (step 3)
+                # Autres : retour à l'étape assuré (step 4)
+                st.session_state["bia_step"] = 3 if _is_crt_step else 4; st.rerun()
+            if b2.button("Suivant ▶", type="primary", key="nxt5_pa"):
+                # Courtier : aller à la validation (step 5)
+                # Autres : aller au médical (step 6)
+                st.session_state["bia_step"] = 5 if _is_crt_step else 6; st.rerun()
 
         # ══════════════════════════════════════════════════════════════════════
         # AVIGBO — barème fixe, 3 options, durée libre
@@ -3911,10 +4018,13 @@ elif "Saisie BIA" in page:
             ti("f_mref",ref_l)
 
         b1,b2=st.columns(2)
-        if b1.button("← Retour"): st.session_state["bia_step"]=4; st.rerun()
-        if b2.button("Suivant ▶",type="primary"): st.session_state["bia_step"]=6; st.rerun()
+        if b1.button("← Retour", key="ret5_gen"): st.session_state["bia_step"]=4; st.rerun()
+        if b2.button("Suivant ▶",type="primary", key="nxt5_gen"): st.session_state["bia_step"]=6; st.rerun()
 
     elif step==6:
+        # Courtier PA0 : pas de questionnaire médical → rediriger vers validation
+        if _is_crt_step:
+            st.session_state["bia_step"] = 7; st.rerun()
         section("Étape 6 — Questionnaire Médical CIMA")
         alert("Art. 18 CIMA : Toute fausse déclaration est sanctionnée par la nullité du contrat.","warn")
         c1,c2,c3=st.columns(3)
@@ -3945,8 +4055,11 @@ elif "Saisie BIA" in page:
         if b1.button("← Retour"): st.session_state["bia_step"]=5; st.rerun()
         if b2.button("Suivant ▶",type="primary"): st.session_state["bia_step"]=7; st.rerun()
 
-    elif step==7:
-        section("Étape 7 — Déclaration & Validation")
+    elif step==7 or (step==5 and _is_crt_step):
+        if _is_crt_step:
+            section("Étape 4 / 4 — Déclaration & Validation","PRÉVOYANCE AUTO")
+        else:
+            section("Étape 7 — Déclaration & Validation")
         st.markdown("""<div style="background:#f8f9fa;border:1px solid #ddd;border-radius:8px;padding:12px;
             font-size:11px;line-height:1.8;max-height:120px;overflow-y:auto;margin-bottom:12px">
             Je reconnais avoir reçu la notice d'information du produit et les conditions générales.
@@ -4042,7 +4155,7 @@ elif "Saisie BIA" in page:
                 return data["numero_bia"]
             return None
         b1,b2,b3=st.columns([1,1,1.4])
-        if b1.button("← Retour"): st.session_state["bia_step"]=6; st.rerun()
+        if b1.button("← Retour", key=f"ret7_{4157}"): st.session_state["bia_step"] = 4 if _is_crt_step else 6; st.rerun()
         if b2.button("💾 Brouillon"):
             num=save_bia("Brouillon")
             if num: st.info(f"💾 Brouillon **{num}** enregistré. Retrouvez-le dans la Base BIA.")
@@ -4719,20 +4832,6 @@ elif "Saisie BIA" in page:
             if st.button("Choisir VIGNINOU (220)", key="bp_220", use_container_width=True):
                 st.session_state["bia_prod"]="220"; st.session_state["bia_step"]=2; st.rerun()
 
-    # Groupe 2 — Épargne
-    with st.expander("💰 Groupe 2 — Épargne & Capitalisation", expanded=True):
-        st.markdown(f"""<div style="border:2px solid {GREEN}44;border-radius:10px;padding:12px 14px;margin-bottom:6px">
-          <span style="background:{GREEN};color:white;font-size:9px;font-weight:700;padding:2px 7px;border-radius:3px">EP0</span>
-          <div style="font-size:13px;font-weight:700;margin-top:6px;color:{NAVY}">Épargne</div>
-          <div style="font-size:11px;color:#666;margin-top:3px">Épargne vie · Périodicité libre · Capital calculé à la souscription</div>
-          <div style="font-size:10px;color:#888;margin-top:5px">
-            Périodicités disponibles : Journalière · Hebdomadaire · Mensuelle · Trimestrielle · Semestrielle · Annuelle · Unique<br>
-            Chargements : 1% acquisition + 0.5% gestion · Taux technique : 3.5%
-          </div>
-        </div>""", unsafe_allow_html=True)
-        if st.button("Choisir Épargne", key="bp_EP0", use_container_width=True):
-            st.session_state["bia_prod"]="EP0"; st.session_state["bia_step"]=2; st.rerun()
-
     if "bia_prod" not in st.session_state:
         alert("Sélectionnez un produit pour afficher le formulaire BIA.","info"); st.stop()
     prod=next((p for p in PRODUITS if p["code"]==st.session_state.get("bia_prod")),None)
@@ -5148,7 +5247,7 @@ elif "Saisie BIA" in page:
                 return data["numero_bia"]
             return None
         b1,b2,b3=st.columns([1,1,1.4])
-        if b1.button("← Retour"): st.session_state["bia_step"]=6; st.rerun()
+        if b1.button("← Retour", key=f"ret7_{5249}"): st.session_state["bia_step"] = 4 if _is_crt_step else 6; st.rerun()
         if b2.button("💾 Brouillon"):
             num=save_bia("Brouillon")
             if num: st.info(f"💾 Brouillon **{num}** enregistré. Retrouvez-le dans la Base BIA.")
