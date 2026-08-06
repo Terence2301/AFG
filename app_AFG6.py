@@ -3586,12 +3586,17 @@ elif "Saisie BIA" in page:
 
     # Étapes selon le type d'utilisateur
     if _is_crt_step:
-        # Courtier PA0 : 4 étapes (pas d'identification, pas de médical)
-        SLBL = {2:"Souscripteur", 3:"Bénéficiaires", 4:"Contrat", 5:"Validation"}
-        st.progress((step-2)/3, text=f"Étape {step-1}/4 — {SLBL.get(step,'')}")
+        # Courtier PA0 : 4 étapes réelles → steps 2,3,5,7 (les autres sont skippés)
+        # Mapping step → numéro d'étape affiché
+        _crt_map = {2: (1,4,"Souscripteur"), 3: (2,4,"Bénéficiaires"),
+                    5: (3,4,"Contrat"),       7: (4,4,"Validation")}
+        _crt_num, _crt_tot, _crt_lbl = _crt_map.get(step, (1,4,""))
+        _prog_val = min(max((_crt_num - 1) / (_crt_tot - 1), 0.0), 1.0)
+        st.progress(_prog_val, text=f"Étape {_crt_num}/{_crt_tot} — {_crt_lbl}")
     else:
         SLBL={2:"Identification",3:"Souscripteur",4:"Assuré",5:"Contrat",6:"Médical",7:"Validation"}
-        st.progress((step-2)/5,text=f"Étape {step-1}/6 — {SLBL.get(step,'')}")
+        _prog_gen = min(max((step-2)/5, 0.0), 1.0)
+        st.progress(_prog_gen, text=f"Étape {step-1}/6 — {SLBL.get(step,'')}")
     st.markdown("")
 
     def ti(k,lbl,ph="",t="text"):
@@ -4021,37 +4026,93 @@ elif "Saisie BIA" in page:
 
     elif step==7 or (step==5 and _is_crt_step):
         if _is_crt_step:
-            section("Étape 4 / 4 — Déclaration & Validation","PRÉVOYANCE AUTO")
+            section("Étape 4 / 4 — Signatures & Validation","PRÉVOYANCE AUTO")
         else:
             section("Étape 7 — Déclaration & Validation")
-        st.markdown("""<div style="background:#f8f9fa;border:1px solid #ddd;border-radius:8px;padding:12px;
-            font-size:11px;line-height:1.8;max-height:120px;overflow-y:auto;margin-bottom:12px">
-            Je reconnais avoir reçu la notice d'information du produit et les conditions générales.
-            Je certifie exactes et sincères toutes les informations renseignées.
-            Conformément à l'article 18 du code CIMA, toute fausse déclaration
-            entraîne la nullité du contrat.</div>""",unsafe_allow_html=True)
-        st.session_state["f_dc"]=st.checkbox("☑ J'accepte les conditions de souscription *",value=st.session_state.get("f_dc",False))
-        st.session_state["f_dd"]=st.checkbox("☑ J'accepte la politique de protection des données *",value=st.session_state.get("f_dd",False))
-        c1,c2=st.columns(2)
-        stat_o=["Brouillon","En cours","Validé"]
-        cur_st=st.session_state.get("f_stat","Brouillon")
-        st.session_state["f_stat"]=c1.selectbox("Statut",stat_o,index=stat_o.index(cur_st) if cur_st in stat_o else 0,key="stat_s")
-        st.session_state["f_obs"]=c2.text_input("Observations",value=st.session_state.get("f_obs",""),key="obs_t")
-        with st.expander("📋 Récapitulatif complet", expanded=True):
-            cap_recap = int(st.session_state.get("f_cap",0))
-            dur_recap = st.session_state.get("f_duree",1)
-            # Pour VIGNINOU, afficher la durée en mois
-            dur_label = f"{st.session_state.get('f_duree_mois_v',12)} mois" if is_vigninou else f"{dur_recap} an(s)"
+
+        # ── Récapitulatif compact ─────────────────────────────────────────────
+        with st.expander("📋 Récapitulatif du contrat", expanded=True):
+            _cap_r = int(st.session_state.get("f_cap", 0))
+            _dur_r = st.session_state.get("f_duree", 1)
+            _dur_l = (f"{st.session_state.get('f_duree_mois_v',12)} mois"
+                      if is_vigninou else f"{_dur_r} an(s)")
+            _terme_r = st.session_state.get("f_terme_auto","")
             st.markdown(f"""| Champ | Valeur |
 |---|---|
 |**Souscripteur**|{st.session_state.get('f_c_tit','')} {st.session_state.get('f_c_nom','').upper()} {st.session_state.get('f_c_prn','')}|
-|**Produit**|{prod['nom']} — code {prod['code']}|
-|**Cotisation**|{st.session_state.get('f_coti',0):,} FCFA / {st.session_state.get('f_peri','—')}|
-|**Capital garanti / au terme**|**{cap_recap:,} FCFA**|
+|**Produit**|{prod['nom']} — {prod['code']}|
+|**Prime / Cotisation**|{int(st.session_state.get('f_coti',0)):,} FCFA / {st.session_state.get('f_peri','—')}|
+|**Capital garanti**|**{_cap_r:,} FCFA**|
 |**Date d'effet**|{ds(st.session_state.get('f_deff',today))}|
-|**Durée**|{dur_label}|
+|**Date terme**|{_terme_r if _terme_r else _dur_l}|
 |**Mode règlement**|{st.session_state.get('f_mode','—')}|
-|**Option garantie**|{st.session_state.get('f_gar','—')}|""")
+|**Apporteur / Courtier**|{st.session_state.get('f_nom_appo','—')}|""")
+
+        st.markdown("---")
+
+        # ── Déclaration ───────────────────────────────────────────────────────
+        st.markdown("""<div style="background:#f8f9fa;border:1px solid #ddd;border-radius:8px;
+            padding:12px;font-size:11px;line-height:1.8;margin-bottom:12px">
+            Je reconnais avoir reçu la notice d'information du produit et les conditions générales.
+            Je certifie exactes et sincères toutes les informations renseignées.
+            Conformément à l'article 18 du code CIMA, toute fausse déclaration
+            entraîne la nullité du contrat.</div>""", unsafe_allow_html=True)
+
+        st.session_state["f_dc"] = st.checkbox(
+            "☑ J'accepte les conditions de souscription *",
+            value=st.session_state.get("f_dc", False), key="chk_dc")
+        st.session_state["f_dd"] = st.checkbox(
+            "☑ J'accepte la politique de protection des données *",
+            value=st.session_state.get("f_dd", False), key="chk_dd")
+
+        st.markdown("---")
+
+        # ── Signatures ────────────────────────────────────────────────────────
+        section("Signatures")
+        st.markdown(f"""
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:10px 0">
+          <div style="border:1.5px dashed #888;border-radius:8px;padding:14px;
+               min-height:90px;text-align:center;background:#fafafa">
+            <div style="font-size:10px;color:#888;font-weight:600;text-transform:uppercase;
+                 margin-bottom:4px">Signature du souscripteur</div>
+            <div style="font-size:11px;color:{NAVY};font-weight:700;margin-top:8px">
+              {st.session_state.get('f_c_tit','')} {st.session_state.get('f_c_nom','').upper()}
+              {st.session_state.get('f_c_prn','')}
+            </div>
+          </div>
+          <div style="border:1.5px dashed #888;border-radius:8px;padding:14px;
+               min-height:90px;text-align:center;background:#fafafa">
+            <div style="font-size:10px;color:#888;font-weight:600;text-transform:uppercase;
+                 margin-bottom:4px">Cachet & Signature</div>
+            <div style="font-size:11px;color:{NAVY};font-weight:700;margin-top:8px">
+              {st.session_state.get('f_nom_appo','AFG Assurances Bénin Vie')}
+            </div>
+          </div>
+        </div>""", unsafe_allow_html=True)
+
+        # Upload signature souscripteur (optionnel)
+        _sig_file = st.file_uploader(
+            "📎 Joindre la signature du souscripteur (image optionnelle)",
+            type=["png","jpg","jpeg","pdf"],
+            key="sig_upload")
+        if _sig_file is not None:
+            st.success(f"✅ Fichier joint : {_sig_file.name}")
+            st.session_state["f_sig_file"] = _sig_file.name
+
+        st.markdown("---")
+
+        # ── Statut & Observations ─────────────────────────────────────────────
+        c1, c2 = st.columns(2)
+        stat_o  = ["Brouillon","En cours","Validé"]
+        cur_st  = st.session_state.get("f_stat", "Brouillon")
+        st.session_state["f_stat"] = c1.selectbox(
+            "Statut", stat_o,
+            index=stat_o.index(cur_st) if cur_st in stat_o else 0,
+            key="stat_s")
+        st.session_state["f_obs"] = c2.text_input(
+            "Observations", value=st.session_state.get("f_obs",""),
+            key="obs_t")
+
 
         def save_bia(statut_ov=None):
             ass = st.session_state.get("f_ass_meme", True)
@@ -4119,7 +4180,7 @@ elif "Saisie BIA" in page:
                 return data["numero_bia"]
             return None
         b1,b2,b3=st.columns([1,1,1.4])
-        if b1.button("← Retour", key=f"ret7_{4157}"): st.session_state["bia_step"] = 4 if _is_crt_step else 6; st.rerun()
+        if b1.button("← Retour", key=f"ret7_{4157}"): st.session_state["bia_step"] = 5 if _is_crt_step else 6; st.rerun()
         if b2.button("💾 Brouillon"):
             num=save_bia("Brouillon")
             if num: st.info(f"💾 Brouillon **{num}** enregistré. Retrouvez-le dans la Base BIA.")
