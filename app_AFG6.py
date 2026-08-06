@@ -1341,7 +1341,7 @@ if not st.session_state.auth:
         with st.container(border=True):
 
             ident = st.text_input("👤 Identifiant", placeholder="Ex : PDG AFG")
-            code  = st.text_input("🔑 Code PIN (4 chiffres)", type="password", max_chars=4)
+            code  = st.text_input("🔑 Mot de passe", type="password")
             if st.button("🔐 Accéder au système", use_container_width=True, type="primary"):
                 up = ident.strip().upper()
                 if up in USERS and USERS[up] == hashlib.sha256(code.encode()).hexdigest():
