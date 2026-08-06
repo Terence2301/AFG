@@ -3740,286 +3740,250 @@ elif "Saisie BIA" in page:
         if b2.button("Suivant ▶",type="primary"): st.session_state["bia_step"]=5; st.rerun()
 
     elif step==5:
-        section("Étape 5 — Caractéristiques du Contrat")
 
-        # ── Date d'effet (commun) ─────────────────────────────────────────────
-        cur_e=st.session_state.get("f_deff",today)
-        if isinstance(cur_e,str):
-            try: cur_e=date.fromisoformat(cur_e)
-            except: cur_e=today
+        # ── Date d'effet commune ──────────────────────────────────────────────
+        cur_e = st.session_state.get("f_deff", today)
+        if isinstance(cur_e, str):
+            try:    cur_e = date.fromisoformat(cur_e)
+            except: cur_e = today
 
-        # ══ PA0 — Prévoyance Auto ══════════════════════════════════════════
-        if prod["code"] == "PA0":
+        # ══════════════════════════════════════════════════════════════════════
+        # CAS 1 — Courtier PA0 : Étape 3/4 — Caractéristiques du contrat
+        # ══════════════════════════════════════════════════════════════════════
+        if _is_crt_step:
+            section("Étape 3 / 4 — Caractéristiques du contrat", "PRÉVOYANCE AUTO")
             from dateutil.relativedelta import relativedelta
-            section("Étape 5 — Caractéristiques du Contrat","PRÉVOYANCE AUTO")
 
-            # ── Sélection de la prime (ici, dans l'ordre du BIA) ─────────────
-            _pa_opts = {
-                "500 FCFA":   (500,   100_000),
-                "1 000 FCFA": (1000,  225_000),
-                "1 500 FCFA": (1500,  350_000),
-                "2 000 FCFA": (2000,  500_000),
-            }
+            # Prime annuelle — sélection parmi les 4 tranches
+            st.markdown(f"<div style='font-weight:700;color:{NAVY};margin-bottom:4px'>Prime annuelle *</div>",
+                        unsafe_allow_html=True)
+            _pa_opts   = {"500 FCFA":(500,100_000), "1 000 FCFA":(1000,225_000),
+                          "1 500 FCFA":(1500,350_000), "2 000 FCFA":(2000,500_000)}
             _pa_labels = list(_pa_opts.keys())
             _cur_lbl   = st.session_state.get("f_pa_lbl", _pa_labels[0])
             if _cur_lbl not in _pa_labels: _cur_lbl = _pa_labels[0]
+            _pa_sel    = st.radio("Prime", _pa_labels,
+                                  index=_pa_labels.index(_cur_lbl),
+                                  horizontal=True, key="pa_prime_r5",
+                                  label_visibility="collapsed")
+            st.session_state["f_pa_lbl"]  = _pa_sel
+            _pa_prime, _pa_capital        = _pa_opts[_pa_sel]
+            st.session_state["f_coti"]    = _pa_prime
+            st.session_state["f_cap"]     = _pa_capital
+            st.session_state["f_peri"]    = "Annuelle"
+            st.session_state["f_duree"]   = 1
+            st.session_state["f_gar"]     = "Avec garantie décès"
 
-            st.markdown(f"<div style='font-size:12px;font-weight:700;color:{NAVY};margin-bottom:6px'>Prime annuelle *</div>", unsafe_allow_html=True)
-            _pa_sel = st.radio("Prime annuelle",
-                               _pa_labels,
-                               index=_pa_labels.index(_cur_lbl),
-                               horizontal=True,
-                               key="pa_prime_r5",
-                               label_visibility="collapsed")
-            st.session_state["f_pa_lbl"] = _pa_sel
-            _pa_prime, _pa_capital       = _pa_opts[_pa_sel]
-            st.session_state["f_coti"]   = _pa_prime
-            st.session_state["f_cap"]    = _pa_capital
-
-            # Badge prime → capital
+            # Badge prime / capital
             st.markdown(f"""
             <div style="background:linear-gradient(135deg,{RED},{AMBER});border-radius:10px;
-                 padding:12px 18px;margin:10px 0;display:flex;gap:24px;align-items:center">
+                 padding:14px 20px;margin:10px 0;display:flex;gap:28px;align-items:center">
               <div>
                 <div style="color:rgba(255,255,255,.7);font-size:9px;text-transform:uppercase">Prime annuelle</div>
-                <div style="color:white;font-size:20px;font-weight:800">{_pa_prime:,} FCFA</div>
+                <div style="color:white;font-size:22px;font-weight:800">{_pa_prime:,} FCFA</div>
               </div>
-              <div style="background:rgba(255,255,255,.25);width:1px;height:44px"></div>
+              <div style="background:rgba(255,255,255,.25);width:1px;height:48px"></div>
               <div>
                 <div style="color:rgba(255,255,255,.7);font-size:9px;text-transform:uppercase">Capital garanti décès</div>
-                <div style="color:white;font-size:20px;font-weight:800">{_pa_capital:,} FCFA</div>
+                <div style="color:white;font-size:22px;font-weight:800">{_pa_capital:,} FCFA</div>
               </div>
             </div>""", unsafe_allow_html=True)
 
-            # ── Date d'effet + terme automatique ─────────────────────────────
+            # Date d'effet + terme automatique
             c1, c2 = st.columns(2)
             with c1:
                 _d_eff = st.date_input("Date d'effet *", value=cur_e, key="eff_d_pa")
                 st.session_state["f_deff"] = _d_eff
             _deff_pa = _d_eff if isinstance(_d_eff, date) else today
-            try:
-                _terme_pa = _deff_pa + relativedelta(years=1)
-            except Exception:
-                _terme_pa = _deff_pa.replace(year=_deff_pa.year+1)
+            try:    _terme_pa = _deff_pa + relativedelta(years=1)
+            except: _terme_pa = _deff_pa.replace(year=_deff_pa.year+1)
             st.session_state["f_terme_auto"] = str(_terme_pa)
-            st.session_state["f_duree"]      = 1
-
             with c2:
                 st.markdown(f"""
                 <div style="background:{GREEN}12;border:1.5px solid {GREEN};border-radius:8px;
                      padding:10px 14px;margin-top:4px">
-                  <div style="font-size:9px;color:#888;text-transform:uppercase">Date terme (automatique)</div>
+                  <div style="font-size:9px;color:#888;text-transform:uppercase">Date terme (auto)</div>
                   <div style="font-size:18px;font-weight:800;color:{NAVY}">{_terme_pa.strftime("%d/%m/%Y")}</div>
                   <div style="font-size:10px;color:{GREEN}">Date d'effet + 1 an</div>
                 </div>""", unsafe_allow_html=True)
 
-            # ── Mode de règlement ─────────────────────────────────────────────
+            # Mode de règlement
             st.markdown("---")
-            st.markdown(f"<div style='font-size:12px;font-weight:700;color:{NAVY};margin-bottom:6px'>Mode de règlement *</div>", unsafe_allow_html=True)
-            _modes = ["Mobile Monnaie","Par chèque","Par virement bancaire","Par Espèce"]
-            _cur_m = st.session_state.get("f_mode", _modes[0])
+            st.markdown(f"<div style='font-weight:700;color:{NAVY};margin-bottom:4px'>Mode de règlement *</div>",
+                        unsafe_allow_html=True)
+            _modes   = ["Mobile Monnaie","Par chèque","Par virement bancaire","Par Espèce"]
+            _cur_m   = st.session_state.get("f_mode", _modes[0])
             if _cur_m not in _modes: _cur_m = _modes[0]
             st.session_state["f_mode"] = st.radio(
                 "Mode", _modes, horizontal=True,
-                index=_modes.index(_cur_m), key="mode_r_pa",
+                index=_modes.index(_cur_m), key="mode_r_pa5",
                 label_visibility="collapsed")
-            _ref_labels = {
-                "Mobile Monnaie":       "N° Téléphone Mobile Money",
-                "Par chèque":           "N° Chèque",
-                "Par virement bancaire":"N° Compte bancaire",
-                "Par Espèce":           "Référence reçu",
-            }
-            ti("f_mref", _ref_labels.get(st.session_state["f_mode"], "Référence"))
+            _refs = {"Mobile Monnaie":"N° Téléphone Mobile Money",
+                     "Par chèque":"N° Chèque",
+                     "Par virement bancaire":"N° Compte bancaire",
+                     "Par Espèce":"Référence reçu"}
+            st.session_state["f_mref"] = st.text_input(
+                _refs.get(st.session_state["f_mode"],"Référence"),
+                value=st.session_state.get("f_mref",""),
+                key="mref_pa5")
 
-            st.markdown("")
             st.markdown("")
             b1, b2 = st.columns(2)
             if b1.button("← Retour", key="ret5_pa"):
-                # Courtier : retour à l'étape bénéficiaires (step 3)
-                # Autres : retour à l'étape assuré (step 4)
-                st.session_state["bia_step"] = 3 if _is_crt_step else 4; st.rerun()
+                st.session_state["bia_step"] = 3; st.rerun()
             if b2.button("Suivant ▶", type="primary", key="nxt5_pa"):
-                # Courtier : aller à la validation (step 5)
-                # Autres : aller au médical (step 6)
-                st.session_state["bia_step"] = 5 if _is_crt_step else 6; st.rerun()
+                st.session_state["bia_step"] = 5  # step 5 = validation pour courtier
+                # On passe step==7 directement
+                st.session_state["bia_step"] = 7; st.rerun()
 
         # ══════════════════════════════════════════════════════════════════════
-        # AVIGBO — barème fixe, 3 options, durée libre
-        # ══════════════════════════════════════════════════════════════════════
-        if is_avigbo:
-            alert("Contrat AVIGBO : le capital et la cotisation unique sont déterminés automatiquement selon la prime mensuelle choisie.","info")
-            # Sélection du barème
-            opt_map = {
-                "100 F/mois → Capital 100 000 F (unique : 1 000 F)":   (100,  100_000,  1_000),
-                "200 F/mois → Capital 200 000 F (unique : 2 000 F)":   (200,  200_000,  2_000),
-                "300 F/mois → Capital 300 000 F (unique : 3 000 F)":   (300,  300_000,  3_000),
-            }
-            opts_list = list(opt_map.keys())
-            cur_opt = st.session_state.get("f_avigbo_opt", opts_list[0])
-            if cur_opt not in opts_list: cur_opt = opts_list[0]
-            selected_opt = st.radio("Barème de cotisation *", opts_list,
-                                    index=opts_list.index(cur_opt), key="avigbo_opt_r")
-            st.session_state["f_avigbo_opt"] = selected_opt
-            prime_m, capital_g, prime_u = opt_map[selected_opt]
-
-            c1,c2=st.columns(2)
-            with c1:
-                peri_av_opts=["Mensuelle","Unique"]
-                cur_pav=st.session_state.get("f_peri","Mensuelle")
-                if cur_pav not in peri_av_opts: cur_pav="Mensuelle"
-                st.session_state["f_peri"]=st.radio("Périodicité *",peri_av_opts,
-                    horizontal=True,index=peri_av_opts.index(cur_pav),key="peri_av_r")
-            with c2:
-                st.session_state["f_deff"]=st.date_input("Date d'effet *",value=cur_e,key="eff_d")
-
-            # Cotisation et capital automatiques
-            if st.session_state["f_peri"]=="Mensuelle":
-                coti_auto=prime_m
-            else:
-                coti_auto=prime_u
-            st.session_state["f_coti"]=coti_auto
-            st.session_state["f_cap"] =capital_g
-
-            st.markdown(f"""
-            <div style="background:{GREEN}12;border:1.5px solid {GREEN};border-radius:10px;padding:12px 16px;margin:10px 0">
-              <div style="font-size:10px;color:{GREEN};font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">Paramètres automatiques AVIGBO</div>
-              <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;font-size:13px">
-                <div><span style="color:#888;font-size:10px">Cotisation</span><br><b>{coti_auto:,} FCFA / {st.session_state['f_peri'].lower()}</b></div>
-                <div><span style="color:#888;font-size:10px">Capital garanti décès</span><br><b style="color:{RED}">{capital_g:,} FCFA</b></div>
-                <div><span style="color:#888;font-size:10px">Option garantie</span><br><b>Avec garantie décès</b></div>
-              </div>
-            </div>""", unsafe_allow_html=True)
-            st.session_state["f_gar"]="Avec garantie décès"
-            st.session_state["f_duree"]=st.number_input("Durée du contrat (ans) *",min_value=1,max_value=40,
-                value=int(st.session_state.get("f_duree",5)),key="dur_av")
-
-        # ══════════════════════════════════════════════════════════════════════
-        # VIGNINOU — barème fixe, durée MAX 12 mois
-        # ══════════════════════════════════════════════════════════════════════
-        elif is_vigninou:
-            alert("Contrat VIGNINOU : durée maximale 12 mois. Capital et cotisation unique fixés par le barème.","warn")
-            opt_map_v = {
-                "400 F/mois → Capital 500 000 F (unique : 48 000 F)":    (400,  500_000,  48_000),
-                "800 F/mois → Capital 1 000 000 F (unique : 96 000 F)":  (800,  1_000_000,96_000),
-                "1 200 F/mois → Capital 1 500 000 F (unique : 144 000 F)": (1200, 1_500_000,144_000),
-            }
-            opts_list_v = list(opt_map_v.keys())
-            cur_opt_v = st.session_state.get("f_vigninou_opt", opts_list_v[0])
-            if cur_opt_v not in opts_list_v: cur_opt_v = opts_list_v[0]
-            selected_opt_v = st.radio("Barème de cotisation *", opts_list_v,
-                                       index=opts_list_v.index(cur_opt_v), key="vign_opt_r")
-            st.session_state["f_vigninou_opt"] = selected_opt_v
-            prime_m_v, capital_g_v, prime_u_v = opt_map_v[selected_opt_v]
-
-            c1,c2,c3=st.columns(3)
-            with c1:
-                peri_v_opts=["Mensuelle","Unique"]
-                cur_pv=st.session_state.get("f_peri","Mensuelle")
-                if cur_pv not in peri_v_opts: cur_pv="Mensuelle"
-                st.session_state["f_peri"]=st.radio("Périodicité *",peri_v_opts,
-                    horizontal=True,index=peri_v_opts.index(cur_pv),key="peri_v_r")
-            with c2:
-                # Durée en MOIS pour VIGNINOU (max 12 mois)
-                dur_v_mois=st.number_input("Durée (mois, max 12) *",min_value=1,max_value=12,
-                    value=int(st.session_state.get("f_duree_mois_v",12)),key="dur_v_m")
-                st.session_state["f_duree_mois_v"]=dur_v_mois
-                # On stocke en fraction d'année pour cohérence BIA
-                st.session_state["f_duree"]=1  # 1 an max
-            with c3:
-                st.session_state["f_deff"]=st.date_input("Date d'effet *",value=cur_e,key="eff_d")
-
-            if st.session_state["f_peri"]=="Mensuelle":
-                coti_auto_v=prime_m_v
-            else:
-                coti_auto_v=prime_u_v
-            st.session_state["f_coti"]=coti_auto_v
-            st.session_state["f_cap"] =capital_g_v
-
-            st.markdown(f"""
-            <div style="background:{RED}08;border:1.5px solid {RED};border-radius:10px;padding:12px 16px;margin:10px 0">
-              <div style="font-size:10px;color:{RED};font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">Paramètres automatiques VIGNINOU · Durée max 12 mois</div>
-              <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;font-size:13px">
-                <div><span style="color:#888;font-size:10px">Cotisation</span><br><b>{coti_auto_v:,} FCFA / {st.session_state['f_peri'].lower()}</b></div>
-                <div><span style="color:#888;font-size:10px">Capital garanti décès</span><br><b style="color:{RED}">{capital_g_v:,} FCFA</b></div>
-                <div><span style="color:#888;font-size:10px">Durée choisie</span><br><b>{dur_v_mois} mois</b></div>
-                <div><span style="color:#888;font-size:10px">Option garantie</span><br><b>Avec garantie décès</b></div>
-              </div>
-            </div>""", unsafe_allow_html=True)
-            st.session_state["f_gar"]="Avec garantie décès"
-
-        # ══════════════════════════════════════════════════════════════════════
-        # ÉPARGNE — libre, calcul du capital à terme
+        # CAS 2 — Non-courtier : produits AVIGBO / VIGNINOU / Épargne
         # ══════════════════════════════════════════════════════════════════════
         else:
-            c1,c2=st.columns(2)
-            with c1:
-                st.session_state["f_deff"]=st.date_input("Date d'effet *",value=cur_e,key="eff_d")
-            with c2:
-                st.session_state["f_duree"]=st.number_input("Durée (ans) *",min_value=1,max_value=40,
-                    value=int(st.session_state.get("f_duree",10)),key="dur_n")
+            section("Étape 5 — Caractéristiques du Contrat")
 
-            c3,c4=st.columns(2)
-            with c3:
-                st.session_state["f_coti"]=st.number_input("Cotisation FCFA *",min_value=100,
-                    value=int(st.session_state.get("f_coti",5000)),key="cot_n")
-            with c4:
-                peri_ep_opts=["Journalière","Hebdomadaire","Mensuelle","Trimestrielle","Semestrielle","Annuelle","Unique"]
-                cur_pep=st.session_state.get("f_peri","Mensuelle")
-                if cur_pep not in peri_ep_opts: cur_pep="Mensuelle"
-                st.session_state["f_peri"]=st.selectbox("Périodicité *",peri_ep_opts,
-                    index=peri_ep_opts.index(cur_pep),key="peri_ep_s")
+            # ── AVIGBO (221) ─────────────────────────────────────────────────
+            if prod["code"] == "221":
+                alert("AVIGBO : capital et cotisation unique déterminés automatiquement.","info")
+                opt_map = {
+                    "100 F/mois → Capital 100 000 F":  (100,  100_000,  1_000),
+                    "200 F/mois → Capital 200 000 F":  (200,  200_000,  2_000),
+                    "300 F/mois → Capital 300 000 F":  (300,  300_000,  3_000),
+                }
+                opts_l = list(opt_map.keys())
+                cur_o  = st.session_state.get("f_avigbo_opt", opts_l[0])
+                if cur_o not in opts_l: cur_o = opts_l[0]
+                sel_o  = st.radio("Barème *", opts_l,
+                                  index=opts_l.index(cur_o), key="avigbo_opt_r5")
+                st.session_state["f_avigbo_opt"] = sel_o
+                pm, cg, pu = opt_map[sel_o]
 
-            # ── Calcul dynamique du capital au terme ─────────────────────────
-            P_ep   = float(st.session_state.get("f_coti",5000))
-            n_ep   = int(st.session_state.get("f_duree",10))
-            peri_ep= st.session_state.get("f_peri","Mensuelle")
-            res_ep = calcul_capital_epargne(P_ep, peri_ep, n_ep)
-            cap_ep = res_ep["capital_brut"]
-            st.session_state["f_cap"] = int(cap_ep)
+                c1,c2 = st.columns(2)
+                with c1:
+                    pav = ["Mensuelle","Unique"]
+                    cpv = st.session_state.get("f_peri","Mensuelle")
+                    if cpv not in pav: cpv = "Mensuelle"
+                    st.session_state["f_peri"] = st.radio("Périodicité *",pav,
+                        horizontal=True,index=pav.index(cpv),key="peri_av_r5")
+                with c2:
+                    st.session_state["f_deff"] = st.date_input("Date d'effet *",
+                        value=cur_e, key="eff_av")
+                coti_a = pm if st.session_state["f_peri"]=="Mensuelle" else pu
+                st.session_state["f_coti"] = coti_a
+                st.session_state["f_cap"]  = cg
+                st.markdown(f"""
+                <div style="background:{GREEN}12;border:1.5px solid {GREEN};border-radius:10px;
+                     padding:12px 16px;margin:10px 0;display:grid;
+                     grid-template-columns:1fr 1fr 1fr;gap:12px">
+                  <div><div style="font-size:9px;color:#888">Cotisation</div>
+                       <div style="font-weight:700">{coti_a:,} FCFA/{st.session_state["f_peri"].lower()}</div></div>
+                  <div><div style="font-size:9px;color:#888">Capital décès</div>
+                       <div style="font-weight:700;color:{RED}">{cg:,} FCFA</div></div>
+                  <div><div style="font-size:9px;color:#888">Garantie</div>
+                       <div style="font-weight:700">Avec garantie décès</div></div>
+                </div>""", unsafe_allow_html=True)
+                st.session_state["f_gar"] = "Avec garantie décès"
+                st.session_state["f_duree"] = st.number_input("Durée (ans) *",
+                    min_value=1, max_value=40,
+                    value=int(st.session_state.get("f_duree",5)), key="dur_av5")
 
-            st.markdown(f"""
-            <div style="background:{GREEN}10;border:1.5px solid {GREEN};border-radius:10px;padding:14px 16px;margin:12px 0">
-              <div style="font-size:10px;color:{GREEN};font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px">
-                Simulation actuarielle — Capital au terme
-              </div>
-              <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;margin-bottom:10px">
-                <div style="background:white;border-radius:8px;padding:10px 12px;border:0.5px solid {MGRAY}">
-                  <div style="font-size:9px;color:#888;text-transform:uppercase;letter-spacing:.06em">Cotisation nette P_net</div>
-                  <div style="font-size:18px;font-weight:700;color:{NAVY}">{res_ep['Pnet']:,.0f} <span style="font-size:11px;font-weight:400">FCFA</span></div>
-                  <div style="font-size:10px;color:#888">α=1% acq. + β=0.5% gest.</div>
-                </div>
-                <div style="background:white;border-radius:8px;padding:10px 12px;border:0.5px solid {MGRAY}">
-                  <div style="font-size:9px;color:#888;text-transform:uppercase;letter-spacing:.06em">Total cotisations versées</div>
-                  <div style="font-size:18px;font-weight:700;color:{NAVY}">{res_ep['total_verse']:,.0f} <span style="font-size:11px;font-weight:400">FCFA</span></div>
-                  <div style="font-size:10px;color:#888">Sur {n_ep} an(s) · {peri_ep}</div>
-                </div>
-                <div style="background:linear-gradient(135deg,{GREEN},{GREEN2});border-radius:8px;padding:10px 12px">
-                  <div style="font-size:9px;color:rgba(255,255,255,.7);text-transform:uppercase;letter-spacing:.06em">Capital au terme C_n</div>
-                  <div style="font-size:20px;font-weight:800;color:white">{cap_ep:,.0f} <span style="font-size:12px;font-weight:400">FCFA</span></div>
-                  <div style="font-size:10px;color:rgba(255,255,255,.7)">Rendement : +{res_ep['rendement']:.1f}%</div>
-                </div>
-              </div>
-              <div style="font-size:10px;color:#666;font-family:monospace;background:#f8f9fa;border-radius:6px;padding:8px 10px;line-height:1.7">
-                {res_ep['formule']}
-              </div>
-            </div>""", unsafe_allow_html=True)
+            # ── VIGNINOU (220) ───────────────────────────────────────────────
+            elif prod["code"] == "220":
+                alert("VIGNINOU : durée maximale 12 mois.","warn")
+                opt_v = {
+                    "400 F/mois → Capital 500 000 F":       (400,  500_000,   48_000),
+                    "800 F/mois → Capital 1 000 000 F":     (800,  1_000_000, 96_000),
+                    "1 200 F/mois → Capital 1 500 000 F":   (1200, 1_500_000, 144_000),
+                }
+                opts_v = list(opt_v.keys())
+                cur_v  = st.session_state.get("f_vigninou_opt", opts_v[0])
+                if cur_v not in opts_v: cur_v = opts_v[0]
+                sel_v  = st.radio("Barème *", opts_v,
+                                  index=opts_v.index(cur_v), key="vign_opt_r5")
+                st.session_state["f_vigninou_opt"] = sel_v
+                pmv, cgv, puv = opt_v[sel_v]
 
-        # ── Mode de règlement (commun tous produits) ─────────────────────────
-        section("Mode de règlement")
-        m_o=["","Mobile Monnaie","Par chèque","Par virement bancaire","Par prélèvement sur salaire"]
-        cur_m=st.session_state.get("f_mode","")
-        st.session_state["f_mode"]=st.radio("Mode *",m_o,horizontal=True,
-            index=m_o.index(cur_m) if cur_m in m_o else 0,key="mode_r",
-            format_func=lambda x:"— Choisir —" if x=="" else x)
-        if st.session_state["f_mode"]:
-            ref_l={"Mobile Monnaie":"📱 N° Mobile Money","Par chèque":"📄 N° Chèque",
-                   "Par virement bancaire":"🏦 N° Compte/RIB",
-                   "Par prélèvement sur salaire":"💼 N° Matricule"}.get(st.session_state["f_mode"],"Référence")
-            ti("f_mref",ref_l)
+                c1,c2,c3 = st.columns(3)
+                with c1:
+                    pvv = ["Mensuelle","Unique"]
+                    cpvv = st.session_state.get("f_peri","Mensuelle")
+                    if cpvv not in pvv: cpvv = "Mensuelle"
+                    st.session_state["f_peri"] = st.radio("Périodicité *",pvv,
+                        horizontal=True,index=pvv.index(cpvv),key="peri_v_r5")
+                with c2:
+                    dv = st.number_input("Durée (mois, max 12) *",min_value=1,max_value=12,
+                        value=int(st.session_state.get("f_duree_mois_v",12)),key="dur_v_m5")
+                    st.session_state["f_duree_mois_v"] = dv
+                    st.session_state["f_duree"] = 1
+                with c3:
+                    st.session_state["f_deff"] = st.date_input("Date d'effet *",
+                        value=cur_e, key="eff_vg")
+                cotiv = pmv if st.session_state["f_peri"]=="Mensuelle" else puv
+                st.session_state["f_coti"] = cotiv
+                st.session_state["f_cap"]  = cgv
+                st.session_state["f_gar"]  = "Avec garantie décès"
 
-        b1,b2=st.columns(2)
-        if b1.button("← Retour", key="ret5_gen"): st.session_state["bia_step"]=4; st.rerun()
-        if b2.button("Suivant ▶",type="primary", key="nxt5_gen"): st.session_state["bia_step"]=6; st.rerun()
+            # ── ÉPARGNE (EP0) ────────────────────────────────────────────────
+            elif prod["code"] == "EP0":
+                peri_ep_opts = ["Journalière","Hebdomadaire","Mensuelle",
+                                "Trimestrielle","Semestrielle","Annuelle","Unique"]
+                c1,c2,c3 = st.columns(3)
+                with c1:
+                    st.session_state["f_coti"] = st.number_input(
+                        "Cotisation *", min_value=1000, step=500,
+                        value=int(st.session_state.get("f_coti",5000)), key="coti_ep5")
+                with c2:
+                    st.session_state["f_duree"] = st.number_input(
+                        "Durée (ans) *", min_value=1, max_value=40,
+                        value=int(st.session_state.get("f_duree",10)), key="dur_ep5")
+                with c3:
+                    st.session_state["f_deff"] = st.date_input("Date d'effet *",
+                        value=cur_e, key="eff_ep5")
+                cur_pep = st.session_state.get("f_peri","Mensuelle")
+                if cur_pep not in peri_ep_opts: cur_pep = "Mensuelle"
+                st.session_state["f_peri"] = st.selectbox(
+                    "Périodicité *", peri_ep_opts,
+                    index=peri_ep_opts.index(cur_pep), key="peri_ep_s5")
+
+                # Capital affiché (simple lookup, pas de calcul actuariel ici)
+                P_ep  = float(st.session_state.get("f_coti",5000))
+                n_ep  = int(st.session_state.get("f_duree",10))
+                pep   = st.session_state.get("f_peri","Mensuelle")
+                res_ep = calcul_capital_epargne(P_ep, pep, n_ep)
+                cap_ep = res_ep["capital_brut"]
+                st.session_state["f_cap"] = int(cap_ep)
+
+                st.markdown(f"""
+                <div style="background:{GREEN}10;border:1.5px solid {GREEN};border-radius:10px;
+                     padding:12px 16px;margin:10px 0;text-align:center">
+                  <div style="font-size:10px;color:#888;text-transform:uppercase">Capital au terme estimé</div>
+                  <div style="font-size:24px;font-weight:800;color:{GREEN}">{cap_ep:,.0f} FCFA</div>
+                  <div style="font-size:10px;color:#888">Taux technique 3,5% · α=1% · β=0,5%</div>
+                </div>""", unsafe_allow_html=True)
+
+            # ── Mode de règlement (commun AVIGBO/VIGNINOU/EP0) ───────────────
+            st.markdown("---")
+            section("Mode de règlement")
+            m_o  = ["","Mobile Monnaie","Par chèque","Par virement bancaire","Par prélèvement sur salaire"]
+            cur_m = st.session_state.get("f_mode","")
+            st.session_state["f_mode"] = st.radio("Mode *", m_o, horizontal=True,
+                index=m_o.index(cur_m) if cur_m in m_o else 0, key="mode_r_gen",
+                format_func=lambda x:"— Choisir —" if x=="" else x)
+            if st.session_state["f_mode"]:
+                _ref_gen = {"Mobile Monnaie":"N° Mobile Money",
+                            "Par chèque":"N° Chèque",
+                            "Par virement bancaire":"N° Compte/RIB",
+                            "Par prélèvement sur salaire":"N° Matricule"
+                            }.get(st.session_state["f_mode"],"Référence")
+                st.session_state["f_mref"] = st.text_input(
+                    _ref_gen, value=st.session_state.get("f_mref",""),
+                    key="mref_gen5")
+
+            b1,b2 = st.columns(2)
+            if b1.button("← Retour", key="ret5_gen"):
+                st.session_state["bia_step"] = 4; st.rerun()
+            if b2.button("Suivant ▶", type="primary", key="nxt5_gen"):
+                st.session_state["bia_step"] = 6; st.rerun()
 
     elif step==6:
         # Courtier PA0 : pas de questionnaire médical → rediriger vers validation
