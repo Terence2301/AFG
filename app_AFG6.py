@@ -1365,19 +1365,23 @@ today = date.today()
 # Utilise un placeholder vide pour afficher un message pendant le chargement.
 # Aucun st.rerun() — évite le removeChild DOM.
 if not st.session_state.bases_loaded_from_db:
-    _ph_load = st.empty()
-    _meta = get_bases_meta()
-    _loaded_any = False
-    for _bt, _attr in [("pf","pf"), ("ca","ca"), ("sin","sin")]:
-        if _bt in _meta and not getattr(st.session_state, f"{_attr}_ok"):
-            _ph_load.info(f"⏳ Chargement {_bt.upper()} depuis la base...")
-            _df, _ = load_base(_bt)
-            if _df is not None and not _df.empty:
-                setattr(st.session_state, _attr, _df)
-                setattr(st.session_state, f"{_attr}_ok", True)
-                _loaded_any = True
+    # Charger les bases uniquement pour les rôles qui ont accès aux onglets analytiques
+    # ADMIN et COURTIER n'ont pas accès aux dashboards → pas besoin de charger
+    _role_needs_data = can_see_analytics(user)
+    if _role_needs_data:
+        _ph_load = st.empty()
+        _meta = get_bases_meta()
+        _loaded_any = False
+        for _bt, _attr in [("pf","pf"), ("ca","ca"), ("sin","sin")]:
+            if _bt in _meta and not getattr(st.session_state, f"{_attr}_ok"):
+                _ph_load.info(f"⏳ Chargement {_bt.upper()} depuis la base...")
+                _df, _ = load_base(_bt)
+                if _df is not None and not _df.empty:
+                    setattr(st.session_state, _attr, _df)
+                    setattr(st.session_state, f"{_attr}_ok", True)
+                    _loaded_any = True
+        _ph_load.empty()
     st.session_state.bases_loaded_from_db = True
-    _ph_load.empty()  # effacer le message
 
 # ─────────────────────────────────────────────
 #  SIDEBAR
