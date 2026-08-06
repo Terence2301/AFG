@@ -1361,18 +1361,23 @@ today = date.today()
 #  Si oui → chargement transparent, aucun upload nécessaire.
 #  Les bases restent disponibles pour TOUS les visiteurs même après refresh.
 # ══════════════════════════════════════════════════════════════════════════════
-# Chargement initial des bases depuis la base centralisée.
-# Pas de st.rerun() ici — le rendu sera correct au prochain cycle naturel.
+# Chargement initial des bases depuis Supabase.
+# Utilise un placeholder vide pour afficher un message pendant le chargement.
+# Aucun st.rerun() — évite le removeChild DOM.
 if not st.session_state.bases_loaded_from_db:
+    _ph_load = st.empty()
     _meta = get_bases_meta()
+    _loaded_any = False
     for _bt, _attr in [("pf","pf"), ("ca","ca"), ("sin","sin")]:
         if _bt in _meta and not getattr(st.session_state, f"{_attr}_ok"):
+            _ph_load.info(f"⏳ Chargement {_bt.upper()} depuis la base...")
             _df, _ = load_base(_bt)
             if _df is not None and not _df.empty:
                 setattr(st.session_state, _attr, _df)
                 setattr(st.session_state, f"{_attr}_ok", True)
+                _loaded_any = True
     st.session_state.bases_loaded_from_db = True
-    # Pas de st.rerun() — Streamlit re-rendra naturellement au prochain cycle
+    _ph_load.empty()  # effacer le message
 
 # ─────────────────────────────────────────────
 #  SIDEBAR
@@ -1866,26 +1871,22 @@ def _bytes_to_df_sin(raw: bytes, fname: str) -> pd.DataFrame:
 if st.session_state.get("_pending_pf_bytes") is not None:
     _raw  = st.session_state.pop("_pending_pf_bytes")
     _name = st.session_state.pop("_pending_pf_name", "portefeuille.xlsx")
-    with st.status(f"⏳ Traitement du Portefeuille ({len(_raw)//1024} KB)…",
-                   expanded=True) as _st:
-        try:
-            st.write("📊 Filtrage des colonnes utiles (19 sur ~100)…")
-            _df = _bytes_to_df_pf(_raw, _name)
-            del _raw
-            st.write(f"✅ {len(_df):,} polices · {len(_df.columns)} colonnes conservées")
-            st.write("💾 Sauvegarde en base centralisée…")
-            _ok = save_base("pf", _df, _name, user["nom"])
-            if _ok:
-                st.session_state.pf    = _df
-                st.session_state.pf_ok = True
-                _processed = True
-                _st.update(label=f"✅ Portefeuille — {len(_df):,} polices chargées",
-                           state="complete")
-            else:
-                _st.update(label="❌ Erreur lors de la sauvegarde", state="error")
-        except Exception as _e:
-            _st.update(label=f"❌ {_e}", state="error")
-            st.session_state["_pf_bytes_stored"] = False
+    _ph_pf = st.empty()
+    try:
+        _ph_pf.info(f"⏳ Traitement du Portefeuille ({len(_raw)//1024} KB)…")
+        _df = _bytes_to_df_pf(_raw, _name)
+        del _raw
+        _ok = save_base("pf", _df, _name, user["nom"])
+        if _ok:
+            st.session_state.pf    = _df
+            st.session_state.pf_ok = True
+            _processed = True
+            _ph_pf.success(f"✅ Portefeuille chargé — {len(_df):,} polices")
+        else:
+            _ph_pf.error("❌ Erreur lors de la sauvegarde")
+    except Exception as _e:
+        _ph_pf.error(f"❌ Portefeuille : {_e}")
+        st.session_state["_pf_bytes_stored"] = False
 
 if st.session_state.get("_pending_ca_list"):
     _pending_list = st.session_state.pop("_pending_ca_list")
@@ -1893,59 +1894,49 @@ if st.session_state.get("_pending_ca_list"):
         _raw  = _item["bytes"]
         _name = _item["name"]
         _cid  = _item["id"]
-        with st.status(f"⏳ Traitement CA — {_name} ({len(_raw)//1024} KB)…",
-                       expanded=True) as _st:
-            try:
-                st.write("📊 Filtrage des colonnes utiles (13 sur ~79)…")
-                _df_new = _bytes_to_df_ca(_raw, _name)
-                del _raw
-                st.write(f"✅ {len(_df_new):,} quittances lues")
-                _seen = st.session_state.get("_ca_seen_ids", set())
-                _seen.add(_cid)
-                st.session_state["_ca_seen_ids"] = _seen
-                st.session_state.ca_list_raw.append(_df_new)
-                _merged = (
-                    _df_new if len(st.session_state.ca_list_raw) == 1
-                    else pd.concat(st.session_state.ca_list_raw, ignore_index=True))
-                st.write("💾 Sauvegarde en base centralisée…")
-                _ok = save_base("ca", _merged, _name, user["nom"])
-                if _ok:
-                    st.session_state.ca    = _merged
-                    st.session_state.ca_ok = True
-                    _processed = True
-                    _yrs = (sorted(_merged["ANNEE"].dropna().unique().astype(int).tolist())
-                            if "ANNEE" in _merged.columns else [])
-                    _st.update(
-                        label=f"✅ CA — {len(_merged):,} quittances · {', '.join(map(str,_yrs))}",
-                        state="complete")
-                else:
-                    _st.update(label="❌ Erreur lors de la sauvegarde", state="error")
-            except Exception as _e:
-                _st.update(label=f"❌ {_e}", state="error")
+        _ph_ca = st.empty()
+        try:
+            _ph_ca.info(f"⏳ Traitement CA — {_name} ({len(_raw)//1024} KB)…")
+            _df_new = _bytes_to_df_ca(_raw, _name)
+            del _raw
+            _seen = st.session_state.get("_ca_seen_ids", set())
+            _seen.add(_cid)
+            st.session_state["_ca_seen_ids"] = _seen
+            st.session_state.ca_list_raw.append(_df_new)
+            _merged = (_df_new if len(st.session_state.ca_list_raw) == 1
+                       else pd.concat(st.session_state.ca_list_raw, ignore_index=True))
+            _ok = save_base("ca", _merged, _name, user["nom"])
+            if _ok:
+                st.session_state.ca    = _merged
+                st.session_state.ca_ok = True
+                _processed = True
+                _yrs = (sorted(_merged["ANNEE"].dropna().unique().astype(int).tolist())
+                        if "ANNEE" in _merged.columns else [])
+                _ph_ca.success(f"✅ CA chargé — {len(_merged):,} quittances · {', '.join(map(str,_yrs))}")
+            else:
+                _ph_ca.error("❌ Erreur lors de la sauvegarde CA")
+        except Exception as _e:
+            _ph_ca.error(f"❌ CA : {_e}")
 
 if st.session_state.get("_pending_sin_bytes") is not None:
     _raw  = st.session_state.pop("_pending_sin_bytes")
     _name = st.session_state.pop("_pending_sin_name", "prestations.xlsx")
-    with st.status(f"⏳ Traitement des Prestations ({len(_raw)//1024} KB)…",
-                   expanded=True) as _st:
-        try:
-            st.write("📊 Filtrage des colonnes utiles (18 sur ~77)…")
-            _df = _bytes_to_df_sin(_raw, _name)
-            del _raw
-            st.write(f"✅ {len(_df):,} dossiers · {len(_df.columns)} colonnes conservées")
-            st.write("💾 Sauvegarde en base centralisée…")
-            _ok = save_base("sin", _df, _name, user["nom"])
-            if _ok:
-                st.session_state.sin    = _df
-                st.session_state.sin_ok = True
-                _processed = True
-                _st.update(label=f"✅ Prestations — {len(_df):,} dossiers chargés",
-                           state="complete")
-            else:
-                _st.update(label="❌ Erreur lors de la sauvegarde", state="error")
-        except Exception as _e:
-            _st.update(label=f"❌ {_e}", state="error")
-            st.session_state["_sin_bytes_stored"] = False
+    _ph_sin = st.empty()
+    try:
+        _ph_sin.info(f"⏳ Traitement des Prestations ({len(_raw)//1024} KB)…")
+        _df = _bytes_to_df_sin(_raw, _name)
+        del _raw
+        _ok = save_base("sin", _df, _name, user["nom"])
+        if _ok:
+            st.session_state.sin    = _df
+            st.session_state.sin_ok = True
+            _processed = True
+            _ph_sin.success(f"✅ Prestations chargées — {len(_df):,} dossiers")
+        else:
+            _ph_sin.error("❌ Erreur lors de la sauvegarde")
+    except Exception as _e:
+        _ph_sin.error(f"❌ Prestations : {_e}")
+        st.session_state["_sin_bytes_stored"] = False
 
 # ── Rerun final — uniquement si un traitement a eu lieu ──────────────────────
 # À ce point, TOUT le DOM est stable : sidebar rendue, widgets stabilisés,
