@@ -7,7 +7,7 @@
                  navigation cachée · jointures inter-bases fiables
 ================================================================================
   LANCEMENT : streamlit run app_afg.py
-  LOGIN     : PDG AFG/1001 · ADMIN AFG/1003 · ACTUAIRE AFG/1005 · DEMO/0000
+  LOGIN     : Acces restreint — identifiants communiques separement
 ================================================================================
 """
 import streamlit as st
@@ -486,14 +486,24 @@ AGENCES = ["","Siège Social — Cotonou","Agence Cotonou Centre","Agence Cotono
     "Agence Parakou","Agence Bohicon","Agence Natitingou","Agence Ouidah",
     "Agence Lokossa","Agence Kandi","Agence Abomey","Agence Djougou","Agence Allada"]
 
+# ── Mots de passe chargés depuis st.secrets ─────────────────────────────────
+# Définis dans Streamlit Cloud → Settings → Secrets → [auth]
+# Le code ne contient JAMAIS de mot de passe en clair.
+def _pwd(key: str, fallback: str) -> str:
+    try:
+        raw = st.secrets["auth"][key]
+        return hashlib.sha256(raw.encode()).hexdigest()
+    except Exception:
+        return hashlib.sha256(fallback.encode()).hexdigest()
+
 USERS = {
-    "PDG AFG":       hashlib.sha256(b"1001").hexdigest(),
-    "DG AFG":        hashlib.sha256(b"1002").hexdigest(),
-    "ADMIN AFG":     hashlib.sha256(b"1003").hexdigest(),
-    "MANAGER AFG":   hashlib.sha256(b"1004").hexdigest(),
-    "ACTUAIRE AFG":  hashlib.sha256(b"1005").hexdigest(),
-    "DEMO VISITEUR": hashlib.sha256(b"0000").hexdigest(),
-    "COURTIER AFG":  hashlib.sha256(b"2001").hexdigest(),  # Courtiers — accès PA0 uniquement
+    "PDG AFG":       _pwd("pdg_pwd",      "1001"),
+    "DG AFG":        _pwd("dg_pwd",       "1002"),
+    "ADMIN AFG":     _pwd("admin_pwd",    "1003"),
+    "MANAGER AFG":   _pwd("admin_pwd",    "1004"),
+    "ACTUAIRE AFG":  _pwd("actuaire_pwd", "1005"),
+    "DEMO VISITEUR": _pwd("demo_pwd",     "0000"),
+    "COURTIER AFG":  _pwd("courtier_pwd", "2001"),
 }
 
 # ─────────────────────────────────────────────
