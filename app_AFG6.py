@@ -399,7 +399,7 @@ def generer_pdf_rapport(pf, ca, sin, period_lbl, user_nom,
 
     # ── Section 4 : Sinistres ─────────────────────────────────────────────────
     if "sinistres" in sections_voulues and sin is not None:
-        story.append(Paragraph("4. SINISTRES & PROVISIONS", s_h1))
+        story.append(Paragraph("4. SINISTRES & PRESTATION", s_h1))
         if "Nature Sinistre" in sin.columns:
             nat = sin.groupby("Nature Sinistre").agg(
                 Nb=(_c_nat_,"count") if _c_nat_ else ("POLICE_KEY","count"),
@@ -6148,3 +6148,4 @@ elif "Saisie BIA" in page:
       · Dashboard Actuariel Expert v3.0 · Conforme CIMA · 306 295 polices · Groupe AFG Holding
       · <em>Données confidentielles — Accès restreint</em>
     </div>""", unsafe_allow_html=True)
+
