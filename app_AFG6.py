@@ -1573,15 +1573,19 @@ with st.sidebar:
     st.markdown(f"<div style='background:#C0392B;color:white;text-align:center;border-radius:7px;padding:5px;margin:5px 4px;font-weight:800;font-size:12px'>{period_lbl}</div>", unsafe_allow_html=True)
 
     # ── Filtre par année ────────────────────────────────────────────────────
+    # Utiliser st.session_state pour éviter le NameError (ca/pf/sin définis plus tard)
     _annees_all = []
-    if ca is not None and "ANNEE" in ca.columns:
-        _annees_all = sorted([int(a) for a in ca["ANNEE"].dropna().unique()
+    _ca_ss  = st.session_state.ca
+    _pf_ss  = st.session_state.pf
+    _sin_ss = st.session_state.sin
+    if _ca_ss is not None and "ANNEE" in _ca_ss.columns:
+        _annees_all = sorted([int(a) for a in _ca_ss["ANNEE"].dropna().unique()
                               if str(a).isdigit()], reverse=True)
-    elif sin is not None and "ANNEE_SIN" in sin.columns:
-        _annees_all = sorted([int(a) for a in sin["ANNEE_SIN"].dropna().unique()
+    elif _sin_ss is not None and "ANNEE_SIN" in _sin_ss.columns:
+        _annees_all = sorted([int(a) for a in _sin_ss["ANNEE_SIN"].dropna().unique()
                               if pd.notna(a)], reverse=True)
-    elif pf is not None and "ANNEESOUS" in pf.columns:
-        _annees_all = sorted([int(a) for a in pf["ANNEESOUS"].dropna().unique()
+    elif _pf_ss is not None and "ANNEESOUS" in _pf_ss.columns:
+        _annees_all = sorted([int(a) for a in _pf_ss["ANNEESOUS"].dropna().unique()
                               if str(a).isdigit()], reverse=True)
     _yr_opts = ["Toutes les années"] + [str(a) for a in _annees_all]
     _cur_yr  = st.session_state.get("filtre_annee", "Toutes les années")
@@ -6148,4 +6152,3 @@ elif "Saisie BIA" in page:
       · Dashboard Actuariel Expert v3.0 · Conforme CIMA · 306 295 polices · Groupe AFG Holding
       · <em>Données confidentielles — Accès restreint</em>
     </div>""", unsafe_allow_html=True)
-
