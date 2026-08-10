@@ -4863,118 +4863,141 @@ elif "Sinistres" in page:
     _c_sort_ = next((c for c in sin.columns if "Sort" in c), "Sort Sinistre")
     _c_cat_ = next((c for c in sin.columns if "Catégorie" in c or "Categorie" in c), "Libéllé Catégorie")
     _c_surv_ = "Date Survenance" if "Date Survenance" in sin.columns else None
-    df_s = sin #tout le fichier pour les provisions historiques
-    df_sf=sin_f()  # filtré par période
+    df_s = sin  # tout le fichier pour les provisions historiques
+    df_sf = sin_f()  # filtré par période
 
-        section(f"⚠️ Sinistres & Provisions — {period_lbl}","ANALYSE ACTUARIELLE · SAP · S/P")
-        tot_sin=float(sin["Réglement Total"].fillna(0).sum()) if "Réglement Total" in sin.columns else 0
-        tot_sap=float(sin["SAP au 31/12/2025"].fillna(0).sum()) if "SAP au 31/12/2025" in sin.columns else 0
-        tot_hon=float(sin["Réglement Honoraires"].fillna(0).sum()) if "Réglement Honoraires" in sin.columns else 0
-        charge_u=tot_sin+tot_sap+tot_hon
-        nb_sin=len(sin); nb_clos=int((sin["Sort Sinistre"]=="Cloturé").sum()) if "Sort Sinistre" in sin.columns else 0
-        nb_ouv=int((sin["Sort Sinistre"]=="Ouvert").sum()) if "Sort Sinistre" in sin.columns else 0
-        ca_all=float(ca["CHIFAFFA"].fillna(0).sum()) if ca is not None and "CHIFAFFA" in ca.columns else 0
-        sp=tot_sin/max(ca_all,1)*100; cout_m=tot_sin/max(nb_clos,1)
-        actifs_n=int((pf["ETAT_POLICE"].str.strip()=="ACTIF").sum()) if pf is not None and "ETAT_POLICE" in pf.columns else 1
-        burning=charge_u/max(actifs_n,1)*1000
+    section(f"⚠️ Sinistres & Provisions — {period_lbl}","ANALYSE ACTUARIELLE · SAP · S/P")
+    tot_sin=float(sin["Réglement Total"].fillna(0).sum()) if "Réglement Total" in sin.columns else 0
+    tot_sap=float(sin["SAP au 31/12/2025"].fillna(0).sum()) if "SAP au 31/12/2025" in sin.columns else 0
+    tot_hon=float(sin["Réglement Honoraires"].fillna(0).sum()) if "Réglement Honoraires" in sin.columns else 0
+    charge_u=tot_sin+tot_sap+tot_hon
+    nb_sin=len(sin); nb_clos=int((sin["Sort Sinistre"]=="Cloturé").sum()) if "Sort Sinistre" in sin.columns else 0
+    nb_ouv=int((sin["Sort Sinistre"]=="Ouvert").sum()) if "Sort Sinistre" in sin.columns else 0
+    ca_all=float(ca["CHIFAFFA"].fillna(0).sum()) if ca is not None and "CHIFAFFA" in ca.columns else 0
+    sp=tot_sin/max(ca_all,1)*100; cout_m=tot_sin/max(nb_clos,1)
+    actifs_n=int((pf["ETAT_POLICE"].str.strip()=="ACTIF").sum()) if pf is not None and "ETAT_POLICE" in pf.columns else 1
+    burning=charge_u/max(actifs_n,1)*1000
 
-        c1,c2,c3,c4,c5,c6=st.columns(6)
-        kpi(c1,"Total réglé",fmt(tot_sin),"Toutes périodes","red",icon="💊")
-        kpi(c2,"SAP (provisions)",fmt(tot_sap),"Au 31/12/2025","amber",icon="📌")
-        kpi(c3,"Charge ultime",fmt(charge_u),"Réglé+SAP+Hon.","red",icon="⚖️")
-        kpi(c4,"Ratio S/P",pct(sp),"vs CA","red" if sp>80 else "amber",icon="📐")
-        kpi(c5,"Coût moy/clos",fmt(cout_m),"Dossiers clos","teal",icon="💰")
-        kpi(c6,"Burning Cost",fmt(burning),"Charge/1 000 actifs","red",icon="🔥")
+    c1,c2,c3,c4,c5,c6=st.columns(6)
+    kpi(c1,"Total réglé",fmt(tot_sin),"Toutes périodes","red",icon="💊")
+    kpi(c2,"SAP (provisions)",fmt(tot_sap),"Au 31/12/2025","amber",icon="📌")
+    kpi(c3,"Charge ultime",fmt(charge_u),"Réglé+SAP+Hon.","red",icon="⚖️")
+    kpi(c4,"Ratio S/P",pct(sp),"vs CA","red" if sp>80 else "amber",icon="📐")
+    kpi(c5,"Coût moy/clos",fmt(cout_m),"Dossiers clos","teal",icon="💰")
+    kpi(c6,"Burning Cost",fmt(burning),"Charge/1 000 actifs","red",icon="🔥")
 
-        if not df_sf.empty and len(df_sf)<len(sin):
-            alert(f"Période filtrée : {len(df_sf):,} dossiers (sur {len(sin):,}) pour {period_lbl}. Les KPIs ci-dessus couvrent toutes les périodes.","info")
+    if not df_sf.empty and len(df_sf)<len(sin):
+        alert(f"Période filtrée : {len(df_sf):,} dossiers (sur {len(sin):,}) pour {period_lbl}. Les KPIs ci-dessus couvrent toutes les périodes.","info")
 
-        t_n,t_e,t_p,t_tri,t_r=st.tabs(["🏷️ Par nature","📈 Évolution","🛒 Par produit","📐 Triangle dev.","🔍 Données brutes"])
+    t_n,t_e,t_p,t_tri,t_r=st.tabs(["🏷️ Par nature","📈 Évolution","🛒 Par produit","📐 Triangle dev.","🔍 Données brutes"])
 
-        with t_n:
-            if "Nature Sinistre" in sin.columns:
-                nat=sin.groupby("Nature Sinistre").agg(
-                    Nb=(_c_nat_,"count") if _c_nat_ else ("POLICE_KEY","count"),Regle=(_c_regle_,"sum") if _c_regle_ else ("CHIFAFFA","count"),SAP=(_c_sap_,"sum") if _c_sap_ else ("CHIFAFFA","count")).reset_index().sort_values("Réglé",ascending=False)
-                nat["Charge"]=nat["Réglé"]+nat["SAP"]; nat["Coût moy"]=nat["Réglé"]/nat["Nb"].replace(0,np.nan)
-                c1,c2=st.columns(2)
-                with c1:
-                    fig=go.Figure()
-                    fig.add_bar(y=nat["Nature Sinistre"].str[:22],x=nat["Réglé"],name="Réglé",marker_color=RED,orientation="h")
-                    fig.add_bar(y=nat["Nature Sinistre"].str[:22],x=nat["SAP"],name="SAP",marker_color=AMBER,orientation="h")
-                    fig.update_layout(barmode="stack",yaxis=dict(autorange="reversed"))
-                    fig_style(fig,360,"💊 Réglé + SAP par nature"); st.plotly_chart(fig,use_container_width=True)
-                with c2:
-                    fig2=px.treemap(nat,path=["Nature Sinistre"],values="Charge",color="Nb",
-                        color_continuous_scale=[[0,MINT],[.5,AMBER],[1,RED]])
-                    fig2.update_layout(height=360,margin=dict(l=5,r=5,t=20,b=5)); st.plotly_chart(fig2,use_container_width=True)
-                nat_d=nat.copy()
-                for c_ in ["Réglé","SAP","Charge","Coût moy"]: nat_d[c_]=nat_d[c_].apply(fmt)
-                st.dataframe(nat_d,use_container_width=True,hide_index=True)
-                a,b=st.columns(2)
-                a.download_button("📥 CSV",dl_csv(nat),"sin_nature.csv","text/csv",use_container_width=True,key="dl_sin_nat")
-                b.download_button("📥 Excel",dl_xlsx(nat),"sin_nature.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_sin_nat_xl")
-
-        with t_e:
-            if "ANNEE_SIN" in sin.columns:
-                evo=sin.groupby("ANNEE_SIN").agg(Nb=("ANNEE_SIN","count"),Regle=(_c_regle_,"sum") if _c_regle_ else ("CHIFAFFA","count"),SAP=(_c_sap_,"sum") if _c_sap_ else ("CHIFAFFA","count")).reset_index()
-                evo=evo[evo["ANNEE_SIN"].between(1997,2025)].sort_values("ANNEE_SIN")
-                fig=make_subplots(specs=[[{"secondary_y":True}]])
-                fig.add_bar(x=evo["ANNEE_SIN"].astype(str),y=evo["Réglé"],name="Réglé",marker_color=RED,opacity=.82)
-                fig.add_bar(x=evo["ANNEE_SIN"].astype(str),y=evo["SAP"],name="SAP",marker_color=AMBER,opacity=.82)
-                fig.add_scatter(x=evo["ANNEE_SIN"].astype(str),y=evo["Nb"],name="Nb dossiers",
-                    line=dict(color=GREEN,width=2.5),mode="lines+markers",secondary_y=True)
-                fig.update_layout(barmode="stack")
-                fig.update_yaxes(title_text="Montant (FCFA)",secondary_y=False)
-                fig.update_yaxes(title_text="Nb dossiers",secondary_y=True,showgrid=False)
-                fig_style(fig,420,"📈 Sinistres par exercice 1997–2025"); st.plotly_chart(fig,use_container_width=True)
-                a,b=st.columns(2)
-                a.download_button("📥 CSV",dl_csv(evo),"evo_sin.csv","text/csv",use_container_width=True,key="dl_evo_sin")
-                b.download_button("📥 Excel",dl_xlsx(evo),"evo_sin.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_evo_sin_xl")
-
-        with t_p:
-            cat_c="Libéllé Catégorie" if "Libéllé Catégorie" in sin.columns else "Libellé Catégorie"
-            if cat_c in sin.columns:
-                sp2=sin.groupby(cat_c).agg(Nb=(cat_c,"count"),Regle=(_c_regle_,"sum") if _c_regle_ else ("CHIFAFFA","count"),SAP=(_c_sap_,"sum") if _c_sap_ else ("CHIFAFFA","count")).reset_index().sort_values("Réglé",ascending=False)
-                sp2["Charge"]=sp2["Réglé"]+sp2["SAP"]
+    with t_n:
+        if "Nature Sinistre" in sin.columns:
+            nat=sin.groupby("Nature Sinistre").agg(
+                Nb=(_c_nat_,"count") if _c_nat_ else ("POLICE_KEY","count"),
+                Regle=(_c_regle_,"sum") if _c_regle_ else ("CHIFAFFA","count"),
+                SAP=(_c_sap_,"sum") if _c_sap_ else ("CHIFAFFA","count")
+            ).reset_index().sort_values("Réglé",ascending=False)
+            nat["Charge"]=nat["Réglé"]+nat["SAP"]
+            nat["Coût moy"]=nat["Réglé"]/nat["Nb"].replace(0,np.nan)
+            c1,c2=st.columns(2)
+            with c1:
                 fig=go.Figure()
-                fig.add_bar(x=sp2["Réglé"],y=sp2[cat_c].str[:24],name="Réglé",marker_color=RED,orientation="h")
-                fig.add_bar(x=sp2["SAP"],y=sp2[cat_c].str[:24],name="SAP",marker_color=AMBER,orientation="h")
+                fig.add_bar(y=nat["Nature Sinistre"].str[:22],x=nat["Réglé"],name="Réglé",marker_color=RED,orientation="h")
+                fig.add_bar(y=nat["Nature Sinistre"].str[:22],x=nat["SAP"],name="SAP",marker_color=AMBER,orientation="h")
                 fig.update_layout(barmode="stack",yaxis=dict(autorange="reversed"))
-                fig_style(fig,360,"🛒 Sinistres par produit"); st.plotly_chart(fig,use_container_width=True)
-                sp2_d=sp2.copy()
-                for c_ in ["Réglé","SAP","Charge"]: sp2_d[c_]=sp2_d[c_].apply(fmt)
-                st.dataframe(sp2_d,use_container_width=True,hide_index=True)
-                a,_=st.columns(2)
-                a.download_button("📥 CSV",dl_csv(sp2),"sin_prod.csv","text/csv",use_container_width=True,key="dl_sin_p")
-
-        with t_tri:
-            section("📐 Triangle de développement des sinistres","EXERCICE × SURVENANCE")
-            if "ANNEE_SIN" in sin.columns and "Date Survenance" in sin.columns:
-                sin2=sin.copy()
-                sin2["DEV_YEAR"]=pd.to_datetime(sin2["Date Survenance"],errors="coerce").dt.year.astype("Int64")
-                tri=sin2.pivot_table(index="ANNEE_SIN",columns="DEV_YEAR",values=_c_regle_,aggfunc="sum",fill_value=0)
-                tri_d=tri.copy().astype(float)
-                for col_ in tri_d.columns: tri_d[col_]=tri_d[col_].apply(fmt)
-                alert("Triangle des montants réglés par exercice sinistre (lignes) et année de survenance (colonnes).","info")
-                st.dataframe(tri_d,use_container_width=True,height=380)
-                a,_=st.columns(2)
-                a.download_button("📥 CSV triangle",dl_csv(tri.reset_index()),"triangle.csv","text/csv",use_container_width=True,key="dl_tri")
-            else: alert("Colonnes ANNEE_SIN et Date Survenance requises.","info")
-
-        with t_r:
-            cs=[c for c in ["Date Survenance","Libéllé Catégorie","Nature Sinistre","Sort Sinistre","Souscripteur","Désignation risque","Réglement Total","SAP au 31/12/2025","Date Déclaration","Date validation","Nom Bénéficiaire","Exercice Sinistre","POLICE_KEY"] if c in sin.columns]
-            srch_s=st.text_input("🔍 Rechercher",label_visibility="collapsed",placeholder="Nature, souscripteur, produit…",key="srch_sin")
-            di_s=sin[cs].copy()
-            for dc in ["Date Survenance","Date Déclaration","Date validation"]:
-                if dc in di_s.columns: di_s[dc]=di_s[dc].apply(ds)
-            for nc in ["Réglement Total","SAP au 31/12/2025"]:
-                if nc in di_s.columns: di_s[nc]=di_s[nc].apply(lambda x:fmt(x,""))
-            if srch_s: di_s=di_s[di_s.apply(lambda r:srch_s.lower() in str(r).lower(),axis=1)]
-            st.dataframe(di_s.head(500),use_container_width=True,hide_index=True,height=420)
-            st.caption(f"Affichage 500 / {len(di_s):,} lignes")
+                fig_style(fig,360,"💊 Réglé + SAP par nature")
+                st.plotly_chart(fig,use_container_width=True)
+            with c2:
+                fig2=px.treemap(nat,path=["Nature Sinistre"],values="Charge",color="Nb",
+                    color_continuous_scale=[[0,MINT],[.5,AMBER],[1,RED]])
+                fig2.update_layout(height=360,margin=dict(l=5,r=5,t=20,b=5))
+                st.plotly_chart(fig2,use_container_width=True)
+            nat_d=nat.copy()
+            for c_ in ["Réglé","SAP","Charge","Coût moy"]:
+                nat_d[c_]=nat_d[c_].apply(fmt)
+            st.dataframe(nat_d,use_container_width=True,hide_index=True)
             a,b=st.columns(2)
-            a.download_button("📥 CSV complet",dl_csv(sin),"prestations.csv","text/csv",use_container_width=True,key="dl_sin_raw")
-            b.download_button("📥 Excel",dl_xlsx(sin[cs].head(50000)),"prestations.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_sin_raw_xl")
+            a.download_button("📥 CSV",dl_csv(nat),"sin_nature.csv","text/csv",use_container_width=True,key="dl_sin_nat")
+            b.download_button("📥 Excel",dl_xlsx(nat),"sin_nature.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_sin_nat_xl")
+
+    with t_e:
+        if "ANNEE_SIN" in sin.columns:
+            evo=sin.groupby("ANNEE_SIN").agg(
+                Nb=("ANNEE_SIN","count"),
+                Regle=(_c_regle_,"sum") if _c_regle_ else ("CHIFAFFA","count"),
+                SAP=(_c_sap_,"sum") if _c_sap_ else ("CHIFAFFA","count")
+            ).reset_index()
+            evo=evo[evo["ANNEE_SIN"].between(1997,2025)].sort_values("ANNEE_SIN")
+            fig=make_subplots(specs=[[{"secondary_y":True}]])
+            fig.add_bar(x=evo["ANNEE_SIN"].astype(str),y=evo["Réglé"],name="Réglé",marker_color=RED,opacity=.82)
+            fig.add_bar(x=evo["ANNEE_SIN"].astype(str),y=evo["SAP"],name="SAP",marker_color=AMBER,opacity=.82)
+            fig.add_scatter(x=evo["ANNEE_SIN"].astype(str),y=evo["Nb"],name="Nb dossiers",
+                line=dict(color=GREEN,width=2.5),mode="lines+markers",secondary_y=True)
+            fig.update_layout(barmode="stack")
+            fig.update_yaxes(title_text="Montant (FCFA)",secondary_y=False)
+            fig.update_yaxes(title_text="Nb dossiers",secondary_y=True,showgrid=False)
+            fig_style(fig,420,"📈 Sinistres par exercice 1997–2025")
+            st.plotly_chart(fig,use_container_width=True)
+            a,b=st.columns(2)
+            a.download_button("📥 CSV",dl_csv(evo),"evo_sin.csv","text/csv",use_container_width=True,key="dl_evo_sin")
+            b.download_button("📥 Excel",dl_xlsx(evo),"evo_sin.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_evo_sin_xl")
+
+    with t_p:
+        cat_c="Libéllé Catégorie" if "Libéllé Catégorie" in sin.columns else "Libellé Catégorie"
+        if cat_c in sin.columns:
+            sp2=sin.groupby(cat_c).agg(
+                Nb=(cat_c,"count"),
+                Regle=(_c_regle_,"sum") if _c_regle_ else ("CHIFAFFA","count"),
+                SAP=(_c_sap_,"sum") if _c_sap_ else ("CHIFAFFA","count")
+            ).reset_index().sort_values("Réglé",ascending=False)
+            sp2["Charge"]=sp2["Réglé"]+sp2["SAP"]
+            fig=go.Figure()
+            fig.add_bar(x=sp2["Réglé"],y=sp2[cat_c].str[:24],name="Réglé",marker_color=RED,orientation="h")
+            fig.add_bar(x=sp2["SAP"],y=sp2[cat_c].str[:24],name="SAP",marker_color=AMBER,orientation="h")
+            fig.update_layout(barmode="stack",yaxis=dict(autorange="reversed"))
+            fig_style(fig,360,"🛒 Sinistres par produit")
+            st.plotly_chart(fig,use_container_width=True)
+            sp2_d=sp2.copy()
+            for c_ in ["Réglé","SAP","Charge"]:
+                sp2_d[c_]=sp2_d[c_].apply(fmt)
+            st.dataframe(sp2_d,use_container_width=True,hide_index=True)
+            a,_=st.columns(2)
+            a.download_button("📥 CSV",dl_csv(sp2),"sin_prod.csv","text/csv",use_container_width=True,key="dl_sin_p")
+
+    with t_tri:
+        section("📐 Triangle de développement des sinistres","EXERCICE × SURVENANCE")
+        if "ANNEE_SIN" in sin.columns and "Date Survenance" in sin.columns:
+            sin2=sin.copy()
+            sin2["DEV_YEAR"]=pd.to_datetime(sin2["Date Survenance"],errors="coerce").dt.year.astype("Int64")
+            tri=sin2.pivot_table(index="ANNEE_SIN",columns="DEV_YEAR",values=_c_regle_,aggfunc="sum",fill_value=0)
+            tri_d=tri.copy().astype(float)
+            for col_ in tri_d.columns:
+                tri_d[col_]=tri_d[col_].apply(fmt)
+            alert("Triangle des montants réglés par exercice sinistre (lignes) et année de survenance (colonnes).","info")
+            st.dataframe(tri_d,use_container_width=True,height=380)
+            a,_=st.columns(2)
+            a.download_button("📥 CSV triangle",dl_csv(tri.reset_index()),"triangle.csv","text/csv",use_container_width=True,key="dl_tri")
+        else:
+            alert("Colonnes ANNEE_SIN et Date Survenance requises.","info")
+
+    with t_r:
+        cs=[c for c in ["Date Survenance","Libéllé Catégorie","Nature Sinistre","Sort Sinistre","Souscripteur","Désignation risque","Réglement Total","SAP au 31/12/2025","Date Déclaration","Date validation","Nom Bénéficiaire","Exercice Sinistre","POLICE_KEY"] if c in sin.columns]
+        srch_s=st.text_input("🔍 Rechercher",label_visibility="collapsed",placeholder="Nature, souscripteur, produit…",key="srch_sin")
+        di_s=sin[cs].copy()
+        for dc in ["Date Survenance","Date Déclaration","Date validation"]:
+            if dc in di_s.columns:
+                di_s[dc]=di_s[dc].apply(ds)
+        for nc in ["Réglement Total","SAP au 31/12/2025"]:
+            if nc in di_s.columns:
+                di_s[nc]=di_s[nc].apply(lambda x:fmt(x,""))
+        if srch_s:
+            di_s=di_s[di_s.apply(lambda r:srch_s.lower() in str(r).lower(),axis=1)]
+        st.dataframe(di_s.head(500),use_container_width=True,hide_index=True,height=420)
+        st.caption(f"Affichage 500 / {len(di_s):,} lignes")
+        a,b=st.columns(2)
+        a.download_button("📥 CSV complet",dl_csv(sin),"prestations.csv","text/csv",use_container_width=True,key="dl_sin_raw")
+        b.download_button("📥 Excel",dl_xlsx(sin[cs].head(50000)),"prestations.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_sin_raw_xl")
 
     # ═══════════════════════════════════════════════════════════════════════════════
     # PAGE — ACTUARIAT AVANCÉ
