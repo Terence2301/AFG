@@ -999,10 +999,18 @@ def can_see_analytics(user_dict: dict) -> bool:
 
 # Colonnes utiles uniquement — élimine les ~80 colonnes mortes du PF (306K×100  306K×21)
 PF_COLS = {
-    "CODEINTE_P","NUMEPOLI_P","LIBECATE","ETAT_POLICE","NOM_ASSU","NOM_APP",
-    "LIBEVILL","DATESOUS","DATEEFFE","DATEECHE","DATENAIS",
-    "COTI_PERIODIQUE","MONTENCA","SEXERISQ","CODEPERI","NBRE_PRIME",
-    "COMMGEST","CODEAPPO","CODERISQ",
+    # Identifiants
+    "POLICE_KEY","NUMEPOLI_P","CODEINTE_P","CODERISQ",
+    # Produit & état
+    "LIBECATE","ETAT_POLICE","CODEPERI","NBRE_PRIME",
+    # Assuré
+    "NOM_ASSU","DATENAIS","SEXERISQ","LIBEVILL",
+    # Dates contrat
+    "DATESOUS","DATEEFFE","DATEECHE",
+    # Financier
+    "COTI_PERIODIQUE","MONTENCA","COMMGEST",
+    # Apporteur
+    "CODEAPPO","NOM_APP",
 }
 CA_COLS = {
     # Identification police
@@ -2441,7 +2449,7 @@ elif "Portefeuille" in page:
     # Listes de choix construites depuis df (déjà filtré par année si SEL_YEAR)
     _base_opts = df  # base pour les options = données de l'année choisie
 
-    f0,f1,f2,f3,f4 = st.columns([1.2,1.2,1.2,1.2,1.2])
+    f0,f1,f2,f3,f4,f5 = st.columns([1,1,1,1,1,1])
 
     # 0. Filtre état ETAT_POLICE
     etat_opts = ["Tous"] + sorted(
@@ -2475,10 +2483,10 @@ elif "Portefeuille" in page:
     villes_opts = ["Toutes"] + sorted(
         _base_opts["LIBEVILL"].dropna().unique().tolist()[:80]
     ) if "LIBEVILL" in _base_opts.columns else ["Toutes"]
-    ville_sel   = f3.selectbox("📍 Ville", villes_opts, key="pf_ville")
+    ville_sel   = f4.selectbox("📍 Ville", villes_opts, key="pf_ville")
 
-    # 4. Recherche texte libre
-    srch_pf = f4.text_input("🔍 Recherche", placeholder="Nom, ville, apporteur…", key="pf_srch")
+    # 5. Recherche texte libre
+    yr_saisie_sel = f3.selectbox("📅 Année de saisie", _yr_saisie_opts, key="pf_yr_saisie")
 
     # Appliquer les filtres
     fi = df.copy()
@@ -2486,13 +2494,21 @@ elif "Portefeuille" in page:
         fi = fi[fi["ETAT_POLICE"].str.strip() == etat_sel]
     if prod_sel  != "Tous"    and "LIBECATE"      in fi.columns:
         fi = fi[fi["LIBECATE"] == prod_sel]
-    if peri_sel  != "Toutes":
+    if peri_sel != "Toutes":
         if _peri_col == "CODEPERI" and "CODEPERI" in fi.columns:
             _code_sel = _peri_code_map.get(peri_sel)
             if _code_sel is not None:
                 fi = fi[fi["CODEPERI"] == _code_sel]
         elif "PERIODICITE" in fi.columns:
             fi = fi[fi["PERIODICITE"] == peri_sel]
+
+    # Filtre par année de saisie (DATESOUS)
+    if "yr_saisie_sel" in dir() and yr_saisie_sel != "Toutes" and "DATESOUS" in fi.columns:
+        _yr_int = int(yr_saisie_sel)
+        _tmp_fi = fi.copy()
+        _tmp_fi["_yr_saisie"] = pd.to_datetime(_tmp_fi["DATESOUS"], errors="coerce").dt.year
+        fi = _tmp_fi[_tmp_fi["_yr_saisie"] == _yr_int].drop(columns=["_yr_saisie"])
+        if fi.empty: fi = _tmp_fi.drop(columns=["_yr_saisie"])  # fallback
     if ville_sel != "Toutes"  and "LIBEVILL"      in fi.columns:
         fi = fi[fi["LIBEVILL"] == ville_sel]
     if srch_pf.strip():
@@ -2858,18 +2874,45 @@ elif "Commerciaux" in page and "Partenaires" not in page:
     with t_par:
         c1,c2 = st.columns(2)
         with c1:
-            t30 = grp.head(30)
-            fig = make_subplots(specs=[[{"secondary_y":True}]])
-            fig.add_bar(x=t30["CA"],y=t30[ag_k].str[:22],name="CA",marker_color=GREEN,orientation="h")
-            fig.add_scatter(x=t30["Part cum %"],y=t30[ag_k].str[:22],name="Cumul %",
-                line=dict(color=RED,width=2.5),secondary_y=True,orientation="h")
-            fig.update_layout(yaxis=dict(autorange="reversed"))
-            fig_style(fig,520,f"📊 Pareto CA — Top 30 commerciaux · {period_lbl}")
-            st.plotly_chart(fig,use_container_width=True)
+            t10 = grp.head(10)
+            _lbl10 = t10[ag_k].fillna("N/A").astype(str).str[:28]
+            fig_p = make_subplots(specs=[[{"secondary_y":True}]])
+            fig_p.add_bar(x=t10["CA"], y=_lbl10, name="CA",
+                marker_color=GREEN, orientation="h",
+                text=[fmt(v,"") for v in t10["CA"]],
+                textposition="auto", textfont=dict(size=9))
+            fig_p.add_scatter(x=t10["Part cum %"], y=_lbl10, name="Cumul %",
+                line=dict(color=RED, width=2.5),
+                secondary_y=True, orientation="h")
+            fig_p.update_layout(yaxis=dict(autorange="reversed"))
+            fig_style(fig_p, 420, f"📊 Pareto CA — Top 10 apporteurs · {period_lbl}")
+            st.plotly_chart(fig_p, use_container_width=True)
         with c2:
-            # Distribution des CA
-            fig2 = go.Figure(go.Histogram(x=grp["CA"],nbinsx=30,
-                marker_color=GREEN,opacity=.85))
+            # Évolution CA Top 5 par année (si ANNEE disponible)
+            if "ANNEE" in df_com_src.columns:
+                _top5 = grp.head(5)[ag_k].tolist()
+                _evo5 = df_com_src[df_com_src[ag_k].isin(_top5)].groupby(
+                    ["ANNEE", ag_k])[ca_k].sum().reset_index()
+                if not _evo5.empty:
+                    fig_evo = go.Figure()
+                    for _nm in _top5:
+                        _d = _evo5[_evo5[ag_k]==_nm].sort_values("ANNEE")
+                        if not _d.empty:
+                            fig_evo.add_scatter(
+                                x=_d["ANNEE"].astype(str), y=_d[ca_k],
+                                mode="lines+markers+text",
+                                name=str(_nm)[:20],
+                                text=[fmt(v,"") for v in _d[ca_k]],
+                                textposition="top center",
+                                textfont=dict(size=8))
+                    fig_style(fig_evo, 420, "📈 Évolution CA — Top 5 apporteurs")
+                    st.plotly_chart(fig_evo, use_container_width=True)
+                else:
+                    st.info("Données d'évolution insuffisantes.")
+            else:
+                # Fallback : distribution des CA
+                fig2 = go.Figure(go.Histogram(x=grp["CA"],nbinsx=30,
+                    marker_color=GREEN,opacity=.85))
             fig_style(fig2,520,"📊 Distribution CA par commercial")
             st.plotly_chart(fig2,use_container_width=True)
 
@@ -3211,14 +3254,20 @@ elif "Clients" in page:
 # ═══════════════════════════════════════════════════════════════════════════════
 elif "Sinistres" in page:
     if sin is None: alert("Chargez le fichier Prestations.","warn"); st.stop()
-    df_s = sin  # tout le fichier
+    df_s = sin  # données brutes complètes
 
-    # Filtre par année
-    if SEL_YEAR and "ANNEE_SIN" in sin.columns:
+    # Filtrer via DATECOMP (date de comptabilisation de la prestation)
+    _c_dc_sin = next((c for c in sin.columns if "datecomp" in c.lower()
+                      or "comptab" in c.lower()), None)
+    if _c_dc_sin:
+        _sin_tmp = sin.copy()
+        _sin_tmp[_c_dc_sin] = pd.to_datetime(_sin_tmp[_c_dc_sin], errors="coerce")
+        df_sf = filter_df(_sin_tmp, _c_dc_sin, sel_date, MODE)
+        if SEL_YEAR:
+            df_sf = df_sf[df_sf[_c_dc_sin].dt.year == SEL_YEAR]
+        if df_sf.empty: df_sf = sin.copy()
+    elif SEL_YEAR and "ANNEE_SIN" in sin.columns:
         _sin_yr = sin[sin["ANNEE_SIN"] == SEL_YEAR].copy()
-        df_sf = _sin_yr if not _sin_yr.empty else sin_f()
-    elif SEL_YEAR and "Exercice Sinistre" in sin.columns:
-        _sin_yr = sin[sin["Exercice Sinistre"].astype(str) == str(SEL_YEAR)].copy()
         df_sf = _sin_yr if not _sin_yr.empty else sin_f()
     else:
         df_sf = sin_f()
@@ -3565,32 +3614,48 @@ elif "Actuariat" in page:
                     prov["Charge"]           = prov["Regle"] + prov["SAP"]
                     prov["Ratio SAP/Charge"] = prov["SAP"] / prov["Charge"].replace(0, np.nan) * 100
                     prov["Cout moy clos"]    = prov["Regle"] / (prov["Nb"] - prov["Ouvert"]).replace(0, np.nan)
-                fig=go.Figure()
-                _lbl_nat = prov[_act_nat].astype(str).str[:22]
-                fig.add_bar(y=_lbl_nat, x=prov["Regle"] if "Regle" in prov.columns else [0]*len(prov), name="Réglé", marker_color=GREEN, orientation="h", text=[fmt(v,"") for v in (prov["Regle"] if "Regle" in prov.columns else [0]*len(prov))], textposition="auto", textfont=dict(size=9))
-                fig.add_bar(y=_lbl_nat, x=prov["SAP"] if "SAP" in prov.columns else [0]*len(prov), name="SAP résiduel", marker_color=AMBER, orientation="h", text=[fmt(v,"") for v in (prov["SAP"] if "SAP" in prov.columns else [0]*len(prov))], textposition="auto", textfont=dict(size=9))
-                fig.update_layout(barmode="stack",yaxis=dict(autorange="reversed"))
-                fig_style(fig,360,"📌 Structure Réglé / SAP par nature"); st.plotly_chart(fig,use_container_width=True)
-                pv = prov.copy()
-                for c_ in ["Regle","SAP","Charge","Cout moy clos"]:
-                    if c_ in pv.columns: pv[c_] = pv[c_].apply(fmt)
-                if "Ratio SAP/Charge" in pv.columns:
-                    pv["Ratio SAP/Charge"] = pv["Ratio SAP/Charge"].apply(
-                        lambda x: f"{x:.1f}%" if pd.notna(x) else "—")
-                _pv_rename = {
-                    _act_nat:           "Nature de sinistre",
-                    "Regle":            "Réglé (FCFA)",
-                    "SAP":              "SAP (FCFA)",
-                    "Ouvert":           "Dossiers ouverts",
-                    "Charge":           "Charge totale (FCFA)",
-                    "Ratio SAP/Charge": "Ratio SAP/Charge",
-                    "Cout moy clos":    "Coût moyen clos (FCFA)",
-                }
-                pv = pv.rename(columns={k:v for k,v in _pv_rename.items() if k in pv.columns})
-                st.dataframe(pv, use_container_width=True, hide_index=True)
-                a,b = st.columns(2)
-                a.download_button("📥 CSV provisions",dl_csv(prov),"provisions.csv","text/csv",use_container_width=True,key="dl_prov")
-                b.download_button("📥 Excel",dl_xlsx(prov),"provisions.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_prov_xl")
+
+                    # ── Graphique Réglé / SAP ────────────────────────────────
+                    _lbl_nat = prov[_act_nat].astype(str).str[:25]
+                    fig_act = go.Figure()
+                    fig_act.add_bar(y=_lbl_nat, x=prov["Regle"], name="Réglé",
+                        marker_color=GREEN, orientation="h",
+                        text=[fmt(v,"") for v in prov["Regle"]],
+                        textposition="auto", textfont=dict(size=9))
+                    fig_act.add_bar(y=_lbl_nat, x=prov["SAP"], name="SAP résiduel",
+                        marker_color=AMBER, orientation="h",
+                        text=[fmt(v,"") for v in prov["SAP"]],
+                        textposition="auto", textfont=dict(size=9))
+                    fig_act.update_layout(barmode="stack", yaxis=dict(autorange="reversed"))
+                    fig_style(fig_act, 380, "📌 Structure Réglé / SAP par nature de sinistre")
+                    st.plotly_chart(fig_act, use_container_width=True)
+
+                    # ── Tableau des provisions ────────────────────────────────
+                    pv = prov.copy()
+                    for c_ in ["Regle","SAP","Charge","Cout moy clos"]:
+                        if c_ in pv.columns: pv[c_] = pv[c_].apply(fmt)
+                    if "Ratio SAP/Charge" in pv.columns:
+                        pv["Ratio SAP/Charge"] = pv["Ratio SAP/Charge"].apply(
+                            lambda x: f"{x:.1f}%" if pd.notna(x) else "—")
+                    _pv_rename = {
+                        _act_nat:           "Nature de sinistre",
+                        "Regle":            "Réglé (FCFA)",
+                        "SAP":              "SAP (FCFA)",
+                        "Ouvert":           "Dossiers ouverts",
+                        "Charge":           "Charge totale (FCFA)",
+                        "Ratio SAP/Charge": "Ratio SAP/Charge",
+                        "Cout moy clos":    "Coût moyen clos (FCFA)",
+                    }
+                    pv = pv.rename(columns={k:v for k,v in _pv_rename.items() if k in pv.columns})
+                    st.dataframe(pv, use_container_width=True, hide_index=True)
+                    a, b = st.columns(2)
+                    a.download_button("📥 CSV provisions", dl_csv(prov),
+                        "provisions.csv", "text/csv",
+                        use_container_width=True, key="dl_prov")
+                    b.download_button("📥 Excel", dl_xlsx(prov),
+                        "provisions.xlsx",
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True, key="dl_prov_xl")
         with t_l:
             section("🔗 Liaison inter-bases","POLICE_KEY · MATCHING · CA × PF × SIN")
             if pf is not None and ca is not None and "POLICE_KEY" in pf.columns and "POLICE_KEY" in ca.columns:
@@ -3843,12 +3908,16 @@ elif "Saisie BIA" in page:
             if st.button("Choisir Épargne", key="bp_EP0", use_container_width=True):
                 st.session_state["bia_prod"]="EP0"
                 st.session_state["bia_step"]=2; st.rerun()
-            alert("Sélectionnez un produit pour afficher le formulaire BIA.","info")
+
+        if "bia_prod" not in st.session_state:
+            alert("Sélectionnez un produit ci-dessus pour démarrer la saisie.","info")
             st.stop()
 
         prod = next((p for p in PRODUITS if p["code"]==st.session_state.get("bia_prod")), None)
         if not prod:
             st.session_state.pop("bia_prod", None); st.rerun()
+
+        gc        = GC.get(prod["grp"], BLUE)
         step      = st.session_state.get("bia_step", 2)
         is_avigbo   = prod["code"] == "221"
         is_vigninou = prod["code"] == "220"
