@@ -2160,16 +2160,16 @@ if "Accueil" in page:
     if sin is not None:
         st.markdown("")
         # Filtrer par date de comptabilisation selon la période choisie
-        _c_datecomp = next((c for c in sin.columns
-                            if "comp" in c.lower() or "datecomp" in c.lower()), None)
-        if _c_datecomp and df_sf is not None:
-            _df_kpi_sin = df_sf  # déjà filtré par période/année
-        elif SEL_YEAR:
-            _c_yr_sin = next((c for c in sin.columns
+        # Filtrer les sinistres selon la période et l'année (via sin_f() et SEL_YEAR)
+        _df_kpi_sin = sin_f()  # applique le filtre période de la sidebar
+        if SEL_YEAR:
+            _c_yr_sin = next((c for c in _df_kpi_sin.columns
                               if "annee" in c.lower() or "exercice" in c.lower()), None)
-            _df_kpi_sin = sin[sin[_c_yr_sin].astype(str) == str(SEL_YEAR)] if _c_yr_sin else sin
-        else:
-            _df_kpi_sin = df_sf if df_sf is not None else sin
+            if _c_yr_sin:
+                _df_yr = _df_kpi_sin[_df_kpi_sin[_c_yr_sin].astype(str) == str(SEL_YEAR)]
+                if not _df_yr.empty: _df_kpi_sin = _df_yr
+        if _df_kpi_sin is None or _df_kpi_sin.empty:
+            _df_kpi_sin = sin
 
         if _df_kpi_sin.empty:
             alert(f"Aucun sinistre pour la période {period_lbl}.", "info")
@@ -2486,7 +2486,7 @@ elif "Portefeuille" in page:
     ville_sel   = f4.selectbox("📍 Ville", villes_opts, key="pf_ville")
 
     # 5. Recherche texte libre
-    yr_saisie_sel = f3.selectbox("📅 Année de saisie", _yr_saisie_opts, key="pf_yr_saisie")
+    srch_pf2 = f5.text_input("🔍 Recherche", placeholder="Nom, ville…", key="pf_srch2")
 
     # Appliquer les filtres
     fi = df.copy()
@@ -2502,20 +2502,15 @@ elif "Portefeuille" in page:
         elif "PERIODICITE" in fi.columns:
             fi = fi[fi["PERIODICITE"] == peri_sel]
 
-    # Filtre par année de saisie (DATESOUS)
-    if "yr_saisie_sel" in dir() and yr_saisie_sel != "Toutes" and "DATESOUS" in fi.columns:
-        _yr_int = int(yr_saisie_sel)
-        _tmp_fi = fi.copy()
-        _tmp_fi["_yr_saisie"] = pd.to_datetime(_tmp_fi["DATESOUS"], errors="coerce").dt.year
-        fi = _tmp_fi[_tmp_fi["_yr_saisie"] == _yr_int].drop(columns=["_yr_saisie"])
-        if fi.empty: fi = _tmp_fi.drop(columns=["_yr_saisie"])  # fallback
+    # Le filtre DATESOUS est géré par le filtre SEL_YEAR global (sidebar)
     if ville_sel != "Toutes"  and "LIBEVILL"      in fi.columns:
         fi = fi[fi["LIBEVILL"] == ville_sel]
-    if srch_pf.strip():
+    _srch_pf_val = srch_pf2.strip() if "srch_pf2" in dir() else ""
+    if _srch_pf_val:
         _cols_s = [c for c in ["NOM_ASSU","LIBEVILL","NOM_APP","LIBECATE"] if c in fi.columns]
         _mask   = pd.Series(False, index=fi.index)
         for c_ in _cols_s:
-            _mask |= fi[c_].astype(str).str.lower().str.contains(srch_pf.lower(), na=False)
+            _mask |= fi[c_].astype(str).str.lower().str.contains(_srch_pf_val.lower(), na=False)
         fi = fi[_mask]
 
     # Badge filtres actifs
@@ -2888,21 +2883,24 @@ elif "Commerciaux" in page and "Partenaires" not in page:
             fig_style(fig_p, 420, f"📊 Pareto CA — Top 10 apporteurs · {period_lbl}")
             st.plotly_chart(fig_p, use_container_width=True)
         with c2:
-            # Évolution CA Top 5 par année (si ANNEE disponible)
-            if "ANNEE" in df_com_src.columns:
+            # Évolution CA Top 5 par année
+            _df_evo_src = df_com if "df_com" in dir() and df_com is not None else (
+                          df_com_src if "df_com_src" in dir() else None)
+            _ca_k_evo   = "CHIFAFFA" if _df_evo_src is not None and "CHIFAFFA" in _df_evo_src.columns else "MONTENCA"
+            if _df_evo_src is not None and "ANNEE" in _df_evo_src.columns:
                 _top5 = grp.head(5)[ag_k].tolist()
-                _evo5 = df_com_src[df_com_src[ag_k].isin(_top5)].groupby(
-                    ["ANNEE", ag_k])[ca_k].sum().reset_index()
+                _evo5 = _df_evo_src[_df_evo_src[ag_k].isin(_top5)].groupby(
+                    ["ANNEE", ag_k])[_ca_k_evo].sum().reset_index()
                 if not _evo5.empty:
                     fig_evo = go.Figure()
                     for _nm in _top5:
                         _d = _evo5[_evo5[ag_k]==_nm].sort_values("ANNEE")
                         if not _d.empty:
                             fig_evo.add_scatter(
-                                x=_d["ANNEE"].astype(str), y=_d[ca_k],
+                                x=_d["ANNEE"].astype(str), y=_d[_ca_k_evo],
                                 mode="lines+markers+text",
                                 name=str(_nm)[:20],
-                                text=[fmt(v,"") for v in _d[ca_k]],
+                                text=[fmt(v,"") for v in _d[_ca_k_evo]],
                                 textposition="top center",
                                 textfont=dict(size=8))
                     fig_style(fig_evo, 420, "📈 Évolution CA — Top 5 apporteurs")
@@ -2910,8 +2908,8 @@ elif "Commerciaux" in page and "Partenaires" not in page:
                 else:
                     st.info("Données d'évolution insuffisantes.")
             else:
-                # Fallback : distribution des CA
-                fig2 = go.Figure(go.Histogram(x=grp["CA"],nbinsx=30,
+                # Distribution des CA (fallback si pas de colonne ANNEE)
+                fig2 = go.Figure(go.Histogram(x=grp["CA"],nbinsx=25,
                     marker_color=GREEN,opacity=.85))
             fig_style(fig2,520,"📊 Distribution CA par commercial")
             st.plotly_chart(fig2,use_container_width=True)
@@ -3083,10 +3081,10 @@ elif "Partenaires" in page:
                 use_container_width=True, key="dl_part_xl")
             a,b = st.columns(2)
             a.download_button("📥 CSV",dl_csv(dp),"partenaires.csv","text/csv",
-                use_container_width=True,key="dl_pf_csv")
+                use_container_width=True,key="dl_pf_csv_2")
             b.download_button("📥 Excel",dl_xlsx(dp),"partenaires.xlsx",
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,key="dl_pf_xl")
+                use_container_width=True,key="dl_pf_xl_2")
         else:
             alert("Aucun partenaire financier identifié dans les données.","info")
 
@@ -3970,23 +3968,16 @@ elif "Saisie BIA" in page:
 
     if step==2:
         if _is_crt_step:
-            # ── COURTIER PA0 — Étape 1/3 : Souscripteur ─────────────────────
+            # COURTIER PA0 — Étape 1/3 : Souscripteur
             section("Étape 1 / 3 — Souscripteur","PRÉVOYANCE AUTO · INFORMATIONS PERSONNELLES")
-
-            # Afficher logo courtier en haut de chaque étape
             _crt_n2 = st.session_state.get("f_courtier_nom","")
             if _crt_n2:
                 _s2_slug = _crt_n2.strip().lower().replace(" ","").replace(".","").replace("-","")
-                _s2_logo = f"https://logo.clearbit.com/{_s2_slug}.com"
-                _s2_fbk  = f"https://ui-avatars.com/api/?name={_crt_n2.replace(' ','+')}&background=003366&color=fff&size=80&bold=true&format=png"
-                st.image("https://logo.clearbit.com/logo.com", width=60)
-
-            # Champs souscripteur (sans adresse, agence, code/nom apporteur)
+                st.image(f"https://logo.clearbit.com/{_s2_slug}.com", width=55)
             c1,c2,c3 = st.columns([1,2,2])
             with c1: si("f_c_tit","Civilité *",["","M.","Mme","Mlle"])
             with c2: ti("f_c_nom","Nom *","NOM EN MAJUSCULES")
             with c3: ti("f_c_prn","Prénoms *","Prénoms")
-
             c4,c5 = st.columns(2)
             with c4:
                 _ddn_v = st.session_state.get("f_c_ddn", date(1985,1,1))
@@ -3998,27 +3989,25 @@ elif "Saisie BIA" in page:
                     min_value=date(1920,1,1), max_value=today, key="ddn_pa2")
             with c5:
                 ti("f_c_tel","Téléphone *","+229 97…")
-
-            # Valeurs par défaut silencieuses
             if not st.session_state.get("f_c_nat"):
                 st.session_state["f_c_nat"] = "Béninoise"
             st.session_state["f_ass_meme"] = True
             st.session_state["f_bc"]       = True
-
             st.markdown("")
-            b1,b2 = st.columns(2)
-            if b1.button("← Retour", key="ret2_pa"):
+            b1_s2, b2_s2 = st.columns(2)
+            if b1_s2.button("← Retour", key="ret2_pa"):
                 st.session_state.pop("bia_prod",None)
                 st.session_state.pop("bia_step",None); st.rerun()
-            if b2.button("Étape suivante ▶", type="primary", key="nxt2_pa"):
-                _errs = []
-                if not st.session_state.get("f_c_nom","").strip():  _errs.append("Le nom est obligatoire.")
-                if not st.session_state.get("f_c_tel","").strip():  _errs.append("Le téléphone est obligatoire.")
-                if _errs:
-                    for _e in _errs: st.error(_e)
+            if b2_s2.button("Étape suivante ▶", type="primary", key="nxt2_pa"):
+                _errs2 = []
+                if not st.session_state.get("f_c_nom","").strip(): _errs2.append("Le nom est obligatoire.")
+                if not st.session_state.get("f_c_tel","").strip(): _errs2.append("Le téléphone est obligatoire.")
+                if _errs2:
+                    for _e2 in _errs2: st.error(_e2)
                 else:
-                    st.session_state["bia_step"] = 5; st.rerun()
+                    st.session_state["bia_step"] = 3; st.rerun()
         else:
+            # NON-COURTIER (PDG, ACTUAIRE) — Étape 2 : Identification & Agence
             section("Étape 2 — Identification & Agence")
             c1,c2,c3 = st.columns(3)
             with c1: si("f_agence","Agence",AGENCES)
@@ -4028,12 +4017,14 @@ elif "Saisie BIA" in page:
             with c4: ti("f_realis","Réalisateur",user["nom"])
             with c5: si("f_deja","Déjà assuré AFGVie ?",["Non","Oui"])
             if st.session_state.get("f_deja")=="Oui": ti("f_num_ct","N° contrat existant")
-            if st.button("Suivant ▶",type="primary"): st.session_state["bia_step"]=3; st.rerun()
+            if st.button("Suivant ▶", type="primary", key="nxt2_gen"):
+                st.session_state["bia_step"] = 3; st.rerun()
+
+    elif step==3:
         if _is_crt_step:
-            # COURTIER PA0 — Étape 2/4 : Bénéficiaires (optionnel)
-            section("Étape 2 / 4 — Bénéficiaires","OPTIONNEL — vous pouvez passer cette étape")
-            st.info("Les informations bénéficiaires sont optionnelles pour ce produit.")
-            section("Bénéficiaires")
+            # COURTIER PA0 — Étape 2/3 : Bénéficiaires (optionnel)
+            section("Étape 2 / 3 — Bénéficiaires","OPTIONNEL")
+            st.info("ℹ️ Les informations bénéficiaires sont optionnelles pour ce produit.")
             _bc_opts = ["Oui","Non"]
             _cur_bc  = "Oui" if st.session_state.get("f_bc", True) else "Non"
             _bc_sel  = st.radio("Le conjoint est bénéficiaire ?",
@@ -4042,73 +4033,90 @@ elif "Saisie BIA" in page:
             st.session_state["f_bc"] = (_bc_sel == "Oui")
             ti("f_ba","Autres bénéficiaires (nom, lien de parenté)","Ex: Jean MARTIN, fils")
             st.markdown("")
-            b1,b2,b3 = st.columns(3)
-            if b1.button("← Retour", key="ret3_pa"):
+            b1_s3, b2_s3, b3_s3 = st.columns(3)
+            if b1_s3.button("← Retour", key="ret3_pa"):
                 st.session_state["bia_step"] = 2; st.rerun()
-                st.session_state["bia_step"] = 4; st.rerun()
+            if b3_s3.button("Passer ▶", key="skip3_pa"):
                 st.session_state["f_bc"] = True
-                st.session_state["bia_step"] = 4; st.rerun()
-            section("Étape 3 — Souscripteur / Contractant")
-            c1,c2,c3=st.columns([1,2,2])
-        with c1: si("f_c_tit","Civilité *",["","M.","Mme","Mlle"])
-        with c2: ti("f_c_nom","Nom *","NOM (majuscules)")
-        with c3: ti("f_c_prn","Prénoms *")
-        c4,c5,c6=st.columns(3)
-        with c4:
-            cur_d=st.session_state.get("f_c_ddn",date(1985,1,1))
-            if isinstance(cur_d,str):
-                try: cur_d=date.fromisoformat(cur_d)
-                except: cur_d=date(1985,1,1)
-            st.session_state["f_c_ddn"]=st.date_input("Date naissance *",value=cur_d,min_value=date(1930,1,1),max_value=today,key="ddn_c")
-        with c5: ti("f_c_lieu","Lieu naissance *","Cotonou")
-        with c6: ti("f_c_nat","Nationalité","Béninoise")
-        if not st.session_state.get("f_c_nat"): st.session_state["f_c_nat"]="Béninoise"
-        c7,c8,c9=st.columns(3)
-        with c7: si("f_c_mat","Sit. matrimoniale",["","Célibataire","Marié(e)","Divorcé(e)","Veuf(ve)"])
-        with c8: ti("f_c_prof","Profession *")
-        with c9: ti("f_c_adr","Adresse *","Quartier, rue")
-        c10,c11,c12=st.columns(3)
-        with c10: ti("f_c_tel","Tél. cel. *","+229 97…")
-        with c11: ti("f_c_wapp","WhatsApp *","+229 97…")
-        with c12: ti("f_c_npi","N°NPI / Passeport *","BJ123456")
-        c13,c14=st.columns(2)
-        with c13: ti("f_c_eml","Email","exemple@mail.com")
-        with c14: ti("f_c_bp","Boîte postale","01 BP…")
-        st.session_state["f_ass_meme"]=st.checkbox("✓ L'assuré(e) est identique au souscripteur",value=st.session_state.get("f_ass_meme",True))
-        b1,b2=st.columns(2)
-        if b1.button("← Retour"): st.session_state["bia_step"]=2; st.rerun()
-        if b2.button("Suivant ▶", type="primary", key="nxt3_gen_a"):
-            if not st.session_state.get("f_c_nom","").strip(): st.error("Nom obligatoire")
-            elif not st.session_state.get("f_c_prn","").strip(): st.error("Prénom obligatoire")
-            else: st.session_state["bia_step"]=4; st.rerun()
-        if _is_crt_step:
-            # COURTIER PA0 — Étape 3/4 : Caractéristiques du contrat
-            # Rediriger vers step==5 où est défini le bloc PA0 contrat
-            st.session_state["bia_step"] = 5; st.rerun()
-            section("Étape 4 — Assuré(e) & Bénéficiaires")
-        if st.session_state.get("f_ass_meme",True):
-            st.success(f"✅ Assuré(e) = {st.session_state.get('f_c_tit','')} {st.session_state.get('f_c_nom','').upper()} {st.session_state.get('f_c_prn','')} — reprises du souscripteur.")
+                st.session_state["bia_step"] = 5; st.rerun()
+            if b2_s3.button("Suivant ▶", type="primary", key="nxt3_pa"):
+                st.session_state["bia_step"] = 5; st.rerun()
         else:
-            c1,c2,c3=st.columns([1,2,2])
-            with c1: si("f_a_tit","Civilité",["","M.","Mme","Mlle"])
-            with c2:
-                st.session_state["f_a_nom"]=st.text_input("Nom *",value=st.session_state.get("f_a_nom",""),key="an")
-            with c3:
-                st.session_state["f_a_prn"]=st.text_input("Prénoms *",value=st.session_state.get("f_a_prn",""),key="ap")
-            c4,c5=st.columns(2)
+            # NON-COURTIER — Étape 3 : Souscripteur / Contractant
+            section("Étape 3 — Souscripteur / Contractant")
+            c1,c2,c3 = st.columns([1,2,2])
+            with c1: si("f_c_tit","Civilité *",["","M.","Mme","Mlle"])
+            with c2: ti("f_c_nom","Nom *","NOM (majuscules)")
+            with c3: ti("f_c_prn","Prénoms *")
+            c4,c5,c6 = st.columns(3)
             with c4:
-                cur_a=st.session_state.get("f_a_ddn",date(1990,1,1))
-                if isinstance(cur_a,str):
-                    try: cur_a=date.fromisoformat(cur_a)
-                    except: cur_a=date(1990,1,1)
-                st.session_state["f_a_ddn"]=st.date_input("Date naissance",value=cur_a,key="ddn_a")
-            with c5:
-                st.session_state["f_a_npi"]=st.text_input("NPI",value=st.session_state.get("f_a_npi",""),key="ani")
-        section("Bénéficiaires")
-        st.session_state["f_bc"]=st.checkbox("Mon conjoint, mes enfants nés et à naître, à défaut mes ayants droits",value=st.session_state.get("f_bc",True))
-        st.session_state["f_ba"]=st.text_input("Autres bénéficiaires",value=st.session_state.get("f_ba",""),key="ba_t")
-        b1,b2=st.columns(2)
-        if b1.button("← Retour"): st.session_state["bia_step"]=3; st.rerun()
+                cur_d = st.session_state.get("f_c_ddn",date(1985,1,1))
+                if isinstance(cur_d,str):
+                    try: cur_d = date.fromisoformat(cur_d)
+                    except: cur_d = date(1985,1,1)
+                st.session_state["f_c_ddn"] = st.date_input(
+                    "Date naissance *", value=cur_d,
+                    min_value=date(1930,1,1), max_value=today, key="ddn_c")
+            with c5: ti("f_c_lieu","Lieu naissance","Cotonou")
+            with c6: ti("f_c_nat","Nationalité","Béninoise")
+            if not st.session_state.get("f_c_nat"): st.session_state["f_c_nat"] = "Béninoise"
+            c7,c8,c9 = st.columns(3)
+            with c7: si("f_c_mat","Situation matrimoniale",["","Célibataire","Marié(e)","Divorcé(e)","Veuf(ve)"])
+            with c8: ti("f_c_prof","Profession")
+            with c9: ti("f_c_tel","Téléphone *","+229 97…")
+            c10,c11 = st.columns(2)
+            with c10: ti("f_c_wapp","WhatsApp","+229 97…")
+            with c11: ti("f_c_npi","N°NPI / Passeport","BJ123456")
+            st.session_state["f_ass_meme"] = st.checkbox(
+                "✓ L'assuré(e) est identique au souscripteur",
+                value=st.session_state.get("f_ass_meme",True), key="chk_ass")
+            b1_s3g, b2_s3g = st.columns(2)
+            if b1_s3g.button("← Retour", key="ret3_gen"):
+                st.session_state["bia_step"] = 2; st.rerun()
+            if b2_s3g.button("Suivant ▶", type="primary", key="nxt3_gen"):
+                if not st.session_state.get("f_c_nom","").strip(): st.error("Le nom est obligatoire.")
+                elif not st.session_state.get("f_c_tel","").strip(): st.error("Le téléphone est obligatoire.")
+                else: st.session_state["bia_step"] = 4; st.rerun()
+
+    elif step==4:
+        # NON-COURTIER uniquement — Étape 4 : Assuré(e) & Bénéficiaires
+        if _is_crt_step:
+            # Courtier PA0 passe directement de step 3 à step 5 (pas de step 4)
+            st.session_state["bia_step"] = 5; st.rerun()
+        section("Étape 4 — Assuré(e) & Bénéficiaires")
+        if st.session_state.get("f_ass_meme", True):
+            st.success(f"✅ Assuré(e) = {st.session_state.get('f_c_tit','')} "
+                       f"{st.session_state.get('f_c_nom','').upper()} "
+                       f"{st.session_state.get('f_c_prn','')} — repris du souscripteur.")
+        else:
+            c1,c2,c3 = st.columns([1,2,2])
+            with c1: si("f_a_tit","Civilité",["","M.","Mme","Mlle"])
+            with c2: ti("f_a_nom","Nom assuré(e) *","NOM")
+            with c3: ti("f_a_prn","Prénoms *")
+            c4,c5 = st.columns(2)
+            with c4:
+                cur_da = st.session_state.get("f_a_ddn",date(1985,1,1))
+                if isinstance(cur_da,str):
+                    try: cur_da = date.fromisoformat(cur_da)
+                    except: cur_da = date(1985,1,1)
+                st.session_state["f_a_ddn"] = st.date_input(
+                    "Date naissance assuré(e)", value=cur_da,
+                    min_value=date(1900,1,1), max_value=today, key="ddn_a")
+            with c5: ti("f_a_tel","Téléphone assuré(e)")
+        # Bénéficiaires
+        section("Bénéficiaires",)
+        _bc_opts4 = ["Oui","Non"]
+        _cur_bc4  = "Oui" if st.session_state.get("f_bc",True) else "Non"
+        _bc_sel4  = st.radio("Le conjoint est bénéficiaire ?",
+                              _bc_opts4, horizontal=True,
+                              index=_bc_opts4.index(_cur_bc4), key="bc_r_gen")
+        st.session_state["f_bc"] = (_bc_sel4 == "Oui")
+        ti("f_ba","Autres bénéficiaires (nom, lien de parenté)","Ex: Jean MARTIN, fils")
+        b1_s4, b2_s4 = st.columns(2)
+        if b1_s4.button("← Retour", key="ret4_gen"):
+            st.session_state["bia_step"] = 3; st.rerun()
+        if b2_s4.button("Suivant ▶", type="primary", key="nxt4_gen"):
+            st.session_state["bia_step"] = 5; st.rerun()
 
     elif step==5:
 
@@ -4386,7 +4394,7 @@ elif "Saisie BIA" in page:
                 if st.session_state[f"f_{qk}"]=="Oui":
                     st.session_state[f"f_{qk}d"]=st.text_input("Précisions :",value=st.session_state.get(f"f_{qk}d",""),placeholder="Soyez précis(e)",key=f"d_{qk}")
         b1,b2=st.columns(2)
-        if b1.button("← Retour"): st.session_state["bia_step"]=5; st.rerun()
+        if b1.button("← Retour", key="ret6_gen"): st.session_state["bia_step"]=5; st.rerun()
 
     elif step==7 or (step==5 and _is_crt_step):
         if _is_crt_step:
@@ -4729,7 +4737,7 @@ elif "Saisie BIA" in page:
                     _fn2=f"BIA_{prod['code']}_{_nom_sous_g.replace(' ','_')}_{_dt2.now().strftime('%Y%m%d')}.pdf"
                     st.success(f"✅ BIA généré — {len(_pdf2)//1024} Ko")
                     st.download_button("📥 Télécharger le BIA PDF",data=_pdf2,file_name=_fn2,
-                        mime="application/pdf",use_container_width=True,type="primary",key="dl_bia_pdf_final")
+                        mime="application/pdf",use_container_width=True,type="primary",key="dl_bia_pdf_final_2")
                 except ImportError:
                     alert("La bibliothèque <b>reportlab</b> n'est pas installée.","danger")
                 except Exception as _ep_g:
@@ -5024,1104 +5032,6 @@ elif "Base BIA" in page:
                 fig2.update_layout(yaxis=dict(autorange="reversed"))
                 fig_style(fig2,260,"CA cotisations par produit")
                 st.plotly_chart(fig2,use_container_width=True)
-
-
-elif "Produits" in page:
-    section(f"🛒 Analyse Produits — {period_lbl}","CA · ÉTATS · STRUCTURE")
-    t_cap,t_pfp=st.tabs(["💰 CA par produit","📋 Portefeuille par produit"])
-    with t_cap:
-        if ca is None: alert("Chargez la Base CA.","warn")
-        else:
-            df=ca_f()
-            if df.empty: alert(f"Aucune donnée CA pour {period_lbl}. Essayez 'Année'.","warn")
-            else:
-                cp=df.groupby("LIBECATE").agg(CA=("CHIFAFFA","sum"),NbQ=("CHIFAFFA","count"),Comm=("COMMAPPO","sum"),Prime=("PRIMNETT","sum")).reset_index().sort_values("CA",ascending=False)
-                cp["Tx comm"]=cp["Comm"]/cp["CA"].replace(0,np.nan)*100; cp["Part CA"]=cp["CA"]/cp["CA"].sum()*100
-                c1,c2=st.columns(2)
-                with c1:
-                    fig=go.Figure(go.Bar(x=cp["CA"],y=cp["LIBECATE"].str[:26],orientation="h",
-                        marker=dict(color=cp["Tx comm"],colorscale=[[0,MINT],[.5,GREEN],[1,GREEN2]],showscale=True),
-                        text=[fmt(v) for v in cp["CA"]],textposition="outside", textfont=dict(size=10)))
-                    fig.update_layout(yaxis=dict(autorange="reversed"))
-                    fig_style(fig,400,"💰 CA + taux commission")
-                    st.plotly_chart(fig,use_container_width=True)
-                with c2:
-                    fig2=px.sunburst(cp,path=["LIBECATE"],values="CA",color="Part CA",color_continuous_scale=[[0,MINT],[.5,GREEN],[1,GREEN2]])
-                    fig2.update_layout(height=400,margin=dict(l=5,r=5,t=20,b=5))
-                    st.plotly_chart(fig2,use_container_width=True)
-                cp_d=cp.copy()
-                for c_ in ["CA","Comm","Prime"]: cp_d[c_]=cp_d[c_].apply(fmt)
-                cp_d["Tx comm"]=cp_d["Tx comm"].apply(lambda x:f"{x:.2f}%"); cp_d["Part CA"]=cp_d["Part CA"].apply(lambda x:f"{x:.2f}%")
-                cp_d.columns=["Produit","CA","Nb quittances","Commissions","Prime nette","Tx comm","Part CA"]
-                st.dataframe(cp_d,use_container_width=True,hide_index=True)
-                a,b=st.columns(2)
-                a.download_button("📥 CSV",dl_csv(cp),"prod_ca.csv","text/csv",use_container_width=True,key="dl_prod_ca")
-                b.download_button("📥 Excel",dl_xlsx(cp),"prod_ca.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_prod_ca_xl")
-    with t_pfp:
-        if pf is None: alert("Chargez le Portefeuille.","warn")
-        else:
-            df_p=pf_f() if not pf_f().empty else pf
-            pp=df_p.groupby("LIBECATE").agg(Nb=("LIBECATE","count"),
-                Actifs=("ETAT_POLICE",lambda x:(x.str.strip()=="ACTIF").sum()),
-                Resil=("ETAT_POLICE",lambda x:(x.str.strip()=="RESILIE").sum()),
-                Echus=("ETAT_POLICE",lambda x:(x.str.strip().isin(["ECHU","ASSURE ECHU"])).sum()),
-                CA=("MONTENCA","sum")).reset_index()
-            pp["Tx actif"]=(pp["Actifs"]/pp["Nb"].replace(0,np.nan)*100).round(1)
-            pp["Tx resil"]=(pp["Resil"]/pp["Nb"].replace(0,np.nan)*100).round(1); pp=pp.sort_values("Nb",ascending=False)
-            fig=go.Figure()
-            fig.add_bar(name="✅ Actifs",y=pp["LIBECATE"].str[:22],x=pp["Actifs"],orientation="h",marker_color=GREEN)
-            fig.add_bar(name="📉 Résiliés",y=pp["LIBECATE"].str[:22],x=pp["Resil"],orientation="h",marker_color=RED)
-            fig.add_bar(name="⌛ Échus",y=pp["LIBECATE"].str[:22],x=pp["Echus"],orientation="h",marker_color=AMBER)
-            fig.update_layout(barmode="stack",yaxis=dict(autorange="reversed"))
-            fig_style(fig,440,"📊 États polices par produit")
-            st.plotly_chart(fig,use_container_width=True)
-            pp_d=pp.copy(); pp_d["CA"]=pp_d["CA"].apply(fmt)
-            pp_d["Tx actif"]=pp_d["Tx actif"].apply(lambda x:f"{x:.1f}%"); pp_d["Tx resil"]=pp_d["Tx resil"].apply(lambda x:f"{x:.1f}%")
-            st.dataframe(pp_d,use_container_width=True,hide_index=True)
-            a,b=st.columns(2)
-            a.download_button("📥 CSV",dl_csv(pp),"pf_produits.csv","text/csv",use_container_width=True,key="dl_prod_pf")
-            b.download_button("📥 Excel",dl_xlsx(pp),"pf_produits.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_prod_pf_xl")
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# PAGE — COMMERCIAUX & PARTENAIRES
-# ═══════════════════════════════════════════════════════════════════════════════
-elif "Commerciaux" in page:
-    try:
-        section(f"👥 Commerciaux & Partenaires — {period_lbl}","CLASSEMENT · PARETO")
-        df_com_src = ca_f() if ca is not None else pf_f()
-        if df_com_src is None or df_com_src.empty:
-            alert("Chargez la Base CA ou le Portefeuille.","warn"); st.stop()
-
-        # ── Résolution du nom apporteur ──────────────────────────────────────
-        # Stratégie : NOM_APPORT dans CA  sinon jointure PF sur CODEAPPO
-        ca_k   = "CHIFAFFA" if "CHIFAFFA" in df_com_src.columns else "MONTENCA"
-        comm_k = "COMMAPPO" if "COMMAPPO" in df_com_src.columns else None
-        code_k = next((c for c in ["CODEAPPO","CODE_APPO","CODEINTE","CODE_INTER"]
-                       if c in df_com_src.columns), None)
-
-        ag_k = next((c for c in ["NOM_APPORT","NOM_APPO","NOM_INTERMEDIAIRE","NOM_APP"]
-                     if c in df_com_src.columns), None)
-
-        if ag_k is None and code_k and pf is not None:
-            # Jointure PF  récupérer le nom via code apporteur
-            _pf_code = next((c for c in ["CODEAPPO","CODE_APPO"] if c in pf.columns), None)
-            _pf_nom  = next((c for c in ["NOM_APP","NOM_APPORT","NOM_APPO"] if c in pf.columns), None)
-            if _pf_code and _pf_nom:
-                _ref = pf[[_pf_code,_pf_nom]].drop_duplicates(_pf_code).rename(
-                    columns={_pf_code: code_k, _pf_nom: "_NOM_JOIN"})
-                df_com_src = df_com_src.merge(_ref, on=code_k, how="left")
-                ag_k = "_NOM_JOIN"
-
-        if ag_k is None:
-            # Fallback : utiliser le code directement
-            if code_k:
-                df_com_src["_NOM_CODE"] = df_com_src[code_k].astype(str)
-                ag_k = "_NOM_CODE"
-            else:
-                alert("Impossible d'identifier les apporteurs (NOM_APPORT / CODEAPPO introuvables).","warn")
-                st.stop()
-
-        # Groupby agrégé
-        _grp_keys = [ag_k] + ([code_k] if code_k and code_k != ag_k else [])
-        grp = df_com_src.groupby(_grp_keys, dropna=False).agg(
-            CA=(ca_k,"sum"), Nb=(ca_k,"count"),
-            **({} if not comm_k else {"Comm":(comm_k,"sum")})
-        ).reset_index().sort_values("CA", ascending=False).reset_index(drop=True)
-        grp.index+=1; tot=grp["CA"].sum()
-        grp["Part %"]=(grp["CA"]/max(tot,1)*100).round(2); grp["Part cum %"]=grp["Part %"].cumsum().round(1)
-        medals=["🥇","🥈","🥉"]; mc_colors=[GREEN,TEAL,BLUE]
-        c1,c2,c3=st.columns(3)
-        for col,(med,mc_c),(idx,row) in zip([c1,c2,c3],zip(medals,mc_colors),grp.head(3).iterrows()):
-            with col:
-                col.markdown(f"""<div style="background:linear-gradient(135deg,{mc_c}18,white);border:2px solid {mc_c};
-                     border-radius:14px;padding:1rem;text-align:center">
-                  <div style="font-size:28px">{med}</div>
-                  <div style="font-size:12px;font-weight:700;margin:5px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{row[ag_k]}">{str(row[ag_k])[:24]}</div>
-                  <div style="font-size:11px;color:#666">{row['Nb']:,} contrats</div>
-                  <div style="font-size:17px;font-weight:800;color:{mc_c};margin-top:5px">{fmt(row['CA'])}</div>
-                  <div style="font-size:10px;color:#888">{pct(row['Part %'])} du CA total</div>
-                </div>""", unsafe_allow_html=True)
-        st.markdown("")
-        t_r,t_p=st.tabs(["🏆 Classement","📊 Pareto"])
-        with t_r:
-            dr=grp.head(50).copy(); dr["CA"]=dr["CA"].apply(fmt)
-            if "Comm" in dr.columns: dr["Comm"]=dr["Comm"].apply(fmt)
-            dr["Part %"]=dr["Part %"].apply(lambda x:f"{x:.2f}%"); dr["Part cum %"]=dr["Part cum %"].apply(lambda x:f"{x:.1f}%")
-            st.dataframe(dr,use_container_width=True,height=440)
-            a,b=st.columns(2)
-            a.download_button("📥 CSV",dl_csv(grp),"classement.csv","text/csv",use_container_width=True,key="dl_rank")
-            b.download_button("📥 Excel",dl_xlsx(grp.head(50000)),"classement.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_rank_xl")
-        with t_p:
-            _top10 = grp.head(10)
-            _top10_lbl = _top10[ag_k].fillna("N/A").astype(str).str[:28]
-            _top10_ca  = _top10["CA"]
-            fig_t10 = go.Figure(go.Bar(
-                x=_top10_ca, y=_top10_lbl,
-                name="CA", marker_color=[GREEN if i < 3 else TEAL for i in range(len(_top10))],
-                orientation="h",
-                text=[fmt(v) for v in _top10_ca],
-                textposition="outside", textfont=dict(size=10)))
-            fig_t10.update_layout(yaxis=dict(autorange="reversed"))
-            fig_style(fig_t10, 420, "🏆 CA par apporteur — Top 10")
-            st.plotly_chart(fig_t10, use_container_width=True)
-
-            # Top 5 évolution CA si données multi-années disponibles
-            if ca is not None and "ANNEE" in ca.columns and "CHIFAFFA" in ca.columns:
-                _top5_names = grp.head(5)[ag_k].fillna("N/A").astype(str).tolist()
-                _evol = ca[ca[ag_k].fillna("N/A").astype(str).isin(_top5_names)].copy() if ag_k in ca.columns else pd.DataFrame()
-                if not _evol.empty:
-                    _evol["ANNEE"] = _evol["ANNEE"].astype(str)
-                    _evol_g = _evol.groupby(["ANNEE", ag_k])["CHIFAFFA"].sum().reset_index()
-                    fig_evol = go.Figure()
-                    _colors_evol = [GREEN, BLUE, AMBER, RED, TEAL]
-                    for _j, _nm in enumerate(_top5_names):
-                        _d = _evol_g[_evol_g[ag_k].astype(str) == _nm].sort_values("ANNEE")
-                        if not _d.empty:
-                            fig_evol.add_scatter(
-                                x=_d["ANNEE"], y=_d["CHIFAFFA"],
-                                name=str(_nm)[:20],
-                                mode="lines+markers+text",
-                                line=dict(color=_colors_evol[_j % 5], width=2),
-                                marker=dict(size=8),
-                                text=[fmt(v,"") for v in _d["CHIFAFFA"]],
-                                textposition="top center", textfont=dict(size=8))
-                    fig_style(fig_evol, 350, "📈 Évolution CA — Top 5 apporteurs")
-                    st.plotly_chart(fig_evol, use_container_width=True)
-    except Exception as _com_err:
-        st.error(f"Erreur onglet Commerciaux : {_com_err}")
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# PAGE — CLIENTS & GÉOGRAPHIE
-# ═══════════════════════════════════════════════════════════════════════════════
-elif "Clients" in page:
-    if pf is None: alert("Chargez le Portefeuille.","warn"); st.stop()
-    df=pf; section("👤 Clients & Géographie","ASSURÉS · VILLES · DÉMOGRAPHIE · ÂGES")
-    nb_cli=df["NOM_ASSU"].nunique() if "NOM_ASSU" in df.columns else 0
-    nb_vl=df["LIBEVILL"].nunique() if "LIBEVILL" in df.columns else 0
-    ca_moy=float(df["MONTENCA"].fillna(0).sum())/max(nb_cli,1) if "MONTENCA" in df.columns else 0
-    c1,c2,c3=st.columns(3)
-    kpi(c1,"Clients distincts",f"{nb_cli:,}","NOM_ASSU uniques","teal",icon="👤")
-    kpi(c2,"Villes couvertes",f"{nb_vl:,}","LIBEVILL","",icon="📍")
-    kpi(c3,"MONTENCA moy/client",fmt(ca_moy),"Encaissement moyen","blue",icon="💰")
-    t_g,t_d,t_a=st.tabs(["🗺️ Géographie","📊 Démographie","🎂 Pyramide des âges"])
-    with t_g:
-        if "LIBEVILL" in df.columns:
-            c1,c2=st.columns(2)
-            with c1:
-                vl=df.groupby("LIBEVILL").agg(Nb=("LIBEVILL","count"),CA=("MONTENCA","sum")).reset_index().sort_values("Nb",ascending=False).head(15)
-                fig=go.Figure(go.Bar(x=vl["Nb"],y=vl["LIBEVILL"].str[:18],orientation="h",
-                    marker=dict(color=vl["Nb"],colorscale=[[0,MINT],[1,GREEN2]],showscale=False),
-                    text=vl["Nb"].astype(str),textposition="outside", textfont=dict(size=10)))
-                fig.update_layout(yaxis=dict(autorange="reversed"))
-                fig_style(fig,400,"📍 Top 15 villes — Polices")
-                st.plotly_chart(fig,use_container_width=True)
-            with c2:
-                vl_ca=df.groupby("LIBEVILL")["MONTENCA"].sum().reset_index().sort_values("MONTENCA",ascending=False).head(12)
-                fig2=go.Figure(go.Bar(x=vl_ca["MONTENCA"],y=vl_ca["LIBEVILL"].str[:18],orientation="h",
-                    marker=dict(color=vl_ca["MONTENCA"],colorscale=[[0,MINT],[1,GREEN2]],showscale=False),
-                    text=[fmt(v) for v in vl_ca["MONTENCA"]],textposition="outside", textfont=dict(size=10)))
-                fig2.update_layout(yaxis=dict(autorange="reversed"))
-                fig_style(fig2,400,"💰 Top 12 villes — CA (MONTENCA)")
-                st.plotly_chart(fig2,use_container_width=True)
-            vl_e=df.groupby("LIBEVILL").agg(Nb=("LIBEVILL","count"),CA=("MONTENCA","sum")).reset_index().sort_values("Nb",ascending=False)
-            vl_e["CA"]=vl_e["CA"].apply(fmt)
-            st.dataframe(vl_e.head(30),use_container_width=True,hide_index=True)
-            a,b=st.columns(2)
-            a.download_button("📥 CSV villes",dl_csv(vl_e),"geo.csv","text/csv",use_container_width=True,key="dl_geo")
-            b.download_button("📥 Excel",dl_xlsx(vl_e),"geo.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_geo_xl")
-    with t_d:
-        c1,c2,c3=st.columns(3)
-        with c1:
-            if "SEXERISQ" in df.columns:
-                sx=df["SEXERISQ"].map({"M":"Hommes","F":"Femmes"}).value_counts().reset_index(); sx.columns=["Sexe","Nb"]
-                fig=go.Figure(go.Pie(labels=sx["Sexe"],values=sx["Nb"],hole=.44,marker_colors=[BLUE,GREEN],textinfo="percent+label+value", textfont=dict(size=12)))
-                fig_style(fig,320,"👥 Répartition H/F"); st.plotly_chart(fig,use_container_width=True)
-        with c2:
-            if "CODEPERI" in df.columns:
-                per=df["CODEPERI"].map(CODEPERI_MAP).fillna("Autre").value_counts().reset_index(); per.columns=["Périodicité","Nb"]
-                fig2=go.Figure(go.Pie(labels=per["Périodicité"],values=per["Nb"],hole=.44,marker_colors=PAL,textinfo="percent+label", textfont=dict(size=11)))
-                fig_style(fig2,320,"📅 Périodicité cotisations"); st.plotly_chart(fig2,use_container_width=True)
-        with c3:
-            if "NOM_APP" in df.columns:
-                ap=df[df["ETAT_POLICE"].str.strip()=="ACTIF"]["NOM_APP"].value_counts().head(10).reset_index() if "ETAT_POLICE" in df.columns else df["NOM_APP"].value_counts().head(10).reset_index()
-                ap.columns=["Apporteur","Nb actifs"]
-                fig3=go.Figure(go.Bar(y=ap["Apporteur"].str[:18],x=ap["Nb actifs"],orientation="h",marker_color=GREEN,text=ap["Nb actifs"].astype(str),textposition="outside", textfont=dict(size=10)))
-                fig3.update_layout(yaxis=dict(autorange="reversed"))
-                fig_style(fig3,320,"🏆 Top apporteurs (polices actives)"); st.plotly_chart(fig3,use_container_width=True)
-    with t_a:
-        if "DATENAIS" in df.columns and "SEXERISQ" in df.columns:
-            da=df[["DATENAIS","SEXERISQ","MONTENCA"]].copy()
-            da["DATENAIS"]=pd.to_datetime(da["DATENAIS"],errors="coerce")
-            da=da.dropna(subset=["DATENAIS"])
-            da["age"]=(pd.Timestamp.now()-da["DATENAIS"]).dt.days/365.25
-            da=da[(da["age"]>=0)&(da["age"]<=95)]
-            bins=list(range(0,100,5)); da["tranch"]=pd.cut(da["age"],bins=bins,right=False).astype(str)
-            pyr=da.groupby(["tranch","SEXERISQ"]).size().unstack(fill_value=0).reset_index()
-            if "M" in pyr.columns and "F" in pyr.columns:
-                fig=go.Figure()
-                fig.add_bar(y=pyr["tranch"],x=-pyr["M"],name="Hommes",orientation="h",marker_color=BLUE,text=pyr["M"].astype(str),textposition="outside", textfont=dict(size=9))
-                fig.add_bar(y=pyr["tranch"],x=pyr["F"],name="Femmes",orientation="h",marker_color=GREEN,text=pyr["F"].astype(str),textposition="outside", textfont=dict(size=9))
-                fig.update_layout(barmode="overlay",xaxis=dict(tickvals=list(range(-4000,4001,500)),ticktext=[str(abs(x)) for x in range(-4000,4001,500)]))
-                fig_style(fig,520,"🎂 Pyramide des âges (tranches quinquennales)")
-                st.plotly_chart(fig,use_container_width=True)
-                a,_=st.columns(2)
-                a.download_button("📥 CSV pyramide",dl_csv(da[["age","SEXERISQ"]]),"pyramide.csv","text/csv",use_container_width=True,key="dl_pyr")
-        else: alert("Colonnes DATENAIS et SEXERISQ requises dans le portefeuille.","info")
-
-
-    # ═══════════════════════════════════════════════════════════════════════════════
-    # PAGE — SINISTRES & PROVISIONS
-    # ═══════════════════════════════════════════════════════════════════════════════
-elif "Sinistres" in page:
-        if sin is None: alert("Chargez le fichier Prestations.","warn"); st.stop()
-        df_s=sin  # tout le fichier pour les provisions historiques
-        df_sf=sin_f()  # filtré par période
-
-        section(f"⚠️ Sinistres & Prestations — {period_lbl}","ANALYSE ACTUARIELLE · SAP · S/P")
-        tot_sin=float(sin["Réglement Total"].fillna(0).sum()) if "Réglement Total" in sin.columns else 0
-        tot_sap=float(sin["SAP au 31/12/2025"].fillna(0).sum()) if "SAP au 31/12/2025" in sin.columns else 0
-        tot_hon=float(sin["Réglement Honoraires"].fillna(0).sum()) if "Réglement Honoraires" in sin.columns else 0
-        charge_u=tot_sin+tot_sap+tot_hon
-        nb_sin=len(sin); nb_clos=int((sin["Sort Sinistre"]=="Cloturé").sum()) if "Sort Sinistre" in sin.columns else 0
-        nb_ouv=int((sin["Sort Sinistre"]=="Ouvert").sum()) if "Sort Sinistre" in sin.columns else 0
-        ca_all=float(ca["CHIFAFFA"].fillna(0).sum()) if ca is not None and "CHIFAFFA" in ca.columns else 0
-        sp=tot_sin/max(ca_all,1)*100; cout_m=tot_sin/max(nb_clos,1)
-        actifs_n=int((pf["ETAT_POLICE"].str.strip()=="ACTIF").sum()) if pf is not None and "ETAT_POLICE" in pf.columns else 1
-        burning=charge_u/max(actifs_n,1)*1000
-
-        c1,c2,c3,c4,c5,c6=st.columns(6)
-        kpi(c1,"Total réglé",fmt(tot_sin),"Toutes périodes","red",icon="💊")
-        kpi(c2,"SAP (provisions)",fmt(tot_sap),"Au 31/12/2025","amber",icon="📌")
-        kpi(c3,"Charge ultime",fmt(charge_u),"Réglé+SAP+Hon.","red",icon="⚖️")
-        kpi(c4,"Ratio S/P",pct(sp),"vs CA","red" if sp>80 else "amber",icon="📐")
-        kpi(c5,"Coût moy/clos",fmt(cout_m),"Dossiers clos","teal",icon="💰")
-        kpi(c6,"Burning Cost",fmt(burning),"Charge/1 000 actifs","red",icon="🔥")
-
-        if not df_sf.empty and len(df_sf)<len(sin):
-            alert(f"Période filtrée : {len(df_sf):,} dossiers (sur {len(sin):,}) pour {period_lbl}. Les KPIs ci-dessus couvrent toutes les périodes.","info")
-
-        t_n,t_e,t_p,t_tri,t_r=st.tabs(["🏷️ Par nature","📈 Évolution","🛒 Par produit","📐 Triangle dev.","🔍 Données brutes"])
-
-        with t_n:
-            if "Nature Sinistre" in sin.columns:
-                nat=sin.groupby("Nature Sinistre").agg(
-                    Nb=(_c_nat_,"count") if _c_nat_ else ("POLICE_KEY","count"),Regle=(_c_regle_,"sum") if _c_regle_ else ("CHIFAFFA","count"),SAP=(_c_sap_,"sum") if _c_sap_ else ("CHIFAFFA","count")).reset_index().sort_values("Réglé",ascending=False)
-                nat["Charge"]=nat["Réglé"]+nat["SAP"]; nat["Coût moy"]=nat["Réglé"]/nat["Nb"].replace(0,np.nan)
-                c1,c2=st.columns(2)
-                with c1:
-                    fig=go.Figure()
-                    fig.add_bar(y=nat.iloc[:,0].astype(str).str[:25] if "Nature Sinistre" not in nat.columns else nat["Nature Sinistre"].astype(str).str[:25],x=nat["Réglé"],name="Réglé",marker_color=RED,orientation="h")
-                    fig.add_bar(y=nat.iloc[:,0].astype(str).str[:25] if "Nature Sinistre" not in nat.columns else nat["Nature Sinistre"].astype(str).str[:25],x=nat["SAP"],name="SAP",marker_color=AMBER,orientation="h")
-                    fig.update_layout(barmode="stack",yaxis=dict(autorange="reversed"))
-                    fig_style(fig,360,"💊 Réglé + SAP par nature"); st.plotly_chart(fig,use_container_width=True)
-                with c2:
-                    fig2=px.treemap(nat,path=["Nature Sinistre"],values="Charge",color="Nb",
-                        color_continuous_scale=[[0,MINT],[.5,AMBER],[1,RED]])
-                    fig2.update_layout(height=360,margin=dict(l=5,r=5,t=20,b=5)); st.plotly_chart(fig2,use_container_width=True)
-                nat_d=nat.copy()
-                for c_ in ["Réglé","SAP","Charge","Coût moy"]: nat_d[c_]=nat_d[c_].apply(fmt)
-                st.dataframe(nat_d,use_container_width=True,hide_index=True)
-                a,b=st.columns(2)
-                a.download_button("📥 CSV",dl_csv(nat),"sin_nature.csv","text/csv",use_container_width=True,key="dl_sin_nat")
-                b.download_button("📥 Excel",dl_xlsx(nat),"sin_nature.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_sin_nat_xl")
-
-        with t_e:
-            if "ANNEE_SIN" in sin.columns:
-                evo=sin.groupby("ANNEE_SIN").agg(Nb=("ANNEE_SIN","count"),Regle=(_c_regle_,"sum") if _c_regle_ else ("CHIFAFFA","count"),SAP=(_c_sap_,"sum") if _c_sap_ else ("CHIFAFFA","count")).reset_index()
-                evo=evo[evo["ANNEE_SIN"].between(1997,2025)].sort_values("ANNEE_SIN")
-                fig=make_subplots(specs=[[{"secondary_y":True}]])
-                fig.add_bar(x=evo["ANNEE_SIN"].astype(str),y=evo["Réglé"],name="Réglé",marker_color=RED,opacity=.82)
-                fig.add_bar(x=evo["ANNEE_SIN"].astype(str),y=evo["SAP"],name="SAP",marker_color=AMBER,opacity=.82)
-                fig.add_scatter(x=evo["ANNEE_SIN"].astype(str),y=evo["Nb"],name="Nb dossiers",
-                    line=dict(color=GREEN,width=2.5),mode="lines+markers",secondary_y=True)
-                fig.update_layout(barmode="stack")
-                fig.update_yaxes(title_text="Montant (FCFA)",secondary_y=False)
-                fig.update_yaxes(title_text="Nb dossiers",secondary_y=True,showgrid=False)
-                fig_style(fig,420,"📈 Sinistres par exercice 1997–2025"); st.plotly_chart(fig,use_container_width=True)
-                a,b=st.columns(2)
-                a.download_button("📥 CSV",dl_csv(evo),"evo_sin.csv","text/csv",use_container_width=True,key="dl_evo_sin")
-                b.download_button("📥 Excel",dl_xlsx(evo),"evo_sin.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_evo_sin_xl")
-
-        with t_p:
-            cat_c="Libéllé Catégorie" if "Libéllé Catégorie" in sin.columns else "Libellé Catégorie"
-            if cat_c in sin.columns:
-                sp2=sin.groupby(cat_c).agg(Nb=(cat_c,"count"),Regle=(_c_regle_,"sum") if _c_regle_ else ("CHIFAFFA","count"),SAP=(_c_sap_,"sum") if _c_sap_ else ("CHIFAFFA","count")).reset_index().sort_values("Réglé",ascending=False)
-                sp2["Charge"]=sp2["Réglé"]+sp2["SAP"]
-                fig=go.Figure()
-                fig.add_bar(x=sp2["Réglé"],y=sp2[cat_c].str[:24],name="Réglé",marker_color=RED,orientation="h")
-                fig.add_bar(x=sp2["SAP"],y=sp2[cat_c].str[:24],name="SAP",marker_color=AMBER,orientation="h")
-                fig.update_layout(barmode="stack",yaxis=dict(autorange="reversed"))
-                fig_style(fig,360,"🛒 Sinistres par produit"); st.plotly_chart(fig,use_container_width=True)
-                sp2_d=sp2.copy()
-                for c_ in ["Réglé","SAP","Charge"]: sp2_d[c_]=sp2_d[c_].apply(fmt)
-                st.dataframe(sp2_d,use_container_width=True,hide_index=True)
-                a,_=st.columns(2)
-                a.download_button("📥 CSV",dl_csv(sp2),"sin_prod.csv","text/csv",use_container_width=True,key="dl_sin_p")
-
-        with t_tri:
-            section("📐 Triangle de développement des sinistres","EXERCICE × SURVENANCE")
-            if "ANNEE_SIN" in sin.columns and "Date Survenance" in sin.columns:
-                sin2=sin.copy()
-                sin2["DEV_YEAR"]=pd.to_datetime(sin2["Date Survenance"],errors="coerce").dt.year.astype("Int64")
-                tri=sin2.pivot_table(index="ANNEE_SIN",columns="DEV_YEAR",values=_c_regle_,aggfunc="sum",fill_value=0)
-                tri_d=tri.copy().astype(float)
-                for col_ in tri_d.columns: tri_d[col_]=tri_d[col_].apply(fmt)
-                alert("Triangle des montants réglés par exercice sinistre (lignes) et année de survenance (colonnes).","info")
-                st.dataframe(tri_d,use_container_width=True,height=380)
-                a,_=st.columns(2)
-                a.download_button("📥 CSV triangle",dl_csv(tri.reset_index()),"triangle.csv","text/csv",use_container_width=True,key="dl_tri")
-            else: alert("Colonnes ANNEE_SIN et Date Survenance requises.","info")
-
-        with t_r:
-            cs=[c for c in ["Date Survenance","Libéllé Catégorie","Nature Sinistre","Sort Sinistre","Souscripteur","Désignation risque","Réglement Total","SAP au 31/12/2025","Date Déclaration","Date validation","Nom Bénéficiaire","Exercice Sinistre","POLICE_KEY"] if c in sin.columns]
-            srch_s=st.text_input("🔍 Rechercher",label_visibility="collapsed",placeholder="Nature, souscripteur, produit…",key="srch_sin")
-            di_s=sin[cs].copy()
-            for dc in ["Date Survenance","Date Déclaration","Date validation"]:
-                if dc in di_s.columns: di_s[dc]=di_s[dc].apply(ds)
-            for nc in ["Réglement Total","SAP au 31/12/2025"]:
-                if nc in di_s.columns: di_s[nc]=di_s[nc].apply(lambda x:fmt(x,""))
-            if srch_s: di_s=di_s[di_s.apply(lambda r:srch_s.lower() in str(r).lower(),axis=1)]
-            st.dataframe(di_s.head(500),use_container_width=True,hide_index=True,height=420)
-            st.caption(f"Affichage 500 / {len(di_s):,} lignes")
-            a,b=st.columns(2)
-            a.download_button("📥 CSV complet",dl_csv(sin),"prestations.csv","text/csv",use_container_width=True,key="dl_sin_raw")
-            b.download_button("📥 Excel",dl_xlsx(sin[cs].head(50000)),"prestations.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_sin_raw_xl")
-
-    # ═══════════════════════════════════════════════════════════════════════════════
-    # PAGE — ACTUARIAT AVANCÉ
-    # ═══════════════════════════════════════════════════════════════════════════════
-elif "Actuariat" in page:
-    section("📐 Actuariat Avancé","CIMA · SAP · BURNING COST · JOINTURES")
-    t_c,t_p,t_l=st.tabs(["🏛️ CIMA & Solvabilité","📌 Provisions SAP","🔗 Liaison inter-bases"])
-    with t_c:
-        if pf is None: alert("Chargez le Portefeuille.","warn")
-        else:
-            nb=len(pf); ek="ETAT_POLICE"
-            actifs=int((pf[ek].str.strip().isin(["ACTIF"])).sum()) if ek in pf.columns else 0
-            resil=int((pf[ek].str.strip()=="RESILIE").sum()) if ek in pf.columns else 0
-            inact=int((pf[ek].str.strip()=="INACTIF").sum()) if ek in pf.columns else 0
-            echu=int((pf[ek].str.strip().isin(["ECHU","ASSURE ECHU"])).sum()) if ek in pf.columns else 0
-            tx_act=actifs/max(nb,1)*100; tx_res=resil/max(nb-inact,1)*100
-            ca_t=float(ca["CHIFAFFA"].fillna(0).sum()) if ca is not None and "CHIFAFFA" in ca.columns else 0
-            sin_t=float(sin["Réglement Total"].fillna(0).sum()) if sin is not None and "Réglement Total" in sin.columns else 0
-            sap_t=float(sin["SAP au 31/12/2025"].fillna(0).sum()) if sin is not None and "SAP au 31/12/2025" in sin.columns else 0
-            sp=sin_t/max(ca_t,1)*100; charge_u=sin_t+sap_t; burning=charge_u/max(actifs,1)*1000
-            monten=float(pf["MONTENCA"].fillna(0).apply(lambda x: float(str(x).replace(" ","").replace(",",".")) if str(x).replace(" ","").replace(",",".").replace(".","",1).replace("-","",1).isdigit() else 0).sum()) if "MONTENCA" in pf.columns else 0
-            indics=[
-                (tx_act,"Taux d'activité net",50,">=",GREEN),
-                (tx_res,"Taux résiliation CIMA",25,"<=",RED),
-                (sp,"Ratio S/P",80,"<=",AMBER),
-                (inact/max(nb,1)*100,"Part inactifs",5,"<=",AMBER),
-            ]
-            for v,lbl,seuil,op,col in indics:
-                ok=v>=seuil if op==">=" else v<=seuil; c_=GREEN if ok else RED
-                st.markdown(f"""<div style="display:flex;align-items:center;justify-content:space-between;
-                     padding:10px 14px;border-left:4px solid {c_};background:{c_}0D;
-                     border-radius:0 10px 10px 0;margin-bottom:8px">
-                  <div><div style="font-size:13px;font-weight:700;color:{NAVY}">{lbl}</div>
-                  <div style="font-size:10px;color:#8899AA">Norme CIMA : {op}{seuil}%</div></div>
-                  <div style="font-size:20px;font-weight:900;color:{c_}">{pct(v)} {'✅' if ok else '⚠️'}</div>
-                </div>""", unsafe_allow_html=True)
-            st.markdown("")
-            ac1,ac2,ac3,ac4=st.columns(4)
-            kpi(ac1,"Burning Cost",fmt(burning),"Charge ultime / 1 000 actifs","red",icon="🔥")
-            kpi(ac2,"Charge ultime",fmt(charge_u),"Réglé + SAP","red",icon="⚖️")
-            kpi(ac3,"CA 2024",fmt(ca_t),"Base calcul S/P","teal",icon="💰")
-            kpi(ac4,"Encaissements PF",fmt(monten),"MONTENCA total","blue",icon="📊")
-    with t_p:
-        if sin is None: alert("Chargez les Prestations.","warn")
-        else:
-            prov=sin.groupby("Nature Sinistre").agg(
-                Nb=(_c_nat_,"count") if _c_nat_ else ("POLICE_KEY","count"),Regle=(_c_regle_,"sum") if _c_regle_ else ("CHIFAFFA","count"),
-                SAP=(_c_sap_,"sum") if "_c_sap_" in dir() and _c_sap_ else ("CHIFAFFA","count"),Ouvert=(_c_sort_,lambda x:(x=="Ouvert").sum()) if "_c_sort_" in dir() and _c_sort_ else ("CHIFAFFA","count")
-            ).reset_index()
-            prov["Charge"]=prov["Regle"]+prov["SAP"]
-            prov["Ratio SAP/Charge"]=prov["SAP"]/prov["Charge"].replace(0,np.nan)*100
-            prov["Cout moy clos"]=prov["Regle"]/(prov["Nb"]-prov["Ouvert"]).replace(0,np.nan)
-            fig=go.Figure()
-            fig.add_bar(y=prov["Nature Sinistre"].str[:22],x=prov["Regle"],name="Regle",marker_color=GREEN,orientation="h")
-            fig.add_bar(y=prov["Nature Sinistre"].str[:22],x=prov["SAP"],name="SAP résiduel",marker_color=AMBER,orientation="h")
-            fig.update_layout(barmode="stack",yaxis=dict(autorange="reversed"))
-            fig_style(fig,360,"📌 Structure Réglé / SAP par nature"); st.plotly_chart(fig,use_container_width=True)
-            pv=prov.copy()
-            for c_ in ["Regle","SAP","Charge","Cout moy clos"]: pv[c_]=pv[c_].apply(fmt)
-            pv["Ratio SAP/Charge"]=pv["Ratio SAP/Charge"].apply(lambda x:f"{x:.1f}%" if pd.notna(x) else "—")
-            pv.columns=["Nature","Nb","Réglé","SAP","Dossiers ouverts","Charge","Ratio SAP/Charge","Coût moyen clos"]
-            st.dataframe(pv,use_container_width=True,hide_index=True)
-            a,b=st.columns(2)
-            a.download_button("📥 CSV provisions",dl_csv(prov),"provisions.csv","text/csv",use_container_width=True,key="dl_prov")
-            b.download_button("📥 Excel",dl_xlsx(prov),"provisions.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_prov_xl")
-    with t_l:
-        section("🔗 Liaison inter-bases","POLICE_KEY · MATCHING · CA × PF × SIN")
-        if pf is not None and ca is not None and "POLICE_KEY" in pf.columns and "POLICE_KEY" in ca.columns:
-            mc=ca["POLICE_KEY"].isin(pf["POLICE_KEY"]).sum()
-            ms=sin["POLICE_KEY"].isin(pf["POLICE_KEY"]).sum() if sin is not None and "POLICE_KEY" in sin.columns else 0
-            mcs=sin["POLICE_KEY"].isin(ca["POLICE_KEY"]).sum() if sin is not None and "POLICE_KEY" in sin.columns and "POLICE_KEY" in ca.columns else 0
-            l1,l2,l3=st.columns(3)
-            kpi(l1,"CA ↔ PF",f"{mc:,}",f"{mc/max(len(ca),1)*100:.1f}% des quittances","teal",icon="🔗")
-            kpi(l2,"SIN ↔ PF",f"{ms:,}",f"{ms/max(len(sin) if sin is not None else 1,1)*100:.1f}%","teal",icon="🔗")
-            kpi(l3,"SIN ↔ CA",f"{mcs:,}",f"{mcs/max(len(sin) if sin is not None else 1,1)*100:.1f}%","blue",icon="🔗")
-            section("📊 Top polices — Jointure CA × PF × SIN","CA DÉCROISSANT")
-            pf_lk=pf[["POLICE_KEY","LIBECATE","ETAT_POLICE","NOM_ASSU","LIBEVILL","NOM_APP"]].drop_duplicates("POLICE_KEY")
-            ca_pf=ca.merge(pf_lk,on="POLICE_KEY",how="inner",suffixes=("","_PF"))
-            if sin is not None and "POLICE_KEY" in sin.columns:
-                sin_agg=sin.groupby("POLICE_KEY").agg(Regle=(_c_regle_,"sum") if _c_regle_ else ("CHIFAFFA","count"),SAP=(_c_sap_,"sum") if _c_sap_ else ("CHIFAFFA","count"),NbSin=("POLICE_KEY","count")).reset_index()
-                ca_pf=ca_pf.merge(sin_agg,on="POLICE_KEY",how="left")
-            else:
-                ca_pf["Réglé"]=np.nan; ca_pf["SAP"]=np.nan; ca_pf["NbSin"]=np.nan
-            tp=ca_pf.groupby(["POLICE_KEY","LIBECATE","ETAT_POLICE","NOM_ASSU","NOM_APP"]).agg(
-                CA=("CHIFAFFA","sum"),NbQ=("CHIFAFFA","count"),
-                Regle=("Réglé","first"),SAP=("SAP","first"),NbSin=("NbSin","first")
-            ).reset_index().sort_values("CA",ascending=False).head(30)
-            tp_d=tp.copy()
-            for c_ in ["CA","Réglé","SAP"]: tp_d[c_]=tp_d[c_].apply(lambda x:fmt(x) if pd.notna(x) else "—")
-            tp_d["NbSin"]=tp_d["NbSin"].apply(lambda x:str(int(x)) if pd.notna(x) else "0")
-            st.dataframe(tp_d,use_container_width=True,hide_index=True)
-            a,_=st.columns(2)
-            a.download_button("📥 CSV jointure 3 bases",dl_csv(tp),"jointure_3bases.csv","text/csv",use_container_width=True,key="dl_join3")
-        else: alert("Chargez le Portefeuille et la Base CA.","info")
-
-    # ═══════════════════════════════════════════════════════════════════════════════
-    # PAGE — PRÉVISIONS & TENDANCES
-    # ═══════════════════════════════════════════════════════════════════════════════
-elif "Prévisions" in page:
-    section("🔮 Prévisions & Tendances","MODÈLE POLYNOMIAL · SAISONNALITÉ · PROJECTION")
-    if ca is None and pf is None: alert("Chargez la Base CA ou le Portefeuille.","warn"); st.stop()
-    src=ca if ca is not None else pf
-    ca_k="CHIFAFFA" if "CHIFAFFA" in src.columns else "MONTENCA"
-    d_k="DATECOMP" if "DATECOMP" in src.columns else "DATESOUS"
-    if d_k not in src.columns: alert("Colonne date introuvable.","warn"); st.stop()
-    src2=src[[d_k,ca_k]].copy()
-    src2[d_k]=pd.to_datetime(src2[d_k],errors="coerce"); src2=src2.dropna(subset=[d_k])
-    mo=src2.groupby(src2[d_k].dt.to_period("M").astype(str))[ca_k].sum().reset_index()
-    mo.columns=["Période","CA"]; mo=mo.sort_values("Période")
-    n=len(mo)
-    if n<6: alert("Données insuffisantes pour les prévisions (< 6 mois).","warn"); st.stop()
-    c1,c2=st.columns(2)
-    deg_sel=c1.slider("Degré du polynôme",1,4,2,key="deg_s")
-    n_hor=c2.slider("Mois à prévoir",1,24,12,key="n_hor_s")
-    xs=np.arange(n); ys=mo["CA"].values.astype(float)
-    coeffs=np.polyfit(xs,ys,deg_sel)
-    trend_h=np.polyval(coeffs,xs)
-    x_f=np.arange(n,n+n_hor); trend_f=np.maximum(np.polyval(coeffs,x_f),0)
-    r2=1-np.sum((ys-trend_h)**2)/max(np.sum((ys-ys.mean())**2),1)
-    last_p=pd.Period(mo["Période"].iloc[-1],"M")
-    fut_l=[str(last_p+i+1) for i in range(n_hor)]
-    kc1,kc2,kc3=st.columns(3)
-    kpi(kc1,"CA historique total",fmt(ys.sum()),"Série complète","",icon="💰")
-    kpi(kc2,f"R² modèle (deg {deg_sel})",f"{r2:.4f}","Qualité ajustement","teal" if r2>.8 else "amber",icon="📐")
-    kpi(kc3,f"Prévision H+{n_hor}",fmt(trend_f[-1]),"Projection","blue",icon="🔮")
-    st.markdown("")
-    fig=go.Figure()
-    fig.add_scatter(x=mo["Période"],y=ys,name="CA historique",line=dict(color=GREEN,width=2),mode="lines+markers",marker=dict(size=4))
-    fig.add_scatter(x=mo["Période"],y=trend_h,name="Tendance ajustée",line=dict(color=TEAL,width=2,dash="dot"),mode="lines")
-    fig.add_scatter(x=fut_l,y=trend_f,name="Prévision",line=dict(color=RED,width=2.5,dash="dash"),mode="lines+markers",marker=dict(symbol="star",size=9,color=RED))
-    fig.add_vrect(x0=fut_l[0],x1=fut_l[-1],fillcolor="rgba(192,57,43,0.04)",line_width=0,annotation_text="Zone prévision")
-    fig_style(fig,480,f"🔮 Modèle polynomial (deg {deg_sel}) — R²={r2:.3f}")
-    st.plotly_chart(fig,use_container_width=True)
-    df_fut=pd.DataFrame({"Période":fut_l,"CA prévu":[fmt(v) for v in trend_f],"Valeur (FCFA)":trend_f.round(0)})
-    st.dataframe(df_fut[["Période","CA prévu"]],use_container_width=True,hide_index=True)
-    a,b=st.columns(2)
-    a.download_button("📥 CSV prévisions",dl_csv(df_fut),"previsions.csv","text/csv",use_container_width=True,key="dl_prev")
-    b.download_button("📥 Excel",dl_xlsx(df_fut),"previsions.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_prev_xl")
-    if n>=12:
-        section("📅 Saisonnalité mensuelle","CA MOYEN PAR MOIS")
-        src2["MOIS"]=src2[d_k].dt.month
-        saison=src2.groupby("MOIS")[ca_k].mean().reset_index(); saison.columns=["Mois","CA moyen"]
-        saison["Label"]=saison["Mois"].apply(lambda m:MOIS_FR[int(m)-1] if pd.notna(m) else "")
-        moy_g=saison["CA moyen"].mean()
-        _mc = [GREEN if v >= moy_g else "rgba(26,127,110,0.3)" for v in saison["CA moyen"]]
-        fig2=go.Figure(go.Bar(x=saison["Label"],y=saison["CA moyen"],
-            marker_color=_mc,
-            text=[fmt(v) for v in saison["CA moyen"]],textposition="outside", textfont=dict(size=10)))
-        fig2.add_hline(y=moy_g,line_dash="dash",line_color=RED,annotation_text=f"Moy. {fmt(moy_g)}",annotation_font_size=10)
-        fig_style(fig2,360,"📅 Saisonnalité — CA moyen par mois")
-        st.plotly_chart(fig2,use_container_width=True)
-        a2,_=st.columns(2)
-        a2.download_button("📥 CSV saisonnalité",dl_csv(saison),"saisonnalite.csv","text/csv",use_container_width=True,key="dl_sai")
-
-
-    # ═══════════════════════════════════════════════════════════════════════════════
-    # PAGE — SAISIE BIA (7 étapes)
-    # ═══════════════════════════════════════════════════════════════════════════════
-elif "Saisie BIA" in page:
-    # Compteurs BIA (compatibles PG et SQLite via bia_all())
-    _df_bia_hdr = bia_all()
-    nb_bia  = len(_df_bia_hdr)
-    cot_tot = float(_df_bia_hdr["cotisation"].fillna(0).astype(float).sum()) if not _df_bia_hdr.empty else 0
-    nb_val  = int((_df_bia_hdr["statut"]=="Validé").sum()) if not _df_bia_hdr.empty else 0
-    c1,c2,c3=st.columns(3)
-    kpi(c1,"BIA enregistrés",str(nb_bia),"Total base BIA","teal",icon="📋")
-    kpi(c2,"Validés",str(nb_val),f"{nb_val/max(nb_bia,1)*100:.0f}%","",icon="✅")
-    kpi(c3,"Cotisations BIA",fmt(cot_tot),"Total","blue",icon="💰")
-
-    # ── Étape 1 : Sélection du produit ────────────────────────────────────────
-    section("Étape 1 — Sélection du produit","AFG ASSURANCES BÉNIN VIE")
-    GC={"Groupe 1":RED,"Groupe 2":GREEN}
-
-    # Groupe 1 — Décès
-    with st.expander("🛡️ Groupe 1 — Décès & Vie", expanded=True):
-        col_a, col_b = st.columns(2)
-        # AVIGBO
-        with col_a:
-            st.markdown(f"""<div style="border:2px solid {RED}44;border-radius:10px;padding:12px 14px;margin-bottom:6px">
-              <span style="background:{RED};color:white;font-size:9px;font-weight:700;padding:2px 7px;border-radius:3px">221</span>
-              <div style="font-size:13px;font-weight:700;margin-top:6px;color:{NAVY}">ASSURTOUS AVIGBO</div>
-              <div style="font-size:11px;color:#666;margin-top:3px">Décès · Barème fixe</div>
-              <div style="font-size:10px;color:#888;margin-top:5px;line-height:1.6">
-                100 F/mois  Capital 100 000 F  (unique : 1 000 F)<br>
-                200 F/mois  Capital 200 000 F  (unique : 2 000 F)<br>
-                300 F/mois  Capital 300 000 F  (unique : 3 000 F)
-              </div>
-            </div>""", unsafe_allow_html=True)
-            if st.button("Choisir AVIGBO (221)", key="bp_221", use_container_width=True):
-                st.session_state["bia_prod"]="221"; st.session_state["bia_step"]=2; st.rerun()
-        with col_b:
-            st.markdown(f"""<div style="border:2px solid {RED}44;border-radius:10px;padding:12px 14px;margin-bottom:6px">
-              <span style="background:{RED};color:white;font-size:9px;font-weight:700;padding:2px 7px;border-radius:3px">220</span>
-              <div style="font-size:13px;font-weight:700;margin-top:6px;color:{NAVY}">ASSURTOUS VIGNINOU</div>
-              <div style="font-size:11px;color:#666;margin-top:3px">Décès · Durée max 12 mois · Barème fixe</div>
-              <div style="font-size:10px;color:#888;margin-top:5px;line-height:1.6">
-                400 F/mois  Capital 500 000 F  (unique : 48 000 F)<br>
-                800 F/mois  Capital 1 000 000 F (unique : 96 000 F)<br>
-                1 200 F/mois  Capital 1 500 000 F (unique : 144 000 F)
-              </div>
-            </div>""", unsafe_allow_html=True)
-            if st.button("Choisir VIGNINOU (220)", key="bp_220", use_container_width=True):
-                st.session_state["bia_prod"]="220"; st.session_state["bia_step"]=2; st.rerun()
-        alert("Sélectionnez un produit pour afficher le formulaire BIA.","info"); st.stop()
-    prod=next((p for p in PRODUITS if p["code"]==st.session_state.get("bia_prod")),None)
-    if not prod: st.session_state.pop("bia_prod",None); st.rerun()
-    is_avigbo   = prod["code"]=="221"
-    is_vigninou = prod["code"]=="220"
-    is_deces    = prod["code"] in ("220","221")
-    is_epargne  = prod["code"]=="EP0"
-
-    st.markdown(f"""<div style="background:{NAVY};border-radius:10px;padding:10px 16px;margin:10px 0;display:flex;align-items:center;justify-content:space-between">
-      <div><div style="color:rgba(255,255,255,.45);font-size:9px;letter-spacing:.1em">BIA — BULLETIN INDIVIDUEL D'ADHÉSION</div>
-      <div style="color:white;font-size:14px;font-weight:700">{prod['nom']}</div></div>
-      <span style="background:{gc};color:white;font-size:12px;font-weight:700;padding:5px 12px;border-radius:6px">{prod['code']}</span>
-    </div>""",unsafe_allow_html=True)
-    if st.button("↩️ Changer de produit",key="chg_p"): st.session_state.pop("bia_prod",None); st.session_state.pop("bia_step",None); st.rerun()
-    st.progress((step-2)/5,text=f"Étape {step-1}/6 — {SLBL.get(step,'')}")
-    st.markdown("")
-
-    def ti(k,lbl,ph="",t="text"):
-        st.session_state[k]=st.text_input(lbl,value=st.session_state.get(k,""),placeholder=ph,key=f"i_{k}")
-    def si(k,lbl,opts):
-        cur=st.session_state.get(k,opts[0]); idx=opts.index(cur) if cur in opts else 0
-        st.session_state[k]=st.selectbox(lbl,opts,index=idx,key=f"s_{k}")
-
-    if step==2:
-        section("Étape 2 — Identification & Agence")
-        c1,c2,c3=st.columns(3)
-        with c1: si("f_agence","Agence",AGENCES)
-        with c2: ti("f_code_appo","Code apporteur","Ex : AFG001")
-        with c3: ti("f_nom_appo","Nom apporteur")
-        c4,c5=st.columns(2)
-        with c4: ti("f_realis","Réalisateur",user["nom"])
-        with c5: si("f_deja","Déjà assuré AFGVie ?",["Non","Oui"])
-        if st.session_state.get("f_deja")=="Oui": ti("f_num_ct","N° contrat existant")
-        if st.button("Suivant ▶",type="primary"): st.session_state["bia_step"]=3; st.rerun()
-        section("Étape 3 — Souscripteur / Contractant")
-        c1,c2,c3=st.columns([1,2,2])
-        with c1: si("f_c_tit","Civilité *",["","M.","Mme","Mlle"])
-        with c2: ti("f_c_nom","Nom *","NOM (majuscules)")
-        with c3: ti("f_c_prn","Prénoms *")
-        c4,c5,c6=st.columns(3)
-        with c4:
-            cur_d=st.session_state.get("f_c_ddn",date(1985,1,1))
-            if isinstance(cur_d,str):
-                try: cur_d=date.fromisoformat(cur_d)
-                except: cur_d=date(1985,1,1)
-            st.session_state["f_c_ddn"]=st.date_input("Date naissance *",value=cur_d,min_value=date(1930,1,1),max_value=today,key="ddn_c")
-        with c5: ti("f_c_lieu","Lieu naissance *","Cotonou")
-        with c6: ti("f_c_nat","Nationalité","Béninoise")
-        if not st.session_state.get("f_c_nat"): st.session_state["f_c_nat"]="Béninoise"
-        c7,c8,c9=st.columns(3)
-        with c7: si("f_c_mat","Sit. matrimoniale",["","Célibataire","Marié(e)","Divorcé(e)","Veuf(ve)"])
-        with c8: ti("f_c_prof","Profession *")
-        with c9: ti("f_c_adr","Adresse *","Quartier, rue")
-        c10,c11,c12=st.columns(3)
-        with c10: ti("f_c_tel","Tél. cel. *","+229 97…")
-        with c11: ti("f_c_wapp","WhatsApp *","+229 97…")
-        with c12: ti("f_c_npi","N°NPI / Passeport *","BJ123456")
-        c13,c14=st.columns(2)
-        with c13: ti("f_c_eml","Email","exemple@mail.com")
-        with c14: ti("f_c_bp","Boîte postale","01 BP…")
-        st.session_state["f_ass_meme"]=st.checkbox("✓ L'assuré(e) est identique au souscripteur",value=st.session_state.get("f_ass_meme",True))
-        b1,b2=st.columns(2)
-        if b1.button("← Retour"): st.session_state["bia_step"]=2; st.rerun()
-        if b2.button("Suivant ▶", type="primary", key="nxt3_gen_b"):
-            if not st.session_state.get("f_c_nom","").strip(): st.error("Nom obligatoire")
-            elif not st.session_state.get("f_c_prn","").strip(): st.error("Prénom obligatoire")
-            else: st.session_state["bia_step"]=4; st.rerun()
-        section("Étape 4 — Assuré(e) & Bénéficiaires")
-        if st.session_state.get("f_ass_meme",True):
-            st.success(f"✅ Assuré(e) = {st.session_state.get('f_c_tit','')} {st.session_state.get('f_c_nom','').upper()} {st.session_state.get('f_c_prn','')} — reprises du souscripteur.")
-        else:
-            c1,c2,c3=st.columns([1,2,2])
-            with c1: si("f_a_tit","Civilité",["","M.","Mme","Mlle"])
-            with c2:
-                st.session_state["f_a_nom"]=st.text_input("Nom *",value=st.session_state.get("f_a_nom",""),key="an")
-            with c3:
-                st.session_state["f_a_prn"]=st.text_input("Prénoms *",value=st.session_state.get("f_a_prn",""),key="ap")
-            c4,c5=st.columns(2)
-            with c4:
-                cur_a=st.session_state.get("f_a_ddn",date(1990,1,1))
-                if isinstance(cur_a,str):
-                    try: cur_a=date.fromisoformat(cur_a)
-                    except: cur_a=date(1990,1,1)
-                st.session_state["f_a_ddn"]=st.date_input("Date naissance",value=cur_a,key="ddn_a")
-            with c5:
-                st.session_state["f_a_npi"]=st.text_input("NPI",value=st.session_state.get("f_a_npi",""),key="ani")
-        section("Bénéficiaires")
-        st.session_state["f_bc"]=st.checkbox("Mon conjoint, mes enfants nés et à naître, à défaut mes ayants droits",value=st.session_state.get("f_bc",True))
-        st.session_state["f_ba"]=st.text_input("Autres bénéficiaires",value=st.session_state.get("f_ba",""),key="ba_t")
-        b1,b2=st.columns(2)
-        if b1.button("← Retour"): st.session_state["bia_step"]=3; st.rerun()
-
-    elif step==5:
-        section("Étape 5 — Caractéristiques du Contrat")
-
-        # ── Date d'effet (commun) ─────────────────────────────────────────────
-        cur_e=st.session_state.get("f_deff",today)
-        if isinstance(cur_e,str):
-            try: cur_e=date.fromisoformat(cur_e)
-            except: cur_e=today
-
-        # ══════════════════════════════════════════════════════════════════════
-        # AVIGBO — barème fixe, 3 options, durée libre
-        # ══════════════════════════════════════════════════════════════════════
-        if is_avigbo:
-            alert("Contrat AVIGBO : le capital et la cotisation unique sont déterminés automatiquement selon la prime mensuelle choisie.","info")
-            # Sélection du barème
-            opt_map = {
-                "100 F/mois  Capital 100 000 F (unique : 1 000 F)":   (100,  100_000,  1_000),
-                "200 F/mois  Capital 200 000 F (unique : 2 000 F)":   (200,  200_000,  2_000),
-                "300 F/mois  Capital 300 000 F (unique : 3 000 F)":   (300,  300_000,  3_000),
-            }
-            opts_list = list(opt_map.keys())
-            cur_opt = st.session_state.get("f_avigbo_opt", opts_list[0])
-            if cur_opt not in opts_list: cur_opt = opts_list[0]
-            selected_opt = st.radio("Barème de cotisation *", opts_list,
-                                    index=opts_list.index(cur_opt), key="avigbo_opt_r")
-            st.session_state["f_avigbo_opt"] = selected_opt
-            prime_m, capital_g, prime_u = opt_map[selected_opt]
-
-            c1,c2=st.columns(2)
-            with c1:
-                peri_av_opts=["Mensuelle","Unique"]
-                cur_pav=st.session_state.get("f_peri","Mensuelle")
-                if cur_pav not in peri_av_opts: cur_pav="Mensuelle"
-                st.session_state["f_peri"]=st.radio("Périodicité *",peri_av_opts,
-                    horizontal=True,index=peri_av_opts.index(cur_pav),key="peri_av_r")
-            with c2:
-                st.session_state["f_deff"]=st.date_input("Date d'effet *",value=cur_e,key="eff_d")
-
-            # Cotisation et capital automatiques
-            if st.session_state["f_peri"]=="Mensuelle":
-                coti_auto=prime_m
-            else:
-                coti_auto=prime_u
-            st.session_state["f_coti"]=coti_auto
-            st.session_state["f_cap"] =capital_g
-
-            st.markdown(f"""
-            <div style="background:{GREEN}12;border:1.5px solid {GREEN};border-radius:10px;padding:12px 16px;margin:10px 0">
-              <div style="font-size:10px;color:{GREEN};font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">Paramètres automatiques AVIGBO</div>
-              <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;font-size:13px">
-                <div><span style="color:#888;font-size:10px">Cotisation</span><br><b>{coti_auto:,} FCFA / {st.session_state['f_peri'].lower()}</b></div>
-                <div><span style="color:#888;font-size:10px">Capital garanti décès</span><br><b style="color:{RED}">{capital_g:,} FCFA</b></div>
-                <div><span style="color:#888;font-size:10px">Option garantie</span><br><b>Avec garantie décès</b></div>
-              </div>
-            </div>""", unsafe_allow_html=True)
-            st.session_state["f_gar"]="Avec garantie décès"
-            st.session_state["f_duree"]=st.number_input("Durée du contrat (ans) *",min_value=1,max_value=40,
-                value=int(st.session_state.get("f_duree",5)),key="dur_av")
-
-        # ══════════════════════════════════════════════════════════════════════
-        # VIGNINOU — barème fixe, durée MAX 12 mois
-        # ══════════════════════════════════════════════════════════════════════
-        elif is_vigninou:
-            alert("Contrat VIGNINOU : durée maximale 12 mois. Capital et cotisation unique fixés par le barème.","warn")
-            opt_map_v = {
-                "400 F/mois  Capital 500 000 F (unique : 48 000 F)":    (400,  500_000,  48_000),
-                "800 F/mois  Capital 1 000 000 F (unique : 96 000 F)":  (800,  1_000_000,96_000),
-                "1 200 F/mois  Capital 1 500 000 F (unique : 144 000 F)": (1200, 1_500_000,144_000),
-            }
-            opts_list_v = list(opt_map_v.keys())
-            cur_opt_v = st.session_state.get("f_vigninou_opt", opts_list_v[0])
-            if cur_opt_v not in opts_list_v: cur_opt_v = opts_list_v[0]
-            selected_opt_v = st.radio("Barème de cotisation *", opts_list_v,
-                                       index=opts_list_v.index(cur_opt_v), key="vign_opt_r")
-            st.session_state["f_vigninou_opt"] = selected_opt_v
-            prime_m_v, capital_g_v, prime_u_v = opt_map_v[selected_opt_v]
-
-            c1,c2,c3=st.columns(3)
-            with c1:
-                peri_v_opts=["Mensuelle","Unique"]
-                cur_pv=st.session_state.get("f_peri","Mensuelle")
-                if cur_pv not in peri_v_opts: cur_pv="Mensuelle"
-                st.session_state["f_peri"]=st.radio("Périodicité *",peri_v_opts,
-                    horizontal=True,index=peri_v_opts.index(cur_pv),key="peri_v_r")
-            with c2:
-                # Durée en MOIS pour VIGNINOU (max 12 mois)
-                dur_v_mois=st.number_input("Durée (mois, max 12) *",min_value=1,max_value=12,
-                    value=int(st.session_state.get("f_duree_mois_v",12)),key="dur_v_m")
-                st.session_state["f_duree_mois_v"]=dur_v_mois
-                # On stocke en fraction d'année pour cohérence BIA
-                st.session_state["f_duree"]=1  # 1 an max
-            with c3:
-                st.session_state["f_deff"]=st.date_input("Date d'effet *",value=cur_e,key="eff_d")
-
-            if st.session_state["f_peri"]=="Mensuelle":
-                coti_auto_v=prime_m_v
-            else:
-                coti_auto_v=prime_u_v
-            st.session_state["f_coti"]=coti_auto_v
-            st.session_state["f_cap"] =capital_g_v
-
-            st.markdown(f"""
-            <div style="background:{RED}08;border:1.5px solid {RED};border-radius:10px;padding:12px 16px;margin:10px 0">
-              <div style="font-size:10px;color:{RED};font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">Paramètres automatiques VIGNINOU · Durée max 12 mois</div>
-              <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;font-size:13px">
-                <div><span style="color:#888;font-size:10px">Cotisation</span><br><b>{coti_auto_v:,} FCFA / {st.session_state['f_peri'].lower()}</b></div>
-                <div><span style="color:#888;font-size:10px">Capital garanti décès</span><br><b style="color:{RED}">{capital_g_v:,} FCFA</b></div>
-                <div><span style="color:#888;font-size:10px">Durée choisie</span><br><b>{dur_v_mois} mois</b></div>
-                <div><span style="color:#888;font-size:10px">Option garantie</span><br><b>Avec garantie décès</b></div>
-              </div>
-            </div>""", unsafe_allow_html=True)
-            st.session_state["f_gar"]="Avec garantie décès"
-
-        # ══════════════════════════════════════════════════════════════════════
-        # ÉPARGNE — libre, calcul du capital à terme
-        # ══════════════════════════════════════════════════════════════════════
-        else:
-            c1,c2=st.columns(2)
-            with c1:
-                st.session_state["f_deff"]=st.date_input("Date d'effet *",value=cur_e,key="eff_d")
-            with c2:
-                st.session_state["f_duree"]=st.number_input("Durée (ans) *",min_value=1,max_value=40,
-                    value=int(st.session_state.get("f_duree",10)),key="dur_n")
-
-            c3,c4=st.columns(2)
-            with c3:
-                st.session_state["f_coti"]=st.number_input("Cotisation FCFA *",min_value=100,
-                    value=int(st.session_state.get("f_coti",5000)),key="cot_n")
-            with c4:
-                peri_ep_opts=["Journalière","Hebdomadaire","Mensuelle","Trimestrielle","Semestrielle","Annuelle","Unique"]
-                cur_pep=st.session_state.get("f_peri","Mensuelle")
-                if cur_pep not in peri_ep_opts: cur_pep="Mensuelle"
-                st.session_state["f_peri"]=st.selectbox("Périodicité *",peri_ep_opts,
-                    index=peri_ep_opts.index(cur_pep),key="peri_ep_s")
-
-            # ── Calcul dynamique du capital au terme ─────────────────────────
-            P_ep   = float(st.session_state.get("f_coti",5000))
-            n_ep   = int(st.session_state.get("f_duree",10))
-            peri_ep= st.session_state.get("f_peri","Mensuelle")
-            res_ep = calcul_capital_epargne(P_ep, peri_ep, n_ep)
-            cap_ep = res_ep["capital_brut"]
-            st.session_state["f_cap"] = int(cap_ep)
-
-            st.markdown(f"""
-            <div style="background:{GREEN}10;border:1.5px solid {GREEN};border-radius:10px;padding:14px 16px;margin:12px 0">
-              <div style="font-size:10px;color:{GREEN};font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px">
-                Simulation actuarielle — Capital au terme
-              </div>
-              <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;margin-bottom:10px">
-                <div style="background:white;border-radius:8px;padding:10px 12px;border:0.5px solid {MGRAY}">
-                  <div style="font-size:9px;color:#888;text-transform:uppercase;letter-spacing:.06em">Cotisation nette P_net</div>
-                  <div style="font-size:18px;font-weight:700;color:{NAVY}">{res_ep['Pnet']:,.0f} <span style="font-size:11px;font-weight:400">FCFA</span></div>
-                  <div style="font-size:10px;color:#888">α=1% acq. + β=0.5% gest.</div>
-                </div>
-                <div style="background:white;border-radius:8px;padding:10px 12px;border:0.5px solid {MGRAY}">
-                  <div style="font-size:9px;color:#888;text-transform:uppercase;letter-spacing:.06em">Total cotisations versées</div>
-                  <div style="font-size:18px;font-weight:700;color:{NAVY}">{res_ep['total_verse']:,.0f} <span style="font-size:11px;font-weight:400">FCFA</span></div>
-                  <div style="font-size:10px;color:#888">Sur {n_ep} an(s) · {peri_ep}</div>
-                </div>
-                <div style="background:linear-gradient(135deg,{GREEN},{GREEN2});border-radius:8px;padding:10px 12px">
-                  <div style="font-size:9px;color:rgba(255,255,255,.7);text-transform:uppercase;letter-spacing:.06em">Capital au terme C_n</div>
-                  <div style="font-size:20px;font-weight:800;color:white">{cap_ep:,.0f} <span style="font-size:12px;font-weight:400">FCFA</span></div>
-                  <div style="font-size:10px;color:rgba(255,255,255,.7)">Rendement : +{res_ep['rendement']:.1f}%</div>
-                </div>
-              </div>
-              <div style="font-size:10px;color:#666;font-family:monospace;background:#f8f9fa;border-radius:6px;padding:8px 10px;line-height:1.7">
-                {res_ep['formule']}
-              </div>
-            </div>""", unsafe_allow_html=True)
-
-        # ── Mode de règlement (commun tous produits) ─────────────────────────
-        section("Mode de règlement")
-        m_o=["","Mobile Monnaie","Par chèque","Par virement bancaire","Par prélèvement sur salaire"]
-        cur_m=st.session_state.get("f_mode","")
-        st.session_state["f_mode"]=st.radio("Mode *",m_o,horizontal=True,
-            index=m_o.index(cur_m) if cur_m in m_o else 0,key="mode_r",
-            format_func=lambda x:"— Choisir —" if x=="" else x)
-        if st.session_state["f_mode"]:
-            ref_l={"Mobile Monnaie":"📱 N° Mobile Money","Par chèque":"📄 N° Chèque",
-                   "Par virement bancaire":"🏦 N° Compte/RIB",
-                   "Par prélèvement sur salaire":"💼 N° Matricule"}.get(st.session_state["f_mode"],"Référence")
-            ti("f_mref",ref_l)
-
-        b1,b2=st.columns(2)
-        if b1.button("← Retour"): st.session_state["bia_step"]=4; st.rerun()
-
-    elif step==6:
-        section("Étape 6 — Questionnaire Médical CIMA")
-        alert("Art. 18 CIMA : Toute fausse déclaration est sanctionnée par la nullité du contrat.","warn")
-        c1,c2,c3=st.columns(3)
-        st.session_state["f_taille"]=c1.text_input("Taille (m)",value=st.session_state.get("f_taille",""),placeholder="1.72",key="taille_t")
-        st.session_state["f_poids"]=c2.text_input("Poids (kg)",value=st.session_state.get("f_poids",""),placeholder="75",key="poids_t")
-        per_m=["Non","Oui"]
-        cur_pp=st.session_state.get("f_perte","Non")
-        st.session_state["f_perte"]=c3.radio("Grossi/maigri >5 kg (6 mois) ?",per_m,horizontal=True,index=per_m.index(cur_pp) if cur_pp in per_m else 0,key="perte_r")
-        MED=[
-            ("q1","Maladie ou séquelles — surveillance médicale requise (10 ans) ?",False),
-            ("q2","Arrêts de travail >21 jours (5 dernières années) ?",False),
-            ("q3","Traitement médical >21 jours (5 ans, hors contraception) ?",False),
-            ("q4","Actuellement en arrêt de travail sur prescription médicale ?",False),
-            ("q5","Traitement médical en cours (hors contraception) ?",False),
-            ("q6","Hospitalisation ou analyses dans les 12 prochains mois ?",True),
-            ("q7","Méningite, hépatite B, VIH/Sida, cancer ou maladie grave ?",False),
-        ]
-        for qk,qtxt,special in MED:
-            with st.container(border=True):
-                qa,qb=st.columns([3.5,1])
-                qa.markdown(f"<div style='font-size:11px;line-height:1.4'><b>{qk[1:]}.</b> {qtxt}</div>",unsafe_allow_html=True)
-                r_o=["Non","Oui"]
-                cur_r=st.session_state.get(f"f_{qk}","Non")
-                st.session_state[f"f_{qk}"]=qb.radio("",r_o,horizontal=True,index=r_o.index(cur_r) if cur_r in r_o else 0,key=f"r_{qk}")
-                if st.session_state[f"f_{qk}"]=="Oui":
-                    st.session_state[f"f_{qk}d"]=st.text_input("Précisions :",value=st.session_state.get(f"f_{qk}d",""),placeholder="Soyez précis(e)",key=f"d_{qk}")
-        b1,b2=st.columns(2)
-        if b1.button("← Retour"): st.session_state["bia_step"]=5; st.rerun()
-
-    elif step==7:
-        section("Étape 7 — Déclaration & Validation")
-        st.markdown("""<div style="background:#f8f9fa;border:1px solid #ddd;border-radius:8px;padding:12px;
-            font-size:11px;line-height:1.8;max-height:120px;overflow-y:auto;margin-bottom:12px">
-            Je reconnais avoir reçu la notice d'information du produit et les conditions générales.
-            Je certifie exactes et sincères toutes les informations renseignées.
-            Conformément à l'article 18 du code CIMA, toute fausse déclaration
-            entraîne la nullité du contrat.</div>""",unsafe_allow_html=True)
-        st.session_state["f_dc"]=st.checkbox("☑ J'accepte les conditions de souscription *",value=st.session_state.get("f_dc",False))
-        st.session_state["f_dd"]=st.checkbox("☑ J'accepte la politique de protection des données *",value=st.session_state.get("f_dd",False))
-        c1,c2=st.columns(2)
-        stat_o=["Brouillon","En cours","Validé"]
-        cur_st=st.session_state.get("f_stat","Brouillon")
-        st.session_state["f_stat"]=c1.selectbox("Statut",stat_o,index=stat_o.index(cur_st) if cur_st in stat_o else 0,key="stat_s")
-        st.session_state["f_obs"]=c2.text_input("Observations",value=st.session_state.get("f_obs",""),key="obs_t")
-        with st.expander("📋 Récapitulatif complet", expanded=True):
-            cap_recap = int(st.session_state.get("f_cap",0))
-            dur_recap = st.session_state.get("f_duree",1)
-            # Pour VIGNINOU, afficher la durée en mois
-            dur_label = f"{st.session_state.get('f_duree_mois_v',12)} mois" if is_vigninou else f"{dur_recap} an(s)"
-            st.markdown(f"""| Champ | Valeur |
-|---|---|
-|**Souscripteur**|{st.session_state.get('f_c_tit','')} {st.session_state.get('f_c_nom','').upper()} {st.session_state.get('f_c_prn','')}|
-|**Produit**|{prod['nom']} — code {prod['code']}|
-|**Cotisation**|{st.session_state.get('f_coti',0):,} FCFA / {st.session_state.get('f_peri','—')}|
-|**Capital garanti / au terme**|**{cap_recap:,} FCFA**|
-|**Date d'effet**|{ds(st.session_state.get('f_deff',today))}|
-|**Durée**|{dur_label}|
-|**Mode règlement**|{st.session_state.get('f_mode','—')}|
-|**Option garantie**|{st.session_state.get('f_gar','—')}|""")
-
-        def save_bia(statut_ov=None):
-            ass = st.session_state.get("f_ass_meme", True)
-            data = {
-                "numero_bia":       gen_bia(),
-                "date_saisie":      today.isoformat(),
-                "saisi_par":        user["nom"],
-                "agence":           st.session_state.get("f_agence",""),
-                "code_apporteur":   st.session_state.get("f_code_appo",""),
-                "nom_apporteur":    st.session_state.get("f_nom_appo",""),
-                "realisateur":      st.session_state.get("f_realis",""),
-                "deja_assure":      st.session_state.get("f_deja","Non"),
-                "num_ct_exist":     st.session_state.get("f_num_ct",""),
-                "c_titre":          st.session_state.get("f_c_tit",""),
-                "c_nom":            st.session_state.get("f_c_nom","").upper().strip(),
-                "c_prenom":         st.session_state.get("f_c_prn","").strip(),
-                "c_ddn":            str(st.session_state.get("f_c_ddn", date(1985,1,1))),
-                "c_lieu":           st.session_state.get("f_c_lieu",""),
-                "c_nat":            st.session_state.get("f_c_nat","Béninoise"),
-                "c_mat":            st.session_state.get("f_c_mat",""),
-                "c_prof":           st.session_state.get("f_c_prof",""),
-                "c_adr":            st.session_state.get("f_c_adr",""),
-                "c_bp":             st.session_state.get("f_c_bp",""),
-                "c_email":          st.session_state.get("f_c_eml",""),
-                "c_wapp":           st.session_state.get("f_c_wapp",""),
-                "c_tel":            st.session_state.get("f_c_tel",""),
-                "c_fixe":           st.session_state.get("f_c_fixe",""),
-                "c_npi":            st.session_state.get("f_c_npi",""),
-                "ass_meme":         1 if ass else 0,
-                "a_titre":          "" if ass else st.session_state.get("f_a_tit",""),
-                "a_nom":            "" if ass else st.session_state.get("f_a_nom","").upper(),
-                "a_prenom":         "" if ass else st.session_state.get("f_a_prn",""),
-                "a_ddn":            "" if ass else str(st.session_state.get("f_a_ddn","")),
-                "a_npi":            "" if ass else st.session_state.get("f_a_npi",""),
-                "benef_conj":       1 if st.session_state.get("f_bc", True) else 0,
-                "benef_autres":     st.session_state.get("f_ba",""),
-                "code_produit":     prod["code"],
-                "produit":          prod["nom"],
-                "groupe_produit":   prod["grp"],
-                "cotisation":       float(st.session_state.get("f_coti", 0)),
-                "cotisation_lettres": st.session_state.get("f_cotil",""),
-                "periodicite":      st.session_state.get("f_peri","Mensuelle"),
-                "date_effet":       str(st.session_state.get("f_deff", today)),
-                "duree":            (st.session_state.get("f_duree_mois_v", 12)
-                                     if is_vigninou
-                                     else int(st.session_state.get("f_duree", 10))),
-                "option_gar":       st.session_state.get("f_gar","Sans garantie décès"),
-                "mode_reglement":   st.session_state.get("f_mode",""),
-                "mode_ref":         st.session_state.get("f_mref",""),
-                "capital_terme":    float(st.session_state.get("f_cap", 0) or 0),
-                **{f"q{qi}":  st.session_state.get(f"f_q{qi}","Non") for qi in range(1,8)},
-                **{f"q{qi}d": st.session_state.get(f"f_q{qi}d","")  for qi in range(1,8)},
-                "decl_cond":        1 if st.session_state.get("f_dc") else 0,
-                "decl_data":        1 if st.session_state.get("f_dd") else 0,
-                "statut":           statut_ov or st.session_state.get("f_stat","Brouillon"),
-                "obs":              st.session_state.get("f_obs",""),
-            }
-            # insert_bia() gère PG (%s) et SQLite (?) automatiquement
-            ok = insert_bia(data)
-            if ok:
-                for k in [k for k in list(st.session_state.keys()) if k.startswith("f_")]:
-                    del st.session_state[k]
-                st.session_state.pop("bia_prod", None)
-                st.session_state.pop("bia_step", None)
-                return data["numero_bia"]
-            return None
-        b1,b2,b3=st.columns([1,1,1.4])
-        if b1.button("← Retour", key=f"ret7_{5249}"): st.session_state["bia_step"] = 4 if _is_crt_step else 6; st.rerun()
-        if b2.button("💾 Brouillon", key="brouillon_btn_b"):
-            num=save_bia("Brouillon")
-            if num: st.info(f"💾 Brouillon **{num}** enregistré. Retrouvez-le dans la Base BIA.")
-        if b3.button("✅ VALIDER LE BIA",type="primary"):
-            errs=[]
-            if not st.session_state.get("f_c_nom","").strip(): errs.append("Nom souscripteur obligatoire")
-            if not st.session_state.get("f_dc"): errs.append("Conditions de souscription requises")
-            if not st.session_state.get("f_dd"): errs.append("Politique données requise")
-            if errs:
-                for e in errs: st.error(f"❌ {e}")
-            else:
-                num=save_bia("Validé")
-                if num: st.balloons(); st.success(f"🎉 BIA **{num}** validé ! {st.session_state.get('f_c_tit','')} {st.session_state.get('f_c_nom','').upper()}")
-
-    # ═══════════════════════════════════════════════════════════════════════════════
-    # PAGE — BASE BIA
-    # ═══════════════════════════════════════════════════════════════════════════════
-    elif "Base BIA" in page:
-        df_bia=bia_all()
-        section("🗂️ Base BIA — Registre des bulletins","CONSULTATION · GESTION · EXPORT")
-        if df_bia.empty:
-            alert("Aucun BIA enregistré. Utilisez l'onglet <b>Saisie BIA</b>.","info"); st.stop()
-        nb_all=len(df_bia); nb_val=int((df_bia["statut"]=="Validé").sum())
-        nb_bro=int((df_bia["statut"]=="Brouillon").sum()); cot_t=float(df_bia["cotisation"].fillna(0).astype(float).sum())
-        c1,c2,c3,c4=st.columns(4)
-        kpi(c1,"Total BIA",str(nb_all),"Base complète","teal",icon="📋")
-        kpi(c2,"Cotisations",fmt(cot_t),"Total FCFA","",icon="💰")
-        kpi(c3,"Validés",str(nb_val),f"{nb_val/max(nb_all,1)*100:.0f}%","",icon="✅")
-        kpi(c4,"Brouillons",str(nb_bro),"À compléter","amber",icon="💾")
-        # Graphiques
-        g1,g2=st.columns(2)
-        with g1:
-            by_st=df_bia["statut"].value_counts().reset_index(); by_st.columns=["Statut","Nb"]
-            fig=go.Figure(go.Pie(labels=by_st["Statut"],values=by_st["Nb"],hole=.44,
-                marker_colors=[GREEN,AMBER,RED,BLUE],textinfo="percent+label+value", textfont=dict(size=12)))
-            fig_style(fig,260,"📊 Répartition par statut"); st.plotly_chart(fig,use_container_width=True)
-        with g2:
-            if "produit" in df_bia.columns:
-                by_p=df_bia.groupby("produit").agg(Nb=("produit","count"),Cot=("cotisation","sum")).reset_index().sort_values("Cot",ascending=False).head(8)
-                fig2=go.Figure(go.Bar(x=by_p["Cot"],y=by_p["produit"].str[:22],orientation="h",
-                    marker_color=GREEN,text=[fmt(v) for v in by_p["Cot"]],textposition="outside", textfont=dict(size=10)))
-                fig2.update_layout(yaxis=dict(autorange="reversed"))
-                fig_style(fig2,260,"💰 Cotisations BIA par produit"); st.plotly_chart(fig2,use_container_width=True)
-        # Valider brouillons
-        brous=df_bia[df_bia["statut"]=="Brouillon"]
-        if not brous.empty:
-            alert(f"<b>{len(brous)} brouillon(s)</b> en attente de validation.","warn")
-            with st.expander(f"📋 Valider un brouillon ({len(brous)} en attente)"):
-                for _,br in brous.iterrows():
-                    cc1,cc2,cc3=st.columns([4,1,1])
-                    cc1.markdown(f"**{br['numero_bia']}** · {br.get('c_titre','')} {br.get('c_nom','')} {br.get('c_prenom','')} · {br.get('produit','')} · {fmt(br.get('cotisation',0))}")
-                    if cc2.button("✅",key=f"val_{br['id']}"):
-                        update_bia_statut(int(br["id"]), "Validé")
-                        st.balloons(); st.rerun()
-                        delete_bia(int(br["id"])); st.rerun()
-        f1,f2,f3=st.columns(3)
-        srch_b=f1.text_input("🔍 Rechercher",label_visibility="collapsed",placeholder="N° BIA, nom, produit…",key="srch_b")
-        stat_o=["Tous"]+sorted(df_bia["statut"].dropna().unique().tolist())
-        stat_b=f2.selectbox("Statut",stat_o,label_visibility="collapsed")
-        prod_ob=["Tous"]+sorted(df_bia["produit"].dropna().unique().tolist())
-        prod_b=f3.selectbox("Produit",prod_ob,label_visibility="collapsed")
-        fi_b=df_bia.copy()
-        if srch_b: fi_b=fi_b[fi_b.apply(lambda r:srch_b.lower() in str(r).lower(),axis=1)]
-        if stat_b!="Tous": fi_b=fi_b[fi_b["statut"]==stat_b]
-        if prod_b!="Tous": fi_b=fi_b[fi_b["produit"]==prod_b]
-        st.caption(f"Affichage {len(fi_b):,} / {nb_all:,} bulletins")
-        CB=["numero_bia","date_saisie","c_titre","c_nom","c_prenom","c_tel","nom_apporteur","produit","cotisation","periodicite","mode_reglement","date_effet","duree","statut","agence","saisi_par"]
-        cs=[c for c in CB if c in fi_b.columns]
-        di_b=fi_b[cs].copy()
-        if "cotisation" in di_b.columns: di_b["cotisation"]=di_b["cotisation"].apply(lambda x:fmt(float(x)) if pd.notna(x) else "—")
-        st.dataframe(di_b,use_container_width=True,hide_index=True,height=400)
-        if not fi_b.empty:
-            section("🔍 Détail d'un BIA")
-            sel_b=st.selectbox("Sélectionnez",fi_b["numero_bia"].tolist(),key="sel_det")
-            row=fi_b[fi_b["numero_bia"]==sel_b].iloc[0]
-            t_i,t_m,t_c=st.tabs(["📋 Informations","🏥 Médical","📄 Contrat"])
-            with t_i:
-                c1,c2=st.columns(2)
-                for f_,l_ in [("c_titre","Civilité"),("c_nom","Nom"),("c_prenom","Prénoms"),("c_ddn","Naissance"),("c_prof","Profession"),("c_tel","Tél."),("c_npi","NPI"),("c_adr","Adresse"),("c_email","Email"),("nom_apporteur","Apporteur"),("agence","Agence"),("saisi_par","Saisi par")]:
-                    v=row.get(f_,"")
-                    if pd.notna(v) and str(v).strip(): c1.markdown(f"**{l_}** : {v}")
-            with t_m:
-                for qn in range(1,8):
-                    rep=row.get(f"q{qn}",""); det=row.get(f"q{qn}d","")
-                    if pd.notna(rep) and rep:
-                        cc_=RED if rep=="Oui" else GREEN
-                        st.markdown(f"**Q{qn} :** <span style='color:{cc_};font-weight:700'>{rep}</span>{' — '+str(det) if det and pd.notna(det) else ''}",unsafe_allow_html=True)
-            with t_c:
-                c1,_=st.columns(2)
-                for f_,l_ in [("produit","Produit"),("cotisation","Cotisation"),("periodicite","Périodicité"),("date_effet","Date effet"),("duree","Durée"),("option_gar","Option garantie"),("mode_reglement","Mode règlement"),("statut","Statut"),("obs","Observations")]:
-                    v=row.get(f_,"")
-                    if f_=="cotisation" and pd.notna(v): v=fmt(float(v))
-                    if pd.notna(v) and str(v).strip(): c1.markdown(f"**{l_}** : {v}")
-        st.markdown("")
-        d1,d2,d3=st.columns(3)
-        d1.download_button("📥 CSV filtré",dl_csv(fi_b),f"bia_{today}.csv","text/csv",use_container_width=True,key="dl_bia_f")
-        d2.download_button("📥 Excel filtré",dl_xlsx(fi_b[cs]),f"bia_{today}.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_bia_xl")
-        d3.download_button("📥 CSV complet",dl_csv(df_bia),"bia_complet.csv","text/csv",use_container_width=True,key="dl_bia_full")
-
-    # ═══════════════════════════════════════════════════════════════════════════════
-    # PAGE — EXPORTS
-    # ═══════════════════════════════════════════════════════════════════════════════
-    elif "Exports" in page:
-        section(f"📤 Exports Complets — {period_lbl}","CSV · EXCEL · TOUTES BASES")
-        alert("Chaque tableau de chaque onglet est aussi téléchargeable directement. Cette page = exports complets.","info")
-        BEXP=[("pf",pf,"Portefeuille","DATESOUS","MONTENCA"),("ca",ca,"Base CA","DATECOMP","CHIFAFFA"),("sin",sin,"Prestations","Date Survenance","Réglement Total")]
-        for sid,data,lbl,dc,amk in BEXP:
-            df_f=filter_df(data,dc,sel_date,MODE) if data is not None else pd.DataFrame()
-            with st.expander(f"📋 {lbl}",expanded=True):
-                if data is None: st.warning("Base non chargée.")
-                else:
-                    tot_v=float(data[amk].fillna(0).sum()) if amk in data.columns else 0
-                    c1,c2,c3=st.columns(3)
-                    c1.metric("Total lignes",f"{len(data):,}")
-                    c2.metric(f"Lignes · {period_lbl}",f"{len(df_f):,}")
-                    c3.metric("Montant total",fmt(tot_v))
-                    b1,b2,b3=st.columns(3)
-                    b1.download_button(f"📥 CSV complet",dl_csv(data),f"{sid}_complet.csv","text/csv",use_container_width=True,key=f"dl_{sid}_fc")
-                    b2.download_button(f"📥 CSV {period_lbl}",dl_csv(df_f),f"{sid}_{period_lbl}.csv","text/csv",use_container_width=True,key=f"dl_{sid}_fp")
-                    b3.download_button(f"📥 Excel {period_lbl}",dl_xlsx(df_f.head(50000)),f"{sid}_{period_lbl}.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key=f"dl_{sid}_xl")
-        df_bia_e = bia_all()
-        with st.expander("📋 Base BIA",expanded=True):
-            c1,c2=st.columns(2); c1.metric("Total BIA",len(df_bia_e))
-            c2.metric("Cotisations",fmt(float(df_bia_e["cotisation"].fillna(0).astype(float).sum())))
-            b1,b2=st.columns(2)
-            b1.download_button("📥 CSV BIA",dl_csv(df_bia_e),"bia_complet.csv","text/csv",use_container_width=True,key="dl_bia_e")
-            b2.download_button("📥 Excel BIA",dl_xlsx(df_bia_e),"bia.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_bia_xl_e")
 
 
 elif "Rapport PDF" in page:
