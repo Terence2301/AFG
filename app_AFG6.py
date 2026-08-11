@@ -1399,7 +1399,7 @@ ALL_PAGES = [
     "🔮  Prévisions & Tendances",
     "📝  Saisie BIA",
     "🗂️  Base BIA",
-    "📤  Exports",
+    
     "📄  Rapport PDF",
 ]
 # Seule page visible sans aucune base chargée
@@ -2425,11 +2425,21 @@ elif "Portefeuille" in page:
     ) if "LIBECATE" in _base_opts.columns else ["Tous"]
     prod_sel  = f1.selectbox("📦 Produit", prod_opts, key="pf_prod")
 
-    # 2. Filtre périodicité
-    peri_opts = ["Toutes"] + sorted(
-        _base_opts["PERIODICITE"].dropna().unique().tolist()
-    ) if "PERIODICITE" in _base_opts.columns else ["Toutes"]
-    peri_sel  = f2.selectbox("🔄 Périodicité", peri_opts, key="pf_peri")
+    # 2. Filtre périodicité — basé sur CODEPERI (valeur réelle) mappé en libellé
+    _peri_col = "CODEPERI" if "CODEPERI" in _base_opts.columns else (
+                "PERIODICITE" if "PERIODICITE" in _base_opts.columns else None)
+    if _peri_col == "CODEPERI":
+        _peri_vals = sorted(_base_opts["CODEPERI"].dropna().unique().tolist())
+        _peri_lbls = [CODEPERI_MAP.get(v, str(v)) for v in _peri_vals]
+        peri_opts  = ["Toutes"] + _peri_lbls
+        _peri_code_map = dict(zip(_peri_lbls, _peri_vals))  # libellé → code
+    elif _peri_col == "PERIODICITE":
+        peri_opts  = ["Toutes"] + sorted(_base_opts["PERIODICITE"].dropna().unique().tolist())
+        _peri_code_map = {}
+    else:
+        peri_opts  = ["Toutes"]
+        _peri_code_map = {}
+    peri_sel = f2.selectbox("🔄 Périodicité", peri_opts, key="pf_peri")
 
     # 3. Filtre ville
     villes_opts = ["Toutes"] + sorted(
@@ -2446,8 +2456,13 @@ elif "Portefeuille" in page:
         fi = fi[fi["ETAT_POLICE"].str.strip() == etat_sel]
     if prod_sel  != "Tous"    and "LIBECATE"      in fi.columns:
         fi = fi[fi["LIBECATE"] == prod_sel]
-    if peri_sel  != "Toutes"  and "PERIODICITE"   in fi.columns:
-        fi = fi[fi["PERIODICITE"] == peri_sel]
+    if peri_sel  != "Toutes":
+        if _peri_col == "CODEPERI" and "CODEPERI" in fi.columns:
+            _code_sel = _peri_code_map.get(peri_sel)
+            if _code_sel is not None:
+                fi = fi[fi["CODEPERI"] == _code_sel]
+        elif "PERIODICITE" in fi.columns:
+            fi = fi[fi["PERIODICITE"] == peri_sel]
     if ville_sel != "Toutes"  and "LIBEVILL"      in fi.columns:
         fi = fi[fi["LIBEVILL"] == ville_sel]
     if srch_pf.strip():
@@ -2528,8 +2543,8 @@ elif "Portefeuille" in page:
                              "ECHU":"#5A6478","ASSURE ECHU":"#2C3E50","SUSPENDU":BLUE}
                     ec=fi["ETAT_POLICE"].str.strip().value_counts().reset_index()
                     ec.columns=["État","Nb"]
-                    fig2=go.Figure(go.Pie(labels=ec["Etat"],values=ec["Nb"],hole=.44,
-                        marker_colors=[etat_c_.get(e,"#888") for e in ec["Etat"]],
+                    fig2=go.Figure(go.Pie(labels=ec["État"],values=ec["Nb"],hole=.44,
+                        marker_colors=[etat_c_.get(e,"#888") for e in ec["État"]],
                         textinfo="percent+label", textfont=dict(size=11)))
                     fig_style(fig2,380,"États du portefeuille")
                     st.plotly_chart(fig2,use_container_width=True)
@@ -3167,6 +3182,7 @@ elif "Clients" in page:
 elif "Sinistres" in page:
     if sin is None: alert("Chargez le fichier Prestations.","warn"); st.stop()
     df_s = sin  # tout le fichier
+
     # Filtre par année
     if SEL_YEAR and "ANNEE_SIN" in sin.columns:
         _sin_yr = sin[sin["ANNEE_SIN"] == SEL_YEAR].copy()
@@ -3176,6 +3192,33 @@ elif "Sinistres" in page:
         df_sf = _sin_yr if not _sin_yr.empty else sin_f()
     else:
         df_sf = sin_f()
+
+    # Filtre supplémentaire : Nature de sinistre (périodicité)
+    _c_nat_sin = next((c for c in df_sf.columns
+                       if "ature" in c.lower() and "ini" in c.lower()), None)
+    _c_sort_sin = next((c for c in df_sf.columns
+                        if "ort" in c.lower() and "ini" in c.lower()), None)
+    _sf1, _sf2, _sf3 = st.columns(3)
+    if _c_nat_sin:
+        _nat_opts = ["Toutes"] + sorted(df_sf[_c_nat_sin].dropna().unique().tolist())
+        _nat_sel  = _sf1.selectbox("🔷 Nature sinistre", _nat_opts, key="sin_nat_f")
+        if _nat_sel != "Toutes":
+            df_sf = df_sf[df_sf[_c_nat_sin] == _nat_sel]
+    if _c_sort_sin:
+        _sort_opts = ["Tous"] + sorted(df_sf[_c_sort_sin].dropna().unique().tolist())
+        _sort_sel  = _sf2.selectbox("📌 Sort sinistre", _sort_opts, key="sin_sort_f")
+        if _sort_sel != "Tous":
+            df_sf = df_sf[df_sf[_c_sort_sin] == _sort_sel]
+    _sin_srch = _sf3.text_input("🔍 Recherche", placeholder="N° police, nature…", key="sin_srch")
+    if _sin_srch.strip():
+        _cols_sin = [c for c in df_sf.columns if df_sf[c].dtype == object][:6]
+        _msk_sin  = pd.Series(False, index=df_sf.index)
+        for _cs in _cols_sin:
+            _msk_sin |= df_sf[_cs].astype(str).str.lower().str.contains(_sin_srch.lower(), na=False)
+        df_sf = df_sf[_msk_sin]
+    _yr_lbl_sin = f"Exercice {SEL_YEAR}" if SEL_YEAR else period_lbl
+    st.markdown(f"<div style='font-size:11px;color:#888'><b>{len(df_sf):,}</b> dossier(s) — {_yr_lbl_sin}</div>",
+                unsafe_allow_html=True)
     # Résolution colonnes sinistres — noms exacts vérifiés sur fichier AFG réel
     def _find_col(df, *candidates):
         """
@@ -3491,15 +3534,28 @@ elif "Actuariat" in page:
                     prov["Ratio SAP/Charge"] = prov["SAP"] / prov["Charge"].replace(0, np.nan) * 100
                     prov["Cout moy clos"]    = prov["Regle"] / (prov["Nb"] - prov["Ouvert"]).replace(0, np.nan)
                 fig=go.Figure()
-                fig.add_bar(y=prov["Nature Sinistre"].str[:22],x=prov["Regle"],name="Regle",marker_color=GREEN,orientation="h")
-                fig.add_bar(y=prov["Nature Sinistre"].str[:22],x=prov["SAP"],name="SAP résiduel",marker_color=AMBER,orientation="h")
+                _lbl_nat = prov[_act_nat].astype(str).str[:22]
+                fig.add_bar(y=_lbl_nat, x=prov["Regle"], name="Réglé",     marker_color=GREEN, orientation="h")
+                fig.add_bar(y=_lbl_nat, x=prov["SAP"],   name="SAP résid.", marker_color=AMBER, orientation="h")
                 fig.update_layout(barmode="stack",yaxis=dict(autorange="reversed"))
                 fig_style(fig,360,"📌 Structure Réglé / SAP par nature"); st.plotly_chart(fig,use_container_width=True)
-                pv=prov.copy()
-                for c_ in ["Regle","SAP","Charge","Cout moy clos"]: pv[c_]=pv[c_].apply(fmt)
-                pv["Ratio SAP/Charge"]=pv["Ratio SAP/Charge"].apply(lambda x:f"{x:.1f}%" if pd.notna(x) else "—")
-                pv.columns=["Nature","Nb","Réglé","SAP","Dossiers ouverts","Charge","Ratio SAP/Charge","Coût moyen clos"]
-                st.dataframe(pv,use_container_width=True,hide_index=True)
+                pv = prov.copy()
+                for c_ in ["Regle","SAP","Charge","Cout moy clos"]:
+                    if c_ in pv.columns: pv[c_] = pv[c_].apply(fmt)
+                if "Ratio SAP/Charge" in pv.columns:
+                    pv["Ratio SAP/Charge"] = pv["Ratio SAP/Charge"].apply(
+                        lambda x: f"{x:.1f}%" if pd.notna(x) else "—")
+                _pv_rename = {
+                    _act_nat:           "Nature de sinistre",
+                    "Regle":            "Réglé (FCFA)",
+                    "SAP":              "SAP (FCFA)",
+                    "Ouvert":           "Dossiers ouverts",
+                    "Charge":           "Charge totale (FCFA)",
+                    "Ratio SAP/Charge": "Ratio SAP/Charge",
+                    "Cout moy clos":    "Coût moyen clos (FCFA)",
+                }
+                pv = pv.rename(columns={k:v for k,v in _pv_rename.items() if k in pv.columns})
+                st.dataframe(pv, use_container_width=True, hide_index=True)
                 a,b = st.columns(2)
                 a.download_button("📥 CSV provisions",dl_csv(prov),"provisions.csv","text/csv",use_container_width=True,key="dl_prov")
                 b.download_button("📥 Excel",dl_xlsx(prov),"provisions.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_prov_xl")
@@ -3853,6 +3909,7 @@ elif "Saisie BIA" in page:
             if b1.button("← Retour", key="ret2_pa"):
                 st.session_state.pop("bia_prod",None)
                 st.session_state.pop("bia_step",None); st.rerun()
+            if b2.button("Étape suivante ▶", type="primary", key="nxt2_pa"):
                 _errs = []
                 if not st.session_state.get("f_c_nom","").strip():  _errs.append("Le nom est obligatoire.")
                 if not st.session_state.get("f_c_tel","").strip():  _errs.append("Le téléphone est obligatoire.")
@@ -3863,14 +3920,13 @@ elif "Saisie BIA" in page:
         else:
             section("Étape 2 — Identification & Agence")
             c1,c2,c3=st.columns(3)
-        with c1: si("f_agence","Agence",AGENCES)
-        with c2: ti("f_code_appo","Code apporteur","Ex : AFG001")
-        with c3: ti("f_nom_appo","Nom apporteur")
-        c4,c5=st.columns(2)
-        with c4: ti("f_realis","Réalisateur",user["nom"])
-        with c5: si("f_deja","Déjà assuré AFGVie ?",["Non","Oui"])
-        if st.session_state.get("f_deja")=="Oui": ti("f_num_ct","N° contrat existant")
-        if st.button("Suivant ▶",type="primary"): st.session_state["bia_step"]=3; st.rerun()
+            with c2: ti("f_code_appo","Code apporteur","Ex : AFG001")
+            with c3: ti("f_nom_appo","Nom apporteur")
+            c4,c5=st.columns(2)
+            with c4: ti("f_realis","Réalisateur",user["nom"])
+            with c5: si("f_deja","Déjà assuré AFGVie ?",["Non","Oui"])
+            if st.session_state.get("f_deja")=="Oui": ti("f_num_ct","N° contrat existant")
+            if st.button("Suivant ▶",type="primary"): st.session_state["bia_step"]=3; st.rerun()
         if _is_crt_step:
             # COURTIER PA0 — Étape 2/4 : Bénéficiaires (optionnel)
             section("Étape 2 / 4 — Bénéficiaires","OPTIONNEL — vous pouvez passer cette étape")
@@ -4995,8 +5051,12 @@ elif "Commerciaux" in page:
             b.download_button("📥 Excel",dl_xlsx(grp.head(50000)),"classement.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_rank_xl")
         with t_p:
             t30=grp.head(30)
-            fig=go.Figure(go.Bar(x=t30["CA"],y=t30[ag_k].str[:22],name="CA",marker_color=GREEN,orientation="h",
-                text=[fmt(v) for v in t30["CA"]],textposition="outside", textfont=dict(size=10)))
+            fig=go.Figure(go.Bar(
+                x=t30["CA"],
+                y=t30[ag_k].fillna("N/A").astype(str).str[:25],
+                name="CA",marker_color=GREEN,orientation="h",
+                text=[fmt(v) for v in t30["CA"]],
+                textposition="outside", textfont=dict(size=10)))
             fig.update_layout(yaxis=dict(autorange="reversed"))
             fig_style(fig,500,"📊 Pareto CA — Top 30")
             st.plotly_chart(fig,use_container_width=True)
