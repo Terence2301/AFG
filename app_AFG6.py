@@ -118,7 +118,7 @@ PRODUITS = [
 ]
 
 # ── Barème Prévoyance Auto ────────────────────────────────────────
-# Prime annuelle → Capital garanti décès
+# Prime annuelle  Capital garanti décès
 PA_BAREME = {
     500:  100_000,
     1000: 225_000,
@@ -177,7 +177,7 @@ def calcul_capital_epargne(P_brut: float, periodicite: str, duree_ans: int,
     P_net   = P_brut × (1−α−β)    (cotisation nette par période)
     C       = P_net × [(1+i_pér)^N − 1] / i_pér × (1+i_pér)   ← annuité-due
 
-    Vérif : 10 000 F/mois, 5 ans, i=3,5 % → C ≈ 645 797 FCFA ✓
+    Vérif : 10 000 F/mois, 5 ans, i=3,5 %  C ≈ 645 797 FCFA ✓
     """
     Pnet  = P_brut * (1 - alpha - beta)
     m     = PERIO_M.get(periodicite, 12)
@@ -487,7 +487,7 @@ AGENCES = ["","Siège Social — Cotonou","Agence Cotonou Centre","Agence Cotono
     "Agence Lokossa","Agence Kandi","Agence Abomey","Agence Djougou","Agence Allada"]
 
 # ── Mots de passe chargés depuis st.secrets ─────────────────────────────────
-# Définis dans Streamlit Cloud → Settings → Secrets → [auth]
+# Définis dans Streamlit Cloud  Settings  Secrets  [auth]
 # Le code ne contient JAMAIS de mot de passe en clair.
 def _pwd(key: str, fallback: str) -> str:
     try:
@@ -579,7 +579,7 @@ def clean_str_col(s: pd.Series) -> pd.Series:
     def _clean(v):
         if pd.isna(v): return ""
         t = str(v).strip()
-        # Normalise les caractères accentués mal encodés (Latin-1 → UTF-8)
+        # Normalise les caractères accentués mal encodés (Latin-1  UTF-8)
         try:
             t = t.encode("latin-1").decode("utf-8")
         except Exception:
@@ -634,14 +634,14 @@ def fig_style(fig, h=420, title=""):
 #  BASE BIA — CENTRALISÉE (PostgreSQL) avec fallback SQLite local
 #
 #  ARCHITECTURE :
-#    • PostgreSQL (Supabase / Neon / serveur AFG) → base partagée entre tous
+#    • PostgreSQL (Supabase / Neon / serveur AFG)  base partagée entre tous
 #      les utilisateurs, persistante entre les rechargements.
-#    • SQLite local → fallback automatique si PostgreSQL non configuré
+#    • SQLite local  fallback automatique si PostgreSQL non configuré
 #      (utile pour les tests en local avant déploiement).
 #
 #  CONFIGURATION PostgreSQL :
 #    Définir la variable d'environnement DATABASE_URL dans :
-#      - Streamlit Cloud : Settings → Secrets → [database] url = "..."
+#      - Streamlit Cloud : Settings  Secrets  [database] url = "..."
 #      - Ou fichier .streamlit/secrets.toml :
 #          [database]
 #          url = "postgresql://user:password@host:5432/dbname"
@@ -657,7 +657,7 @@ def _get_db_url() -> str | None:
     Cherche l'URL PostgreSQL dans :
     1. st.secrets["database"]["url"]   (Streamlit Cloud / secrets.toml)
     2. Variable d'environnement DATABASE_URL
-    Retourne None si aucune URL n'est trouvée → fallback SQLite.
+    Retourne None si aucune URL n'est trouvée  fallback SQLite.
     """
     try:
         url = st.secrets["database"]["url"]
@@ -667,7 +667,7 @@ def _get_db_url() -> str | None:
         pass
     env_url = os.environ.get("DATABASE_URL", "")
     if env_url.startswith("postgresql") or env_url.startswith("postgres"):
-        # Neon/Heroku écrivent parfois "postgres://" → normaliser
+        # Neon/Heroku écrivent parfois "postgres://"  normaliser
         return env_url.replace("postgres://", "postgresql://", 1)
     return None
 
@@ -702,7 +702,7 @@ CREATE TABLE IF NOT EXISTS bulletins_bia (
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 )
 """
-# SQLite n'accepte pas SERIAL → on remplace
+# SQLite n'accepte pas SERIAL  on remplace
 _DDL_SQLITE = _DDL.replace(
     "id              SERIAL PRIMARY KEY",
     "id              INTEGER PRIMARY KEY AUTOINCREMENT"
@@ -821,7 +821,7 @@ def insert_bia(data: dict) -> bool:
 
 # ── Mise à jour statut ───────────────────────────────────────────────────────
 def update_bia_statut(bia_id: int, statut: str):
-    """Met à jour le statut d'un BIA (ex. Brouillon → Validé)."""
+    """Met à jour le statut d'un BIA (ex. Brouillon  Validé)."""
     try:
         conn = get_conn()
         ph   = "%s" if _is_pg(conn) else "?"
@@ -863,7 +863,7 @@ def _df_to_parquet_bytes(df: pd.DataFrame) -> bytes:
     return buf.getvalue()
 
 def _parquet_bytes_to_df(b) -> pd.DataFrame:
-    """Désérialise des bytes Parquet → DataFrame."""
+    """Désérialise des bytes Parquet  DataFrame."""
     if isinstance(b, memoryview):
         b = bytes(b)
     return pd.read_parquet(io.BytesIO(b))
@@ -997,7 +997,7 @@ def can_see_analytics(user_dict: dict) -> bool:
 #  Fixes : removeChild DOM bug, lenteur 300K lignes, crash mémoire
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Colonnes utiles uniquement — élimine les ~80 colonnes mortes du PF (306K×100 → 306K×21)
+# Colonnes utiles uniquement — élimine les ~80 colonnes mortes du PF (306K×100  306K×21)
 PF_COLS = {
     "CODEINTE_P","NUMEPOLI_P","LIBECATE","ETAT_POLICE","NOM_ASSU","NOM_APP",
     "LIBEVILL","DATESOUS","DATEEFFE","DATEECHE","DATENAIS",
@@ -1041,7 +1041,7 @@ def _detect_encoding(raw: bytes) -> str:
     """
     Détecte l'encodage d'un fichier CSV.
     Les exports AFG (Megasoft/Orass) sont en Windows-1252 (latin-1).
-    Stratégie : essayer utf-8-sig → utf-8 → latin-1 (fallback universel).
+    Stratégie : essayer utf-8-sig  utf-8  latin-1 (fallback universel).
     """
     # Essayer utf-8 avec BOM
     try:
@@ -1092,9 +1092,9 @@ def load_pf(f) -> pd.DataFrame:
     Charge le Portefeuille de façon optimisée.
 
     OPTIMISATIONS :
-    • usecols = seulement les 19 colonnes utiles (PF_COLS) → 306K×19 au lieu de 306K×100
+    • usecols = seulement les 19 colonnes utiles (PF_COLS)  306K×19 au lieu de 306K×100
     • Lecture en une seule passe (pas de double-lecture des headers)
-    • Toutes les colonnes lues en str → typage minimal uniquement sur celles utilisées
+    • Toutes les colonnes lues en str  typage minimal uniquement sur celles utilisées
     • Nettoyage mémoire immédiat après typage
 
     RÉSULTAT : ~3× plus rapide, ~80% moins de RAM vs lecture complète
@@ -1218,7 +1218,7 @@ def load_sin(f) -> pd.DataFrame:
             xl  = pd.ExcelFile(path, engine="openpyxl")
             # Lire les headers bruts pour construire usecols
             hdr_raw = pd.read_excel(xl, sheet_name=sh, nrows=0)
-            # Matcher avec strip : "Raison Sociale Int " → "Raison Sociale Int"
+            # Matcher avec strip : "Raison Sociale Int "  "Raison Sociale Int"
             use = [c for c in hdr_raw.columns
                    if str(c).strip() in SIN_COLS or str(c) in SIN_COLS]
             if not use:
@@ -1259,12 +1259,12 @@ def load_sin(f) -> pd.DataFrame:
 def filter_df(df, dcol, sel: date, mode: str) -> pd.DataFrame:
     """
     Filtre df sur la colonne dcol selon mode :
-      jour    → dcol.dt.date == sel
-      semaine → semaine ISO contenant sel (lundi–dimanche)
-      mois    → même année et mois
-      trim    → même année et trimestre
-      sem     → même année et semestre
-      annee   → même année
+      jour     dcol.dt.date == sel
+      semaine  semaine ISO contenant sel (lundi–dimanche)
+      mois     même année et mois
+      trim     même année et trimestre
+      sem      même année et semestre
+      annee    même année
     """
     if df is None or df.empty: return pd.DataFrame()
     if dcol not in df.columns: return df
@@ -1298,13 +1298,13 @@ def filter_sin_exo(df, sel: date, mode: str) -> pd.DataFrame:
     if df is None or df.empty: return pd.DataFrame()
     if mode in ("jour","mois"):
         return filter_df(df, "Date Survenance", sel, mode)
-    # Pour trimestre/semestre/annee → filtre sur ANNEE_SIN
+    # Pour trimestre/semestre/annee  filtre sur ANNEE_SIN
     if "ANNEE_SIN" not in df.columns: return df
     yr = sel.year
     if mode == "annee":
         mask = df["ANNEE_SIN"] == yr
     elif mode == "trim":
-        mask = df["ANNEE_SIN"] == yr   # exercice pas découpé en trim → filtre annuel
+        mask = df["ANNEE_SIN"] == yr   # exercice pas découpé en trim  filtre annuel
     elif mode == "sem":
         mask = df["ANNEE_SIN"] == yr
     else:
@@ -1348,7 +1348,6 @@ if not st.session_state.auth:
                     st.session_state.auth = True
                     st.session_state.user = {"nom": ident.strip(), "role": up.split()[0]}
                     st.rerun()
-                else:
                     st.error("❌ Identifiant ou code PIN incorrect.")
     st.stop()
 
@@ -1358,15 +1357,15 @@ today = date.today()
 # ══════════════════════════════════════════════════════════════════════════════
 #  CHARGEMENT AUTOMATIQUE DES BASES DEPUIS LA BASE CENTRALISÉE
 #  Au premier rendu après login, on vérifie si des bases sont déjà stockées.
-#  Si oui → chargement transparent, aucun upload nécessaire.
+#  Si oui  chargement transparent, aucun upload nécessaire.
 #  Les bases restent disponibles pour TOUS les visiteurs même après refresh.
 # ══════════════════════════════════════════════════════════════════════════════
 # Chargement initial des bases depuis Supabase.
 # Utilise un placeholder vide pour afficher un message pendant le chargement.
-# Aucun st.rerun() — évite le removeChild DOM.
+# Aucun st.rerun()
 if not st.session_state.bases_loaded_from_db:
     # Charger les bases uniquement pour les rôles qui ont accès aux onglets analytiques
-    # ADMIN et COURTIER n'ont pas accès aux dashboards → pas besoin de charger
+    # ADMIN et COURTIER n'ont pas accès aux dashboards  pas besoin de charger
     _role_needs_data = can_see_analytics(user)
     if _role_needs_data:
         _ph_load = st.empty()
@@ -1395,7 +1394,7 @@ ALL_PAGES = [
     "👥  Commerciaux",
     "🏦  Partenaires Financiers",
     "👤  Clients & Géographie",
-    "⚠️  Sinistres & Provisions",
+    "⚠️  Sinistres & Prestations",
     "📐  Actuariat Avancé",
     "🔮  Prévisions & Tendances",
     "📝  Saisie BIA",
@@ -1408,17 +1407,17 @@ VISIBLE_DEFAULT = ["📝  Saisie BIA"]
 
 # ── Calcul des pages disponibles selon les bases chargées ─────────────────────
 # RÈGLE : Saisie BIA toujours visible.
-#         Dès qu'AU MOINS une base est chargée → toutes les pages se débloquent.
+#         Dès qu'AU MOINS une base est chargée  toutes les pages se débloquent.
 #         Ce calcul est fait à chaque rendu (pas besoin de bouton).
 _any_data     = (st.session_state.pf_ok or st.session_state.ca_ok or st.session_state.sin_ok)
 SEL_YEAR = st.session_state.get("sel_year_num", None)
 _can_analysis = can_see_analytics(user)   # PDG ou ACTUAIRE uniquement
-_is_courtier  = is_courtier(user)         # Courtiers → Saisie BIA uniquement
+_is_courtier  = is_courtier(user)         # Courtiers  Saisie BIA uniquement
 
 # Règle d'accès :
-# • PDG / ACTUAIRE + bases chargées → tous les onglets
-# • COURTIER → Saisie BIA uniquement (produit PA0)
-# • Tous les autres → Saisie BIA uniquement
+# • PDG / ACTUAIRE + bases chargées  tous les onglets
+# • COURTIER  Saisie BIA uniquement (produit PA0)
+# • Tous les autres  Saisie BIA uniquement
 pages_visible = ALL_PAGES if (_any_data and _can_analysis and not _is_courtier) else VISIBLE_DEFAULT
 
 # Sécurité : si la page courante a disparu (ex. données effacées), revenir à BIA
@@ -1508,7 +1507,7 @@ with st.sidebar:
     st.markdown("<hr>", unsafe_allow_html=True)
 
     # ── Filtre période ──────────────────────────────────────────────────────
-    # CSS calendrier : fond sombre → texte visible
+    # CSS calendrier : fond sombre  texte visible
     st.markdown("""
     <style>
     div[data-baseweb="calendar"] {
@@ -1716,15 +1715,15 @@ with st.sidebar:
 #  TRAITEMENT DES ACTIONS — CYCLE 2 (hors sidebar, hors widget)
 #
 #  PRINCIPE ANTI-removeChild :
-#  On ne fait JAMAIS st.rerun() pendant ou juste après un widget Streamlit.
+#  On ne fait JAMAIS st.rerun()
 #  À la place :
-#   • Cycle 1 : widget stocke fichier dans _pending_XX → rendu normal → fin
-#   • Cycle 2 : on détecte _pending_XX → on traite (load + save) →
-#               on met _ok=True → st.rerun() EN TOUTE FIN de script
+#   • Cycle 1 : widget stocke fichier dans _pending_XX  rendu normal  fin
+#   • Cycle 2 : on détecte _pending_XX  on traite (load + save) 
+#               on met _ok=True  st.rerun()
 #               (après tous les widgets, après tout le rendu)
-#   • Cycle 3 : _ok=True → onglets disponibles → affichage normal
+#   • Cycle 3 : _ok=True  onglets disponibles  affichage normal
 #
-#  Le st.rerun() est appelé UNE SEULE FOIS, à la toute fin, quand le DOM
+#  Le st.rerun()
 #  est stable et React a terminé tous ses effets.
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1733,8 +1732,6 @@ if "_logout" in dir() and _logout:
     for k in DEFAULTS:
         st.session_state[k] = DEFAULTS[k]
     st.rerun()
-
-# ── Suppressions / remplacements ──────────────────────────────────────────────
 _did_action = False
 for _bt in ["pf", "ca", "sin"]:
     if st.session_state.pop(f"_action_{_bt}", None):
@@ -1747,8 +1744,6 @@ for _bt in ["pf", "ca", "sin"]:
         _did_action = True
 if _did_action:
     st.rerun()
-
-# ── Traitement fichiers en attente ────────────────────────────────────────────
 # Zone de progression visible pendant le traitement (avant le rendu principal)
 _processed = False
 
@@ -1897,7 +1892,7 @@ def _bytes_to_df_sin(raw: bytes, fname: str) -> pd.DataFrame:
 
 # ── Traitement des bytes stockés — parsing et sauvegarde ─────────────────────
 # Les bytes sont déjà en mémoire (lus instantanément dans la sidebar).
-# On parse ici, sans aucun widget actif → DOM stable → st.rerun() sûr.
+# On parse ici, sans aucun widget actif  DOM stable  st.rerun()
 
 if st.session_state.get("_pending_pf_bytes") is not None:
     _raw  = st.session_state.pop("_pending_pf_bytes")
@@ -1971,12 +1966,9 @@ if st.session_state.get("_pending_sin_bytes") is not None:
 
 # ── Rerun final — uniquement si un traitement a eu lieu ──────────────────────
 # À ce point, TOUT le DOM est stable : sidebar rendue, widgets stabilisés,
-# traitements terminés. st.rerun() est sûr.
+# traitements terminés. st.rerun()
 if _processed:
     st.rerun()
-
-
-# ══════════════════════════════════════════════════════════════════════════════
 #  FONCTIONS CACHÉES — évite de recalculer à chaque clic d'onglet
 #  @st.cache_data : résultat mis en cache selon les paramètres (hash du df)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2105,7 +2097,10 @@ if "Accueil" in page:
     df_sin = sin_f()
 
     # Compteurs filtrés pour contexte
-    section(f"📊 Indicateurs clés — {period_lbl}", "CIMA · PORTEFEUILLE")
+    # Badge filtre actif
+    _yr_badge = f" · <b>Année {SEL_YEAR}</b>" if SEL_YEAR else ""
+    section(f"📊 Indicateurs clés — {period_lbl}{_yr_badge}",
+            f"CIMA · PORTEFEUILLE · {'TOUTES PÉRIODES' if not SEL_YEAR else f'EXERCICE {SEL_YEAR}'}")
     nb  = len(df_pf)
     eok = "ETAT_POLICE" in df_pf.columns if nb else False
     actifs = int((df_pf["ETAT_POLICE"].str.strip().isin(["ACTIF"])).sum()) if eok and nb else 0
@@ -2143,13 +2138,20 @@ if "Accueil" in page:
     elif ca is not None:
         alert(f"Aucune quittance CA pour {period_lbl}. Essayez mode Mois ou Année.","info")
 
-    if sin is not None:
+    if sin is not None and not df_sin.empty:
         st.markdown("")
-        section("🏥 Sinistres & Provisions","TOUTES PÉRIODES")
-        tot_sin = float(sin["Réglement Total"].fillna(0).sum()) if "Réglement Total" in sin.columns else 0
-        tot_sap = float(sin["SAP au 31/12/2025"].fillna(0).sum()) if "SAP au 31/12/2025" in sin.columns else 0
-        nb_sin  = len(sin); nb_ouv = int((sin["Sort Sinistre"]=="Ouvert").sum()) if "Sort Sinistre" in sin.columns else 0
-        nb_clos = int((sin["Sort Sinistre"]=="Cloturé").sum()) if "Sort Sinistre" in sin.columns else 0
+        _sin_yr_lbl = f"Exercice {SEL_YEAR}" if SEL_YEAR else "Toutes périodes"
+        section(f"🏥 Sinistres & Prestations — {_sin_yr_lbl}",
+                "RÉGLEMENTS · SAP · RATIO S/P · DONNÉES FILTRÉES")
+        # Résolution dynamique des colonnes
+        _c_r_a = next((c for c in df_sin.columns if "glement" in c.lower() and "otal" in c.lower()), None)
+        _c_s_a = next((c for c in df_sin.columns if c.upper().startswith("SAP")), None)
+        _c_srt = next((c for c in df_sin.columns if "ort" in c.lower() and "ini" in c.lower()), None)
+        tot_sin = float(df_sin[_c_r_a].fillna(0).sum()) if _c_r_a else 0
+        tot_sap = float(df_sin[_c_s_a].fillna(0).sum()) if _c_s_a else 0
+        nb_sin  = len(df_sin)
+        nb_ouv  = int((df_sin[_c_srt]=="Ouvert").sum()) if _c_srt else 0
+        nb_clos = int((df_sin[_c_srt]=="Cloturé").sum()) if _c_srt else 0
         ca_all  = float(ca["CHIFAFFA"].fillna(0).sum()) if ca is not None and "CHIFAFFA" in ca.columns else 0
         sp = tot_sin/max(ca_all,1)*100
         actifs_tot = int((pf["ETAT_POLICE"].str.strip().isin(["ACTIF"])).sum()) if pf is not None and "ETAT_POLICE" in pf.columns else 1
@@ -2402,27 +2404,78 @@ elif "Portefeuille" in page:
     else:
         df = df_all
 
-    section(f"📋 Portefeuille — Vue complète","ANALYSE · FILTRES · EXPORT")
+    # Titre dynamique selon filtre année
+    _pf_yr_lbl = f" · Année {SEL_YEAR}" if SEL_YEAR else ""
+    section(f"📋 Portefeuille{_pf_yr_lbl}","ANALYSE · FILTRES · EXPORT")
 
-    # Filtres
-    f1,f2,f3,f4 = st.columns(4)
-    etat_opts=["Tous"]+sorted(df_all["ETAT_POLICE"].str.strip().dropna().unique().tolist()) if "ETAT_POLICE" in df_all.columns else ["Tous"]
-    prod_opts=["Tous"]+sorted(df_all["LIBECATE"].dropna().unique().tolist()) if "LIBECATE" in df_all.columns else ["Tous"]
-    etat_sel=f1.selectbox("État",etat_opts,label_visibility="collapsed")
-    prod_sel=f2.selectbox("Produit",prod_opts,label_visibility="collapsed")
-    srch_pf=f3.text_input("🔍 Rechercher",label_visibility="collapsed",placeholder="Nom assuré, ville, apporteur…")
-    villes_opts=["Toutes"]+sorted(df_all["LIBEVILL"].dropna().unique().tolist()[:60]) if "LIBEVILL" in df_all.columns else ["Toutes"]
-    ville_sel=f4.selectbox("Ville",villes_opts,label_visibility="collapsed")
+    # Listes de choix construites depuis df (déjà filtré par année si SEL_YEAR)
+    _base_opts = df  # base pour les options = données de l'année choisie
 
-    fi=df.copy()
-    if etat_sel!="Tous" and "ETAT_POLICE" in fi.columns: fi=fi[fi["ETAT_POLICE"].str.strip()==etat_sel]
-    if prod_sel!="Tous" and "LIBECATE" in fi.columns: fi=fi[fi["LIBECATE"]==prod_sel]
-    if ville_sel!="Toutes" and "LIBEVILL" in fi.columns: fi=fi[fi["LIBEVILL"]==ville_sel]
-    if srch_pf:
-        cols_s=[c for c in ["NOM_ASSU","LIBEVILL","NOM_APP","LIBECATE"] if c in fi.columns]
-        mask=pd.Series(False,index=fi.index)
-        for c_ in cols_s: mask|=fi[c_].astype(str).str.lower().str.contains(srch_pf.lower(),na=False)
-        fi=fi[mask]
+    f0,f1,f2,f3,f4 = st.columns([1.2,1.2,1.2,1.2,1.2])
+
+    # 0. Filtre état ETAT_POLICE
+    etat_opts = ["Tous"] + sorted(
+        _base_opts["ETAT_POLICE"].str.strip().dropna().unique().tolist()
+    ) if "ETAT_POLICE" in _base_opts.columns else ["Tous"]
+    etat_sel  = f0.selectbox("🔘 État police", etat_opts, key="pf_etat")
+
+    # 1. Filtre produit / catégorie
+    prod_opts = ["Tous"] + sorted(
+        _base_opts["LIBECATE"].dropna().unique().tolist()
+    ) if "LIBECATE" in _base_opts.columns else ["Tous"]
+    prod_sel  = f1.selectbox("📦 Produit", prod_opts, key="pf_prod")
+
+    # 2. Filtre périodicité
+    peri_opts = ["Toutes"] + sorted(
+        _base_opts["PERIODICITE"].dropna().unique().tolist()
+    ) if "PERIODICITE" in _base_opts.columns else ["Toutes"]
+    peri_sel  = f2.selectbox("🔄 Périodicité", peri_opts, key="pf_peri")
+
+    # 3. Filtre ville
+    villes_opts = ["Toutes"] + sorted(
+        _base_opts["LIBEVILL"].dropna().unique().tolist()[:80]
+    ) if "LIBEVILL" in _base_opts.columns else ["Toutes"]
+    ville_sel   = f3.selectbox("📍 Ville", villes_opts, key="pf_ville")
+
+    # 4. Recherche texte libre
+    srch_pf = f4.text_input("🔍 Recherche", placeholder="Nom, ville, apporteur…", key="pf_srch")
+
+    # Appliquer les filtres
+    fi = df.copy()
+    if etat_sel  != "Tous"    and "ETAT_POLICE"  in fi.columns:
+        fi = fi[fi["ETAT_POLICE"].str.strip() == etat_sel]
+    if prod_sel  != "Tous"    and "LIBECATE"      in fi.columns:
+        fi = fi[fi["LIBECATE"] == prod_sel]
+    if peri_sel  != "Toutes"  and "PERIODICITE"   in fi.columns:
+        fi = fi[fi["PERIODICITE"] == peri_sel]
+    if ville_sel != "Toutes"  and "LIBEVILL"      in fi.columns:
+        fi = fi[fi["LIBEVILL"] == ville_sel]
+    if srch_pf.strip():
+        _cols_s = [c for c in ["NOM_ASSU","LIBEVILL","NOM_APP","LIBECATE"] if c in fi.columns]
+        _mask   = pd.Series(False, index=fi.index)
+        for c_ in _cols_s:
+            _mask |= fi[c_].astype(str).str.lower().str.contains(srch_pf.lower(), na=False)
+        fi = fi[_mask]
+
+    # Badge filtres actifs
+    _filters_active = [x for x in [
+        f"Année {SEL_YEAR}" if SEL_YEAR else None,
+        f"État : {etat_sel}" if etat_sel != "Tous" else None,
+        f"Produit : {prod_sel}" if prod_sel != "Tous" else None,
+        f"Périodicité : {peri_sel}" if peri_sel != "Toutes" else None,
+        f"Ville : {ville_sel}" if ville_sel != "Toutes" else None,
+        f"Recherche : {srch_pf}" if srch_pf.strip() else None,
+    ] if x]
+    if _filters_active:
+        st.markdown(
+            " &nbsp;".join([f'<span style="background:{NAVY}20;border:1px solid {NAVY}40;'
+                            f'border-radius:12px;padding:2px 10px;font-size:11px;'
+                            f'font-weight:600">🔍 {f}</span>'
+                            for f in _filters_active]),
+            unsafe_allow_html=True)
+    st.markdown(f"<div style='font-size:11px;color:#888;margin:4px 0'>"
+                f"<b>{len(fi):,}</b> police(s) sur {len(df):,}</div>",
+                unsafe_allow_html=True)
 
     nb=len(fi)
     actifs=int((fi["ETAT_POLICE"].str.strip()=="ACTIF").sum()) if "ETAT_POLICE" in fi.columns and nb else 0
@@ -2689,7 +2742,7 @@ elif "Commerciaux" in page and "Partenaires" not in page:
 
     section(f"👥 Performance Commerciale — {period_lbl}","CA · CLIENTS · COMMISSIONS · CLASSEMENT")
 
-    # Priorité : NOM_APPORT (nom complet apporteur) → NOM_INTERMEDIAIRE → NOM_APP
+    # Priorité : NOM_APPORT (nom complet apporteur)  NOM_INTERMEDIAIRE  NOM_APP
     ag_k = next((c for c in ["NOM_APPORT","NOM_APPO","NOM_INTERMEDIAIRE","NOM_APP"]
                  if c in df_com.columns), None)
     if ag_k is None: alert("Colonne nom apporteur introuvable (NOM_APPORT/NOM_INTERMEDIAIRE).","danger"); st.stop()
@@ -2892,34 +2945,54 @@ elif "Partenaires" in page:
 
             c1p,c2p = st.columns(2)
             with c1p:
+                # Libellé : nom si dispo, sinon code
+                _par_lbl_col = _col_nom if (_col_nom and _col_nom in dp.columns) else "_CODE_STR"
+                _par_lbl15   = dp[_par_lbl_col].astype(str).str[:22].head(15)
+                _par_val15   = dp["CA"].head(15)
+
                 fig = go.Figure(go.Bar(
-                    x=dp["CA"].head(15),
-                    y=(dp[_col_nom].str[:22] if _col_nom and _col_nom in dp.columns
-                       else dp["_CODE_STR"]).head(15),
+                    x=_par_val15, y=_par_lbl15,
                     orientation="h", marker_color=BLUE,
-                    text=[fmt(v) for v in dp["CA"].head(15)],
+                    text=[fmt(v) for v in _par_val15],
                     textposition="outside", textfont=dict(size=9)))
                 fig.update_layout(yaxis=dict(autorange="reversed"))
-                fig_style(fig, 420, f"CA par partenaire — {period_lbl}")
+                _yr_lbl_p = f" · {SEL_YEAR}" if SEL_YEAR else f" · {period_lbl}"
+                fig_style(fig, 420, f"CA par partenaire{_yr_lbl_p}")
                 st.plotly_chart(fig, use_container_width=True)
             with c2p:
                 dp_top = dp.head(10)
+                _pie_lbl = dp_top[_par_lbl_col].astype(str).str[:18]
                 fig2 = go.Figure(go.Pie(
-                    labels=(dp_top[_col_nom].str[:18] if _col_nom and _col_nom in dp_top.columns
-                            else dp_top["_CODE_STR"]),
-                    values=dp_top["CA"], hole=.4,
+                    labels=_pie_lbl, values=dp_top["CA"], hole=.4,
                     textinfo="percent+label", textfont=dict(size=10)))
                 fig_style(fig2, 420, "Part de marché — Top 10")
                 st.plotly_chart(fig2, use_container_width=True)
 
-            # Tableau
+            # Tableau — renommer proprement sans réindexer colonnes
             dp_d = dp.copy()
-            dp_d.columns = ([_col_nom if _col_nom and _col_nom in dp.columns else "Code"] +
-                           [c for c in dp_d.columns[1:]])
-            dp_d["CA"] = dp_d["CA"].apply(fmt)
-            if "Commission" in dp_d.columns: dp_d["Commission"] = dp_d["Commission"].apply(fmt)
-            dp_d["Part %"] = dp_d["Part %"].apply(lambda x: f"{x:.2f}%")
-            st.dataframe(dp_d, use_container_width=True, height=380, hide_index=False)
+            # Formatage des montants
+            if "CA" in dp_d.columns:
+                dp_d["CA"] = dp_d["CA"].apply(fmt)
+            if "Commission" in dp_d.columns:
+                dp_d["Commission"] = dp_d["Commission"].apply(fmt)
+            if "Part %" in dp_d.columns:
+                dp_d["Part %"] = dp_d["Part %"].apply(lambda x: f"{x:.2f}%")
+            # Renommer les colonnes de façon lisible
+            _rename_dp = {"_CODE_STR": "Code", "CA": "CA (FCFA)", "NbQ": "Nb affaires",
+                          "Commission": "Commission (FCFA)", "Part %": "Part %"}
+            if _col_nom and _col_nom in dp_d.columns:
+                _rename_dp[_col_nom] = "Partenaire"
+            dp_d = dp_d.rename(columns=_rename_dp)
+            st.dataframe(dp_d, use_container_width=True, height=380, hide_index=True)
+            # Export
+            _dl1, _dl2 = st.columns(2)
+            _dl1.download_button("📥 CSV partenaires", dl_csv(dp),
+                "partenaires.csv", "text/csv",
+                use_container_width=True, key="dl_part_csv")
+            _dl2.download_button("📥 Excel partenaires", dl_xlsx(dp),
+                "partenaires.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True, key="dl_part_xl")
             a,b = st.columns(2)
             a.download_button("📥 CSV",dl_csv(dp),"partenaires.csv","text/csv",
                 use_container_width=True,key="dl_pf_csv")
@@ -3107,7 +3180,7 @@ elif "Sinistres" in page:
     def _find_col(df, *candidates):
         """
         Retourne la 1ère colonne trouvée parmi les candidats.
-        Stratégie : exact → strip → lower+strip → fuzzy.
+        Stratégie : exact  strip  lower+strip  fuzzy.
         """
         # Index normalisé : {nom_lowercase_sans_espaces: nom_réel}
         cols_norm = {c.strip().lower().replace(" ",""): c for c in df.columns}
@@ -3157,7 +3230,7 @@ elif "Sinistres" in page:
         st.warning(f"⚠️ Colonnes non trouvées : {_missing_cols} | "
                    f"Colonnes disponibles : {list(sin.columns[:10])}")
 
-    section(f"⚠️ Sinistres & Provisions — {period_lbl}","ANALYSE ACTUARIELLE · SAP · S/P")
+    section(f"⚠️ Sinistres & Prestations — {period_lbl}","ANALYSE ACTUARIELLE · SAP · S/P")
     # Noms exacts vérifiés sur fichier AFG réel
     _c_tot  = "Réglement Total"     if "Réglement Total"     in sin.columns else next((c for c in sin.columns if "glement" in c and "otal" in c), None)
     _c_sap  = "SAP au 31/12/2025"  if "SAP au 31/12/2025"  in sin.columns else next((c for c in sin.columns if c.startswith("SAP")), None)
@@ -3557,22 +3630,22 @@ elif "Saisie BIA" in page:
             <div style="background:white;border-radius:8px;padding:10px;text-align:center">
               <div style="font-size:10px;color:#888">Prime annuelle</div>
               <div style="font-size:15px;font-weight:800;color:{RED}">500 FCFA</div>
-              <div style="font-size:11px;color:{NAVY};font-weight:700">→ 100 000 FCFA</div>
+              <div style="font-size:11px;color:{NAVY};font-weight:700"> 100 000 FCFA</div>
             </div>
             <div style="background:white;border-radius:8px;padding:10px;text-align:center">
               <div style="font-size:10px;color:#888">Prime annuelle</div>
               <div style="font-size:15px;font-weight:800;color:{RED}">1 000 FCFA</div>
-              <div style="font-size:11px;color:{NAVY};font-weight:700">→ 225 000 FCFA</div>
+              <div style="font-size:11px;color:{NAVY};font-weight:700"> 225 000 FCFA</div>
             </div>
             <div style="background:white;border-radius:8px;padding:10px;text-align:center">
               <div style="font-size:10px;color:#888">Prime annuelle</div>
               <div style="font-size:15px;font-weight:800;color:{RED}">1 500 FCFA</div>
-              <div style="font-size:11px;color:{NAVY};font-weight:700">→ 350 000 FCFA</div>
+              <div style="font-size:11px;color:{NAVY};font-weight:700"> 350 000 FCFA</div>
             </div>
             <div style="background:white;border-radius:8px;padding:10px;text-align:center">
               <div style="font-size:10px;color:#888">Prime annuelle</div>
               <div style="font-size:15px;font-weight:800;color:{RED}">2 000 FCFA</div>
-              <div style="font-size:11px;color:{NAVY};font-weight:700">→ 500 000 FCFA</div>
+              <div style="font-size:11px;color:{NAVY};font-weight:700"> 500 000 FCFA</div>
             </div>
           </div>
         </div>""", unsafe_allow_html=True)
@@ -3584,11 +3657,12 @@ elif "Saisie BIA" in page:
             key="inp_courtier")
         st.session_state["f_courtier_nom"] = _nom_courtier
 
-        # Logo du courtier — recherche via DuckDuckGo logo API
-        if _nom_courtier and len(_nom_courtier) >= 3:
-            _logo_q = _nom_courtier.strip().replace(" ", "+")
-            _logo_url = f"https://logo.clearbit.com/{_nom_courtier.lower().replace(' ','').replace('.','')+'.com'}"
-            _fallback  = f"https://ui-avatars.com/api/?name={_logo_q}&background=C0392B&color=fff&size=128&bold=true&format=png"
+        # Logo courtier — Clearbit (auto) + fallback avatar initiales
+        if _nom_courtier and len(_nom_courtier.strip()) >= 2:
+            _slug_crt  = _nom_courtier.strip().lower().replace(" ","").replace(".","")                                       .replace("-","").replace("'","").replace(",","")
+            _logo_url  = f"https://logo.clearbit.com/{_slug_crt}.com"
+            _logo_q    = _nom_courtier.strip().replace(" ", "+")
+            _fallback  = f"https://ui-avatars.com/api/?name={_logo_q}&background=003366&color=fff&size=200&bold=true&font-size=0.38&format=png"
             st.markdown(f"""
             <div style="text-align:center;margin:8px 0 14px">
               <img src="{_logo_url}"
@@ -3609,8 +3683,6 @@ elif "Saisie BIA" in page:
             st.session_state["f_code_appo"] = _nom_courtier
             st.session_state["f_nom_appo"]  = _nom_courtier
             st.rerun()
-
-        # Si BIA pas encore démarré → arrêter ici
         if st.session_state.get("bia_prod") != "PA0":
             st.stop()
 
@@ -3633,14 +3705,13 @@ elif "Saisie BIA" in page:
                   <div style="font-size:13px;font-weight:700;margin-top:6px;color:{NAVY}">ASSURTOUS AVIGBO</div>
                   <div style="font-size:11px;color:#666;margin-top:3px">Décès · Barème fixe</div>
                   <div style="font-size:10px;color:#888;margin-top:5px;line-height:1.7">
-                    100 F/mois → Capital 100 000 F  (unique : 1 000 F)<br>
-                    200 F/mois → Capital 200 000 F  (unique : 2 000 F)<br>
-                    300 F/mois → Capital 300 000 F  (unique : 3 000 F)
+                    100 F/mois  Capital 100 000 F  (unique : 1 000 F)<br>
+                    200 F/mois  Capital 200 000 F  (unique : 2 000 F)<br>
+                    300 F/mois  Capital 300 000 F  (unique : 3 000 F)
                   </div></div>""", unsafe_allow_html=True)
                 if st.button("Choisir AVIGBO (221)", key="bp_221", use_container_width=True):
                     st.session_state["bia_prod"]="221"
                     st.session_state["bia_step"]=2; st.rerun()
-            with col_b:
                 st.markdown(f"""<div style="border:2px solid {RED}44;border-radius:10px;
                   padding:12px 14px;margin-bottom:6px">
                   <span style="background:{RED};color:white;font-size:9px;font-weight:700;
@@ -3648,15 +3719,13 @@ elif "Saisie BIA" in page:
                   <div style="font-size:13px;font-weight:700;margin-top:6px;color:{NAVY}">ASSURTOUS VIGNINOU</div>
                   <div style="font-size:11px;color:#666;margin-top:3px">Décès · Durée max 12 mois · Barème fixe</div>
                   <div style="font-size:10px;color:#888;margin-top:5px;line-height:1.7">
-                    400 F/mois → Capital 500 000 F  (unique : 48 000 F)<br>
-                    800 F/mois → Capital 1 000 000 F (unique : 96 000 F)<br>
-                    1 200 F/mois → Capital 1 500 000 F (unique : 144 000 F)
+                    400 F/mois  Capital 500 000 F  (unique : 48 000 F)<br>
+                    800 F/mois  Capital 1 000 000 F (unique : 96 000 F)<br>
+                    1 200 F/mois  Capital 1 500 000 F (unique : 144 000 F)
                   </div></div>""", unsafe_allow_html=True)
                 if st.button("Choisir VIGNINOU (220)", key="bp_220", use_container_width=True):
                     st.session_state["bia_prod"]="220"
                     st.session_state["bia_step"]=2; st.rerun()
-
-        # Prévoyance Auto (PA0) — visible pour PDG et ACTUAIRE
         with st.expander("🚗 Prévoyance Auto (PA0)", expanded=False):
             st.markdown(f"""<div style="border:2px solid {RED}44;border-radius:10px;
               padding:12px 14px;margin-bottom:6px">
@@ -3665,16 +3734,14 @@ elif "Saisie BIA" in page:
               <div style="font-size:13px;font-weight:700;margin-top:6px;color:{NAVY}">Prévoyance Auto</div>
               <div style="font-size:11px;color:#666;margin-top:3px">Décès · Durée 1 an · Barème fixe</div>
               <div style="font-size:10px;color:#888;margin-top:5px;line-height:1.7">
-                500 FCFA/an → Capital 100 000 FCFA<br>
-                1 000 FCFA/an → Capital 225 000 FCFA<br>
-                1 500 FCFA/an → Capital 350 000 FCFA<br>
-                2 000 FCFA/an → Capital 500 000 FCFA
+                500 FCFA/an  Capital 100 000 FCFA<br>
+                1 000 FCFA/an  Capital 225 000 FCFA<br>
+                1 500 FCFA/an  Capital 350 000 FCFA<br>
+                2 000 FCFA/an  Capital 500 000 FCFA
               </div></div>""", unsafe_allow_html=True)
             if st.button("Choisir Prévoyance Auto (PA0)", key="bp_PA0", use_container_width=True):
                 st.session_state["bia_prod"]="PA0"
                 st.session_state["bia_step"]=2; st.rerun()
-
-        with st.expander("💰 Groupe 2 — Épargne & Capitalisation", expanded=True):
             st.markdown(f"""<div style="border:2px solid {GREEN}44;border-radius:10px;
               padding:12px 14px;margin-bottom:6px">
               <span style="background:{GREEN};color:white;font-size:9px;font-weight:700;
@@ -3688,16 +3755,12 @@ elif "Saisie BIA" in page:
             if st.button("Choisir Épargne", key="bp_EP0", use_container_width=True):
                 st.session_state["bia_prod"]="EP0"
                 st.session_state["bia_step"]=2; st.rerun()
-
-        if "bia_prod" not in st.session_state:
             alert("Sélectionnez un produit pour afficher le formulaire BIA.","info")
             st.stop()
 
         prod = next((p for p in PRODUITS if p["code"]==st.session_state.get("bia_prod")), None)
         if not prod:
             st.session_state.pop("bia_prod", None); st.rerun()
-
-        gc        = GC.get(prod["grp"], BLUE)
         step      = st.session_state.get("bia_step", 2)
         is_avigbo   = prod["code"] == "221"
         is_vigninou = prod["code"] == "220"
@@ -3728,11 +3791,9 @@ elif "Saisie BIA" in page:
 
     if st.button("↩️ Changer de produit",key="chg_p"):
         st.session_state.pop("bia_prod",None); st.session_state.pop("bia_step",None); st.rerun()
-
-    # Étapes selon le type d'utilisateur
     if _is_crt_step:
-        # Courtier PA0 : 4 étapes réelles → steps 2,3,5,7 (les autres sont skippés)
-        # Mapping step → numéro d'étape affiché
+        # Courtier PA0 : 4 étapes réelles  steps 2,3,5,7 (les autres sont skippés)
+        # Mapping step  numéro d'étape affiché
         _crt_map = {2: (1,4,"Souscripteur"), 3: (2,4,"Bénéficiaires"),
                     5: (3,4,"Contrat"),       7: (4,4,"Validation")}
         _crt_num, _crt_tot, _crt_lbl = _crt_map.get(step, (1,4,""))
@@ -3752,31 +3813,53 @@ elif "Saisie BIA" in page:
 
     if step==2:
         if _is_crt_step:
-            # COURTIER PA0 — Étape 1/3 : Souscripteur (3 champs obligatoires)
-            section("Étape 1 / 3 — Souscripteur","PRÉVOYANCE AUTO")
+            # ── COURTIER PA0 — Étape 1/3 : Souscripteur ─────────────────────
+            section("Étape 1 / 3 — Souscripteur","PRÉVOYANCE AUTO · INFORMATIONS PERSONNELLES")
+
+            # Afficher logo courtier en haut de chaque étape
+            _crt_n2 = st.session_state.get("f_courtier_nom","")
+            if _crt_n2:
+                _s2_slug = _crt_n2.strip().lower().replace(" ","").replace(".","").replace("-","")
+                _s2_logo = f"https://logo.clearbit.com/{_s2_slug}.com"
+                _s2_fbk  = f"https://ui-avatars.com/api/?name={_crt_n2.replace(' ','+')}&background=003366&color=fff&size=80&bold=true&format=png"
+                st.image("https://logo.clearbit.com/logo.com", width=60)
+
+            # Champs souscripteur (sans adresse, agence, code/nom apporteur)
             c1,c2,c3 = st.columns([1,2,2])
             with c1: si("f_c_tit","Civilité *",["","M.","Mme","Mlle"])
             with c2: ti("f_c_nom","Nom *","NOM EN MAJUSCULES")
             with c3: ti("f_c_prn","Prénoms *","Prénoms")
-            ti("f_c_tel","Téléphone *","+229 97…")
-            # Initialiser les champs optionnels avec des valeurs par défaut
-            if not st.session_state.get("f_c_nat"): st.session_state["f_c_nat"] = "Béninoise"
-            if not st.session_state.get("f_c_ddn"):
-                st.session_state["f_c_ddn"] = date(1985,1,1)
+
+            c4,c5 = st.columns(2)
+            with c4:
+                _ddn_v = st.session_state.get("f_c_ddn", date(1985,1,1))
+                if isinstance(_ddn_v, str):
+                    try: _ddn_v = date.fromisoformat(_ddn_v)
+                    except: _ddn_v = date(1985,1,1)
+                st.session_state["f_c_ddn"] = st.date_input(
+                    "Date de naissance *", value=_ddn_v,
+                    min_value=date(1920,1,1), max_value=today, key="ddn_pa2")
+            with c5:
+                ti("f_c_tel","Téléphone *","+229 97…")
+
+            # Valeurs par défaut silencieuses
+            if not st.session_state.get("f_c_nat"):
+                st.session_state["f_c_nat"] = "Béninoise"
             st.session_state["f_ass_meme"] = True
-            st.session_state["f_bc"]        = True
+            st.session_state["f_bc"]       = True
+
             st.markdown("")
             b1,b2 = st.columns(2)
             if b1.button("← Retour", key="ret2_pa"):
                 st.session_state.pop("bia_prod",None)
                 st.session_state.pop("bia_step",None); st.rerun()
-            if b2.button("Suivant ▶", type="primary", key="nxt2_pa"):
-                if not st.session_state.get("f_c_nom","").strip():
-                    st.error("Le nom est obligatoire.")
-                elif not st.session_state.get("f_c_tel","").strip():
-                    st.error("Le téléphone est obligatoire.")
+                _errs = []
+                if not st.session_state.get("f_c_nom","").strip():  _errs.append("Le nom est obligatoire.")
+                if not st.session_state.get("f_c_tel","").strip():  _errs.append("Le téléphone est obligatoire.")
+                if _errs:
+                    for _e in _errs: st.error(_e)
                 else:
-                    st.session_state["bia_step"] = 5; st.rerun()  # sauter bénéficiaires → Contrat
+                    st.session_state["bia_step"] = 5; st.rerun()
         else:
             section("Étape 2 — Identification & Agence")
             c1,c2,c3=st.columns(3)
@@ -3788,8 +3871,6 @@ elif "Saisie BIA" in page:
         with c5: si("f_deja","Déjà assuré AFGVie ?",["Non","Oui"])
         if st.session_state.get("f_deja")=="Oui": ti("f_num_ct","N° contrat existant")
         if st.button("Suivant ▶",type="primary"): st.session_state["bia_step"]=3; st.rerun()
-
-    elif step==3:
         if _is_crt_step:
             # COURTIER PA0 — Étape 2/4 : Bénéficiaires (optionnel)
             section("Étape 2 / 4 — Bénéficiaires","OPTIONNEL — vous pouvez passer cette étape")
@@ -3806,12 +3887,9 @@ elif "Saisie BIA" in page:
             b1,b2,b3 = st.columns(3)
             if b1.button("← Retour", key="ret3_pa"):
                 st.session_state["bia_step"] = 2; st.rerun()
-            if b3.button("Suivant ▶", type="primary", key="nxt3_pa"):
                 st.session_state["bia_step"] = 4; st.rerun()
-            if b2.button("Passer cette étape", key="skip3_pa"):
                 st.session_state["f_bc"] = True
                 st.session_state["bia_step"] = 4; st.rerun()
-        else:
             section("Étape 3 — Souscripteur / Contractant")
             c1,c2,c3=st.columns([1,2,2])
         with c1: si("f_c_tit","Civilité *",["","M.","Mme","Mlle"])
@@ -3841,17 +3919,14 @@ elif "Saisie BIA" in page:
         st.session_state["f_ass_meme"]=st.checkbox("✓ L'assuré(e) est identique au souscripteur",value=st.session_state.get("f_ass_meme",True))
         b1,b2=st.columns(2)
         if b1.button("← Retour"): st.session_state["bia_step"]=2; st.rerun()
-        if b2.button("Suivant ▶",type="primary"):
+        if b2.button("Suivant ▶", type="primary", key="nxt3_gen_a"):
             if not st.session_state.get("f_c_nom","").strip(): st.error("Nom obligatoire")
             elif not st.session_state.get("f_c_prn","").strip(): st.error("Prénom obligatoire")
             else: st.session_state["bia_step"]=4; st.rerun()
-
-    elif step==4:
         if _is_crt_step:
             # COURTIER PA0 — Étape 3/4 : Caractéristiques du contrat
             # Rediriger vers step==5 où est défini le bloc PA0 contrat
             st.session_state["bia_step"] = 5; st.rerun()
-        if not _is_crt_step:
             section("Étape 4 — Assuré(e) & Bénéficiaires")
         if st.session_state.get("f_ass_meme",True):
             st.success(f"✅ Assuré(e) = {st.session_state.get('f_c_tit','')} {st.session_state.get('f_c_nom','').upper()} {st.session_state.get('f_c_prn','')} — reprises du souscripteur.")
@@ -3876,7 +3951,6 @@ elif "Saisie BIA" in page:
         st.session_state["f_ba"]=st.text_input("Autres bénéficiaires",value=st.session_state.get("f_ba",""),key="ba_t")
         b1,b2=st.columns(2)
         if b1.button("← Retour"): st.session_state["bia_step"]=3; st.rerun()
-        if b2.button("Suivant ▶",type="primary"): st.session_state["bia_step"]=5; st.rerun()
 
     elif step==5:
 
@@ -3890,7 +3964,13 @@ elif "Saisie BIA" in page:
         # CAS 1 — Courtier PA0 : Étape 3/4 — Caractéristiques du contrat
         # ══════════════════════════════════════════════════════════════════════
         if _is_crt_step:
-            section("Étape 2 / 3 — Contrat", "PRÉVOYANCE AUTO")
+            section("Étape 2 / 3 — Contrat","PRÉVOYANCE AUTO · DATE · PRIME · MODE RÈGLEMENT")
+            # Logo courtier en haut
+            _crt_n5 = st.session_state.get("f_courtier_nom","")
+            if _crt_n5:
+                _s5_slug = _crt_n5.strip().lower().replace(" ","").replace(".","").replace("-","")
+                _s5_fbk  = f"https://ui-avatars.com/api/?name={_crt_n5.replace(' ','+')}&background=003366&color=fff&size=80&bold=true&format=png"
+                st.image("https://logo.clearbit.com/logo.com", width=60)
             from dateutil.relativedelta import relativedelta
 
             # Prime annuelle — sélection parmi les 4 tranches
@@ -3970,8 +4050,7 @@ elif "Saisie BIA" in page:
             b1, b2 = st.columns(2)
             if b1.button("← Retour", key="ret5_pa"):
                 st.session_state["bia_step"] = 3; st.rerun()
-            if b2.button("Suivant ▶", type="primary", key="nxt5_pa"):
-                st.session_state["bia_step"] = 7; st.rerun()  # → Validation
+                st.session_state["bia_step"] = 7; st.rerun()
 
         # ══════════════════════════════════════════════════════════════════════
         # CAS 2 — Non-courtier : produits AVIGBO / VIGNINOU / Épargne
@@ -3983,9 +4062,9 @@ elif "Saisie BIA" in page:
             if prod["code"] == "221":
                 alert("AVIGBO : capital et cotisation unique déterminés automatiquement.","info")
                 opt_map = {
-                    "100 F/mois → Capital 100 000 F":  (100,  100_000,  1_000),
-                    "200 F/mois → Capital 200 000 F":  (200,  200_000,  2_000),
-                    "300 F/mois → Capital 300 000 F":  (300,  300_000,  3_000),
+                    "100 F/mois  Capital 100 000 F":  (100,  100_000,  1_000),
+                    "200 F/mois  Capital 200 000 F":  (200,  200_000,  2_000),
+                    "300 F/mois  Capital 300 000 F":  (300,  300_000,  3_000),
                 }
                 opts_l = list(opt_map.keys())
                 cur_o  = st.session_state.get("f_avigbo_opt", opts_l[0])
@@ -4028,9 +4107,9 @@ elif "Saisie BIA" in page:
             elif prod["code"] == "220":
                 alert("VIGNINOU : durée maximale 12 mois.","warn")
                 opt_v = {
-                    "400 F/mois → Capital 500 000 F":       (400,  500_000,   48_000),
-                    "800 F/mois → Capital 1 000 000 F":     (800,  1_000_000, 96_000),
-                    "1 200 F/mois → Capital 1 500 000 F":   (1200, 1_500_000, 144_000),
+                    "400 F/mois  Capital 500 000 F":       (400,  500_000,   48_000),
+                    "800 F/mois  Capital 1 000 000 F":     (800,  1_000_000, 96_000),
+                    "1 200 F/mois  Capital 1 500 000 F":   (1200, 1_500_000, 144_000),
                 }
                 opts_v = list(opt_v.keys())
                 cur_v  = st.session_state.get("f_vigninou_opt", opts_v[0])
@@ -4119,14 +4198,10 @@ elif "Saisie BIA" in page:
             b1,b2 = st.columns(2)
             if b1.button("← Retour", key="ret5_gen"):
                 st.session_state["bia_step"] = 4; st.rerun()
-            if b2.button("Suivant ▶", type="primary", key="nxt5_gen"):
                 st.session_state["bia_step"] = 6; st.rerun()
-
-    elif step==6:
-        # Courtier PA0 : pas de questionnaire médical → rediriger vers validation
+        # Courtier PA0 : pas de questionnaire médical  rediriger vers validation
         if _is_crt_step:
             st.session_state["bia_step"] = 7; st.rerun()
-        section("Étape 6 — Questionnaire Médical CIMA")
         alert("Art. 18 CIMA : Toute fausse déclaration est sanctionnée par la nullité du contrat.","warn")
         c1,c2,c3=st.columns(3)
         st.session_state["f_taille"]=c1.text_input("Taille (m)",value=st.session_state.get("f_taille",""),placeholder="1.72",key="taille_t")
@@ -4154,11 +4229,16 @@ elif "Saisie BIA" in page:
                     st.session_state[f"f_{qk}d"]=st.text_input("Précisions :",value=st.session_state.get(f"f_{qk}d",""),placeholder="Soyez précis(e)",key=f"d_{qk}")
         b1,b2=st.columns(2)
         if b1.button("← Retour"): st.session_state["bia_step"]=5; st.rerun()
-        if b2.button("Suivant ▶",type="primary"): st.session_state["bia_step"]=7; st.rerun()
 
     elif step==7 or (step==5 and _is_crt_step):
         if _is_crt_step:
             section("Étape 3 / 3 — Signatures & Validation","PRÉVOYANCE AUTO")
+            # Logo courtier en haut de la page de validation
+            _crt_n7 = st.session_state.get("f_courtier_nom","")
+            if _crt_n7:
+                _s7_slug = _crt_n7.strip().lower().replace(" ","").replace(".","").replace("-","")
+                _s7_fbk  = f"https://ui-avatars.com/api/?name={_crt_n7.replace(' ','+')}&background=003366&color=fff&size=80&bold=true&format=png"
+                st.image("https://logo.clearbit.com/logo.com", width=60)
         else:
             section("Étape 7 — Déclaration & Validation")
 
@@ -4413,10 +4493,94 @@ elif "Saisie BIA" in page:
             except Exception as _ep_bia:
                 alert(f"Erreur impression BIA : {_ep_bia}","danger")
 
+        # ── Bouton PDF universel (tous produits) ────────────────────────────────
+        if not _is_crt_step:
+            if st.button("🖨️ Télécharger le BIA (PDF — 2 exemplaires)",
+                         use_container_width=True, key="dl_bia_btn_all"):
+                try:
+                    from reportlab.lib.pagesizes import A4
+                    from reportlab.lib.units import cm
+                    from reportlab.lib import colors as _rlc
+                    from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
+                        Table, TableStyle, HRFlowable, Image as _RLImg)
+                    from reportlab.lib.styles import ParagraphStyle
+                    from reportlab.lib.enums import TA_CENTER
+                    import io as _io2, base64 as _b64_2
+                    from datetime import datetime as _dt2
+                    _buf2 = _io2.BytesIO()
+                    _doc2 = SimpleDocTemplate(_buf2, pagesize=A4,
+                        leftMargin=1.5*cm, rightMargin=1.5*cm,
+                        topMargin=1.5*cm, bottomMargin=1.5*cm)
+                    _CN=_rlc.HexColor("#0D1F3C"); _CG=_rlc.HexColor("#1A7F6E")
+                    _CR=_rlc.HexColor("#C0392B"); _CW=_rlc.white; _CL=_rlc.HexColor("#F3F6FA")
+                    _st_ti=ParagraphStyle("T",fontName="Helvetica-Bold",fontSize=11,textColor=_CW,alignment=TA_CENTER)
+                    _st_su=ParagraphStyle("S",fontName="Helvetica",fontSize=8.5,textColor=_rlc.HexColor("#A9DFBF"),alignment=TA_CENTER)
+                    _st_bd=ParagraphStyle("B",fontName="Helvetica",fontSize=8.5,textColor=_rlc.HexColor("#2C3E50"),leading=12)
+                    _st_sm=ParagraphStyle("M",fontName="Helvetica",fontSize=7.5,textColor=_rlc.grey,alignment=TA_CENTER)
+                    _nom_sous_g = f"{st.session_state.get('f_c_tit','')} {st.session_state.get('f_c_nom','').upper()} {st.session_state.get('f_c_prn','')}".strip()
+                    def _gen_bia_ex(lbl):
+                        _it=[]
+                        try:
+                            _img=_RLImg(_io2.BytesIO(_b64_2.b64decode(LOGO_B64)),width=3.5*cm,height=1.5*cm)
+                            _img.hAlign="CENTER"; _it.append(_img); _it.append(Spacer(1,.15*cm))
+                        except Exception: pass
+                        _h=Table([[Paragraph("BULLETIN INDIVIDUEL D'ADHÉSION",_st_ti)],
+                                  [Paragraph(f"{prod['nom']} — AFG Assurances Bénin Vie",_st_su)],
+                                  [Paragraph(f"Exemplaire : {lbl}",_st_su)]],colWidths=[17*cm])
+                        _h.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,-1),_CN),
+                            ("ALIGN",(0,0),(-1,-1),"CENTER"),
+                            ("TOPPADDING",(0,0),(-1,-1),7),("BOTTOMPADDING",(0,0),(-1,-1),7)]))
+                        _it.append(_h); _it.append(Spacer(1,.2*cm))
+                        _rows=[
+                            ["N° BIA",st.session_state.get("_last_bia_num","—"),"Date",_dt2.now().strftime("%d/%m/%Y")],
+                            ["Produit",prod["nom"],"Code",prod["code"]],
+                            ["Souscripteur",_nom_sous_g,"Téléphone",st.session_state.get("f_c_tel","—")],
+                            ["Cotisation",f"{int(st.session_state.get('f_coti',0)):,} FCFA / {st.session_state.get('f_peri','—')}","Capital",f"{int(st.session_state.get('f_cap',0)):,} FCFA"],
+                            ["Date effet",str(st.session_state.get("f_deff","—")),"Durée",f"{st.session_state.get('f_duree','—')} an(s)"],
+                            ["Mode règlement",st.session_state.get("f_mode","—"),"Référence",st.session_state.get("f_mref","—") or "—"],
+                            ["Apporteur",st.session_state.get("f_nom_appo","—") or "—","Code",str(st.session_state.get("f_code_appo","—"))],
+                        ]
+                        _t=Table(_rows,colWidths=[4*cm,4.5*cm,4*cm,4.5*cm])
+                        _t.setStyle(TableStyle([
+                            ("FONTNAME",(0,0),(0,-1),"Helvetica-Bold"),("FONTNAME",(2,0),(2,-1),"Helvetica-Bold"),
+                            ("FONTSIZE",(0,0),(-1,-1),8.5),("ROWBACKGROUNDS",(0,0),(-1,-1),[_CL,_CW]),
+                            ("GRID",(0,0),(-1,-1),.3,_rlc.HexColor("#DDE3EE")),
+                            ("TOPPADDING",(0,0),(-1,-1),5),("BOTTOMPADDING",(0,0),(-1,-1),5),("LEFTPADDING",(0,0),(-1,-1),6),
+                        ]))
+                        _it.append(_t); _it.append(Spacer(1,.3*cm))
+                        _it.append(Paragraph("Je soussigné(e) certifie l'exactitude des informations ci-dessus et reconnais avoir reçu les conditions générales.",_st_bd))
+                        _it.append(Spacer(1,.5*cm))
+                        _sig=Table([["Signature souscripteur","Cachet & Signature AFG"],["",""],["",""]],colWidths=[8.5*cm,8.5*cm])
+                        _sig.setStyle(TableStyle([("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
+                            ("FONTSIZE",(0,0),(-1,-1),8),("ALIGN",(0,0),(-1,-1),"CENTER"),
+                            ("BOX",(0,1),(0,2),.5,_CN),("BOX",(1,1),(1,2),.5,_CN),
+                            ("BOTTOMPADDING",(0,1),(-1,2),22)]))
+                        _it.append(_sig); _it.append(Spacer(1,.15*cm))
+                        _it.append(Paragraph("AFG Assurances Bénin Vie · Groupe AFG Holding · Conforme CIMA",_st_sm))
+                        return _it
+                    _st2=[]
+                    _st2.extend(_gen_bia_ex("EXEMPLAIRE CLIENT"))
+                    _st2.append(Spacer(1,.3*cm))
+                    _st2.append(HRFlowable(width="100%",thickness=.7,color=_CR,dash=[3,3],spaceAfter=3))
+                    _st2.append(Paragraph("✂  —  —  Découper ici  —  —  ✂",
+                        ParagraphStyle("CUT",fontName="Helvetica",fontSize=7.5,textColor=_rlc.grey,alignment=TA_CENTER)))
+                    _st2.append(Spacer(1,.3*cm))
+                    _st2.extend(_gen_bia_ex("EXEMPLAIRE AFG ASSURANCES BÉNIN VIE"))
+                    _doc2.build(_st2)
+                    _pdf2=_buf2.getvalue()
+                    _fn2=f"BIA_{prod['code']}_{_nom_sous_g.replace(' ','_')}_{_dt2.now().strftime('%Y%m%d')}.pdf"
+                    st.success(f"✅ BIA généré — {len(_pdf2)//1024} Ko")
+                    st.download_button("📥 Télécharger le BIA PDF",data=_pdf2,file_name=_fn2,
+                        mime="application/pdf",use_container_width=True,type="primary",key="dl_bia_pdf_final")
+                except ImportError:
+                    alert("La bibliothèque <b>reportlab</b> n'est pas installée.","danger")
+                except Exception as _ep_g:
+                    alert(f"Erreur génération PDF : {_ep_g}","danger")
+
         st.markdown("")
         b1,b2,b3=st.columns([1,1,1.4])
         if b1.button("← Retour", key=f"ret7_{4157}"): st.session_state["bia_step"] = 5 if _is_crt_step else 6; st.rerun()
-        if b2.button("💾 Brouillon"):
+        if b2.button("💾 Brouillon", key="brouillon_btn_a"):
             num=save_bia("Brouillon")
             if num: st.info(f"💾 Brouillon **{num}** enregistré. Retrouvez-le dans la Base BIA.")
         if b3.button("✅ VALIDER LE BIA",type="primary"):
@@ -4766,14 +4930,45 @@ elif "Produits" in page:
 elif "Commerciaux" in page:
     try:
         section(f"👥 Commerciaux & Partenaires — {period_lbl}","CLASSEMENT · PARETO")
-        src=ca_f() if ca is not None else pf_f()
-        if src is None or src.empty: alert("Chargez la Base CA ou le Portefeuille.","warn"); st.stop()
+        df_com_src = ca_f() if ca is not None else pf_f()
+        if df_com_src is None or df_com_src.empty:
+            alert("Chargez la Base CA ou le Portefeuille.","warn"); st.stop()
+
+        # ── Résolution du nom apporteur ──────────────────────────────────────
+        # Stratégie : NOM_APPORT dans CA  sinon jointure PF sur CODEAPPO
+        ca_k   = "CHIFAFFA" if "CHIFAFFA" in df_com_src.columns else "MONTENCA"
+        comm_k = "COMMAPPO" if "COMMAPPO" in df_com_src.columns else None
+        code_k = next((c for c in ["CODEAPPO","CODE_APPO","CODEINTE","CODE_INTER"]
+                       if c in df_com_src.columns), None)
+
         ag_k = next((c for c in ["NOM_APPORT","NOM_APPO","NOM_INTERMEDIAIRE","NOM_APP"]
-                 if c in src.columns), "NOM_APP")
-        ca_k="CHIFAFFA" if "CHIFAFFA" in src.columns else "MONTENCA"
-        comm_k="COMMAPPO" if "COMMAPPO" in src.columns else None
-        grp=src.groupby(ag_k).agg(CA=(ca_k,"sum"),Nb=(ca_k,"count"),
-            **({} if not comm_k else {"Comm":(comm_k,"sum")})).reset_index().sort_values("CA",ascending=False).reset_index(drop=True)
+                     if c in df_com_src.columns), None)
+
+        if ag_k is None and code_k and pf is not None:
+            # Jointure PF  récupérer le nom via code apporteur
+            _pf_code = next((c for c in ["CODEAPPO","CODE_APPO"] if c in pf.columns), None)
+            _pf_nom  = next((c for c in ["NOM_APP","NOM_APPORT","NOM_APPO"] if c in pf.columns), None)
+            if _pf_code and _pf_nom:
+                _ref = pf[[_pf_code,_pf_nom]].drop_duplicates(_pf_code).rename(
+                    columns={_pf_code: code_k, _pf_nom: "_NOM_JOIN"})
+                df_com_src = df_com_src.merge(_ref, on=code_k, how="left")
+                ag_k = "_NOM_JOIN"
+
+        if ag_k is None:
+            # Fallback : utiliser le code directement
+            if code_k:
+                df_com_src["_NOM_CODE"] = df_com_src[code_k].astype(str)
+                ag_k = "_NOM_CODE"
+            else:
+                alert("Impossible d'identifier les apporteurs (NOM_APPORT / CODEAPPO introuvables).","warn")
+                st.stop()
+
+        # Groupby agrégé
+        _grp_keys = [ag_k] + ([code_k] if code_k and code_k != ag_k else [])
+        grp = df_com_src.groupby(_grp_keys, dropna=False).agg(
+            CA=(ca_k,"sum"), Nb=(ca_k,"count"),
+            **({} if not comm_k else {"Comm":(comm_k,"sum")})
+        ).reset_index().sort_values("CA", ascending=False).reset_index(drop=True)
         grp.index+=1; tot=grp["CA"].sum()
         grp["Part %"]=(grp["CA"]/max(tot,1)*100).round(2); grp["Part cum %"]=grp["Part %"].cumsum().round(1)
         medals=["🥇","🥈","🥉"]; mc_colors=[GREEN,TEAL,BLUE]
@@ -4895,7 +5090,7 @@ elif "Sinistres" in page:
         df_s=sin  # tout le fichier pour les provisions historiques
         df_sf=sin_f()  # filtré par période
 
-        section(f"⚠️ Sinistres & Provisions — {period_lbl}","ANALYSE ACTUARIELLE · SAP · S/P")
+        section(f"⚠️ Sinistres & Prestations — {period_lbl}","ANALYSE ACTUARIELLE · SAP · S/P")
         tot_sin=float(sin["Réglement Total"].fillna(0).sum()) if "Réglement Total" in sin.columns else 0
         tot_sap=float(sin["SAP au 31/12/2025"].fillna(0).sum()) if "SAP au 31/12/2025" in sin.columns else 0
         tot_hon=float(sin["Réglement Honoraires"].fillna(0).sum()) if "Réglement Honoraires" in sin.columns else 0
@@ -5187,33 +5382,29 @@ elif "Saisie BIA" in page:
               <div style="font-size:13px;font-weight:700;margin-top:6px;color:{NAVY}">ASSURTOUS AVIGBO</div>
               <div style="font-size:11px;color:#666;margin-top:3px">Décès · Barème fixe</div>
               <div style="font-size:10px;color:#888;margin-top:5px;line-height:1.6">
-                100 F/mois → Capital 100 000 F  (unique : 1 000 F)<br>
-                200 F/mois → Capital 200 000 F  (unique : 2 000 F)<br>
-                300 F/mois → Capital 300 000 F  (unique : 3 000 F)
+                100 F/mois  Capital 100 000 F  (unique : 1 000 F)<br>
+                200 F/mois  Capital 200 000 F  (unique : 2 000 F)<br>
+                300 F/mois  Capital 300 000 F  (unique : 3 000 F)
               </div>
             </div>""", unsafe_allow_html=True)
             if st.button("Choisir AVIGBO (221)", key="bp_221", use_container_width=True):
                 st.session_state["bia_prod"]="221"; st.session_state["bia_step"]=2; st.rerun()
-        # VIGNINOU
         with col_b:
             st.markdown(f"""<div style="border:2px solid {RED}44;border-radius:10px;padding:12px 14px;margin-bottom:6px">
               <span style="background:{RED};color:white;font-size:9px;font-weight:700;padding:2px 7px;border-radius:3px">220</span>
               <div style="font-size:13px;font-weight:700;margin-top:6px;color:{NAVY}">ASSURTOUS VIGNINOU</div>
               <div style="font-size:11px;color:#666;margin-top:3px">Décès · Durée max 12 mois · Barème fixe</div>
               <div style="font-size:10px;color:#888;margin-top:5px;line-height:1.6">
-                400 F/mois → Capital 500 000 F  (unique : 48 000 F)<br>
-                800 F/mois → Capital 1 000 000 F (unique : 96 000 F)<br>
-                1 200 F/mois → Capital 1 500 000 F (unique : 144 000 F)
+                400 F/mois  Capital 500 000 F  (unique : 48 000 F)<br>
+                800 F/mois  Capital 1 000 000 F (unique : 96 000 F)<br>
+                1 200 F/mois  Capital 1 500 000 F (unique : 144 000 F)
               </div>
             </div>""", unsafe_allow_html=True)
             if st.button("Choisir VIGNINOU (220)", key="bp_220", use_container_width=True):
                 st.session_state["bia_prod"]="220"; st.session_state["bia_step"]=2; st.rerun()
-
-    if "bia_prod" not in st.session_state:
         alert("Sélectionnez un produit pour afficher le formulaire BIA.","info"); st.stop()
     prod=next((p for p in PRODUITS if p["code"]==st.session_state.get("bia_prod")),None)
     if not prod: st.session_state.pop("bia_prod",None); st.rerun()
-    gc=GC.get(prod["grp"],BLUE); step=st.session_state.get("bia_step",2)
     is_avigbo   = prod["code"]=="221"
     is_vigninou = prod["code"]=="220"
     is_deces    = prod["code"] in ("220","221")
@@ -5225,7 +5416,6 @@ elif "Saisie BIA" in page:
       <span style="background:{gc};color:white;font-size:12px;font-weight:700;padding:5px 12px;border-radius:6px">{prod['code']}</span>
     </div>""",unsafe_allow_html=True)
     if st.button("↩️ Changer de produit",key="chg_p"): st.session_state.pop("bia_prod",None); st.session_state.pop("bia_step",None); st.rerun()
-    SLBL={2:"Identification",3:"Souscripteur",4:"Assuré",5:"Contrat",6:"Médical",7:"Validation"}
     st.progress((step-2)/5,text=f"Étape {step-1}/6 — {SLBL.get(step,'')}")
     st.markdown("")
 
@@ -5246,8 +5436,6 @@ elif "Saisie BIA" in page:
         with c5: si("f_deja","Déjà assuré AFGVie ?",["Non","Oui"])
         if st.session_state.get("f_deja")=="Oui": ti("f_num_ct","N° contrat existant")
         if st.button("Suivant ▶",type="primary"): st.session_state["bia_step"]=3; st.rerun()
-
-    elif step==3:
         section("Étape 3 — Souscripteur / Contractant")
         c1,c2,c3=st.columns([1,2,2])
         with c1: si("f_c_tit","Civilité *",["","M.","Mme","Mlle"])
@@ -5277,12 +5465,10 @@ elif "Saisie BIA" in page:
         st.session_state["f_ass_meme"]=st.checkbox("✓ L'assuré(e) est identique au souscripteur",value=st.session_state.get("f_ass_meme",True))
         b1,b2=st.columns(2)
         if b1.button("← Retour"): st.session_state["bia_step"]=2; st.rerun()
-        if b2.button("Suivant ▶",type="primary"):
+        if b2.button("Suivant ▶", type="primary", key="nxt3_gen_b"):
             if not st.session_state.get("f_c_nom","").strip(): st.error("Nom obligatoire")
             elif not st.session_state.get("f_c_prn","").strip(): st.error("Prénom obligatoire")
             else: st.session_state["bia_step"]=4; st.rerun()
-
-    elif step==4:
         section("Étape 4 — Assuré(e) & Bénéficiaires")
         if st.session_state.get("f_ass_meme",True):
             st.success(f"✅ Assuré(e) = {st.session_state.get('f_c_tit','')} {st.session_state.get('f_c_nom','').upper()} {st.session_state.get('f_c_prn','')} — reprises du souscripteur.")
@@ -5307,7 +5493,6 @@ elif "Saisie BIA" in page:
         st.session_state["f_ba"]=st.text_input("Autres bénéficiaires",value=st.session_state.get("f_ba",""),key="ba_t")
         b1,b2=st.columns(2)
         if b1.button("← Retour"): st.session_state["bia_step"]=3; st.rerun()
-        if b2.button("Suivant ▶",type="primary"): st.session_state["bia_step"]=5; st.rerun()
 
     elif step==5:
         section("Étape 5 — Caractéristiques du Contrat")
@@ -5325,9 +5510,9 @@ elif "Saisie BIA" in page:
             alert("Contrat AVIGBO : le capital et la cotisation unique sont déterminés automatiquement selon la prime mensuelle choisie.","info")
             # Sélection du barème
             opt_map = {
-                "100 F/mois → Capital 100 000 F (unique : 1 000 F)":   (100,  100_000,  1_000),
-                "200 F/mois → Capital 200 000 F (unique : 2 000 F)":   (200,  200_000,  2_000),
-                "300 F/mois → Capital 300 000 F (unique : 3 000 F)":   (300,  300_000,  3_000),
+                "100 F/mois  Capital 100 000 F (unique : 1 000 F)":   (100,  100_000,  1_000),
+                "200 F/mois  Capital 200 000 F (unique : 2 000 F)":   (200,  200_000,  2_000),
+                "300 F/mois  Capital 300 000 F (unique : 3 000 F)":   (300,  300_000,  3_000),
             }
             opts_list = list(opt_map.keys())
             cur_opt = st.session_state.get("f_avigbo_opt", opts_list[0])
@@ -5374,9 +5559,9 @@ elif "Saisie BIA" in page:
         elif is_vigninou:
             alert("Contrat VIGNINOU : durée maximale 12 mois. Capital et cotisation unique fixés par le barème.","warn")
             opt_map_v = {
-                "400 F/mois → Capital 500 000 F (unique : 48 000 F)":    (400,  500_000,  48_000),
-                "800 F/mois → Capital 1 000 000 F (unique : 96 000 F)":  (800,  1_000_000,96_000),
-                "1 200 F/mois → Capital 1 500 000 F (unique : 144 000 F)": (1200, 1_500_000,144_000),
+                "400 F/mois  Capital 500 000 F (unique : 48 000 F)":    (400,  500_000,  48_000),
+                "800 F/mois  Capital 1 000 000 F (unique : 96 000 F)":  (800,  1_000_000,96_000),
+                "1 200 F/mois  Capital 1 500 000 F (unique : 144 000 F)": (1200, 1_500_000,144_000),
             }
             opts_list_v = list(opt_map_v.keys())
             cur_opt_v = st.session_state.get("f_vigninou_opt", opts_list_v[0])
@@ -5494,7 +5679,6 @@ elif "Saisie BIA" in page:
 
         b1,b2=st.columns(2)
         if b1.button("← Retour"): st.session_state["bia_step"]=4; st.rerun()
-        if b2.button("Suivant ▶",type="primary"): st.session_state["bia_step"]=6; st.rerun()
 
     elif step==6:
         section("Étape 6 — Questionnaire Médical CIMA")
@@ -5525,7 +5709,6 @@ elif "Saisie BIA" in page:
                     st.session_state[f"f_{qk}d"]=st.text_input("Précisions :",value=st.session_state.get(f"f_{qk}d",""),placeholder="Soyez précis(e)",key=f"d_{qk}")
         b1,b2=st.columns(2)
         if b1.button("← Retour"): st.session_state["bia_step"]=5; st.rerun()
-        if b2.button("Suivant ▶",type="primary"): st.session_state["bia_step"]=7; st.rerun()
 
     elif step==7:
         section("Étape 7 — Déclaration & Validation")
@@ -5625,7 +5808,7 @@ elif "Saisie BIA" in page:
             return None
         b1,b2,b3=st.columns([1,1,1.4])
         if b1.button("← Retour", key=f"ret7_{5249}"): st.session_state["bia_step"] = 4 if _is_crt_step else 6; st.rerun()
-        if b2.button("💾 Brouillon"):
+        if b2.button("💾 Brouillon", key="brouillon_btn_b"):
             num=save_bia("Brouillon")
             if num: st.info(f"💾 Brouillon **{num}** enregistré. Retrouvez-le dans la Base BIA.")
         if b3.button("✅ VALIDER LE BIA",type="primary"):
@@ -5679,9 +5862,7 @@ elif "Saisie BIA" in page:
                     if cc2.button("✅",key=f"val_{br['id']}"):
                         update_bia_statut(int(br["id"]), "Validé")
                         st.balloons(); st.rerun()
-                    if cc3.button("🗑️",key=f"del_{br['id']}"):
                         delete_bia(int(br["id"])); st.rerun()
-        # Filtres
         f1,f2,f3=st.columns(3)
         srch_b=f1.text_input("🔍 Rechercher",label_visibility="collapsed",placeholder="N° BIA, nom, produit…",key="srch_b")
         stat_o=["Tous"]+sorted(df_bia["statut"].dropna().unique().tolist())
