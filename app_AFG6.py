@@ -1005,26 +1005,37 @@ PF_COLS = {
     "COMMGEST","CODEAPPO","CODERISQ",
 }
 CA_COLS = {
-    "CODEINTE","NUMEPOLI","DATECOMP","NOMPRODUIT","LIBECATE",
-    "NOM_INTERMEDIAIRE","CODEAPPO","CHIFAFFA","PRIMNETT","COMMAPPO",
-    "COMMGEST","TYPEMOUV","SORTQUIT",
+    # Identification police
+    "CODEINTE","NUMEPOLI","NUMEPOLI_P","POLICE_KEY","NOMPRODUIT","LIBECATE",
+    # Dates essentielles
+    "DATECOMP","DATEEFFE","DATESOUS","ANNEE","MOIS","ANNEEMOIS",
+    # Financier
+    "CHIFAFFA","PRIMNETT","COMMAPPO","COMMGEST",
+    # Apporteurs
+    "CODEAPPO","CODE_APPO","NOM_APP","NOM_APPORT","NOM_APPO",
+    "NOM_INTERMEDIAIRE","CODE_INTER","CODEINT",
+    # Mouvement
+    "TYPEMOUV","SORTQUIT",
+    # Localisation
+    "LIBEVILL","AGENCE",
 }
 # Colonnes Prestations — noms EXACTS vérifiés sur le fichier réel AFG
 # Libéllé Catégorie : double 'l' (particularité AFG)
 # Réglement : un seul 'è' (sans accent sur le 'e' final)
 SIN_COLS = {
-    "Int police","No Police",
-    "Exercice Sinistre","No Sinistre",
-    "Date Survenance","Date Déclaration","Date validation",
-    "Date Emission","Date Comptabilisation","Date Création",
-    "Libéllé Catégorie","Libellé Garantie","Garantie",
-    "Nature Sinistre","Sort Sinistre",
-    "Souscripteur","Désignation risque","Nom Bénéficiaire",
-    "Réglement Total","Réglement Principal","Réglement Honoraires",
-    "Réglement Comptable","SAP au 31/12/2025",
-    "RAE Cie au 31/12/2025",
-    "Libellé branche","Code branche",
-    "Raison Sociale Int","Libellé Unité",
+    # Identification
+    "NUMEPOLI","NUMEPOLI_P","POLICE_KEY","NUMSIN","LIBECATE",
+    "Libéllé Catégorie","Libellé Catégorie",
+    # Nature et sort
+    "Nature Sinistre","Sort Sinistre","Libéllé Nature Sinistre",
+    # Dates — TOUTES gardées pour le filtre par comptabilisation
+    "Date Survenance","Date Déclaration","Date Comptabilisation",
+    "DATECOMP","DATESURVENANCE","DATEDECLARATION","DATEDECL",
+    "Exercice Sinistre","ANNEE_SIN",
+    # Montants
+    "Réglement Total","Réglement Honoraires",
+    "SAP au 31/12/2025","SAP au 31/12","SAP",
+    "REGTOTAL","REGHONOR","SAPFIN",
 }
 
 def _excel_sheet(path: str, preferred: str) -> str:
@@ -2138,21 +2149,39 @@ if "Accueil" in page:
     elif ca is not None:
         alert(f"Aucune quittance CA pour {period_lbl}. Essayez mode Mois ou Année.","info")
 
-    if sin is not None and not df_sin.empty:
+    if sin is not None:
         st.markdown("")
-        _sin_yr_lbl = f"Exercice {SEL_YEAR}" if SEL_YEAR else "Toutes périodes"
-        section(f"🏥 Sinistres & Prestations — {_sin_yr_lbl}",
-                "RÉGLEMENTS · SAP · RATIO S/P · DONNÉES FILTRÉES")
-        # Résolution dynamique des colonnes
-        _c_r_a = next((c for c in df_sin.columns if "glement" in c.lower() and "otal" in c.lower()), None)
-        _c_s_a = next((c for c in df_sin.columns if c.upper().startswith("SAP")), None)
-        _c_srt = next((c for c in df_sin.columns if "ort" in c.lower() and "ini" in c.lower()), None)
-        tot_sin = float(df_sin[_c_r_a].fillna(0).sum()) if _c_r_a else 0
-        tot_sap = float(df_sin[_c_s_a].fillna(0).sum()) if _c_s_a else 0
-        nb_sin  = len(df_sin)
-        nb_ouv  = int((df_sin[_c_srt]=="Ouvert").sum()) if _c_srt else 0
-        nb_clos = int((df_sin[_c_srt]=="Cloturé").sum()) if _c_srt else 0
-        ca_all  = float(ca["CHIFAFFA"].fillna(0).sum()) if ca is not None and "CHIFAFFA" in ca.columns else 0
+        # Filtrer par date de comptabilisation selon la période choisie
+        _c_datecomp = next((c for c in sin.columns
+                            if "comp" in c.lower() or "datecomp" in c.lower()), None)
+        if _c_datecomp and df_sf is not None:
+            _df_kpi_sin = df_sf  # déjà filtré par période/année
+        elif SEL_YEAR:
+            _c_yr_sin = next((c for c in sin.columns
+                              if "annee" in c.lower() or "exercice" in c.lower()), None)
+            _df_kpi_sin = sin[sin[_c_yr_sin].astype(str) == str(SEL_YEAR)] if _c_yr_sin else sin
+        else:
+            _df_kpi_sin = df_sf if df_sf is not None else sin
+
+        if _df_kpi_sin.empty:
+            alert(f"Aucun sinistre pour la période {period_lbl}.", "info")
+        else:
+            _sin_yr_lbl = f"Exercice {SEL_YEAR}" if SEL_YEAR else period_lbl
+            section(f"🏥 Sinistres & Prestations — {_sin_yr_lbl}",
+                    "RÉGLEMENTS · SAP · RATIO S/P · FILTRÉS PAR DATE COMPTABILISATION")
+            # Résolution dynamique des colonnes
+            _c_r_a = next((c for c in _df_kpi_sin.columns
+                           if "glement" in c.lower() and "otal" in c.lower()), None)
+            _c_s_a = next((c for c in _df_kpi_sin.columns
+                           if c.upper().startswith("SAP")), None)
+            _c_srt = next((c for c in _df_kpi_sin.columns
+                           if "ort" in c.lower() and "ini" in c.lower()), None)
+            tot_sin = float(_df_kpi_sin[_c_r_a].fillna(0).sum()) if _c_r_a else 0
+            tot_sap = float(_df_kpi_sin[_c_s_a].fillna(0).sum()) if _c_s_a else 0
+            nb_sin  = len(_df_kpi_sin)
+            nb_ouv  = int((_df_kpi_sin[_c_srt]=="Ouvert").sum()) if _c_srt else 0
+            nb_clos = int((_df_kpi_sin[_c_srt]=="Cloturé").sum()) if _c_srt else 0
+            ca_all  = float(ca["CHIFAFFA"].fillna(0).sum()) if ca is not None and "CHIFAFFA" in ca.columns else 0
         sp = tot_sin/max(ca_all,1)*100
         actifs_tot = int((pf["ETAT_POLICE"].str.strip().isin(["ACTIF"])).sum()) if pf is not None and "ETAT_POLICE" in pf.columns else 1
         burning = (tot_sin+tot_sap)/max(actifs_tot,1)*1000
@@ -2405,8 +2434,9 @@ elif "Portefeuille" in page:
         df = df_all
 
     # Titre dynamique selon filtre année
-    _pf_yr_lbl = f" · Année {SEL_YEAR}" if SEL_YEAR else ""
-    section(f"📋 Portefeuille{_pf_yr_lbl}","ANALYSE · FILTRES · EXPORT")
+    _pf_yr_lbl = f" · Année {SEL_YEAR}" if SEL_YEAR else f" · {period_lbl}"
+    section(f"📋 Portefeuille{_pf_yr_lbl}",
+            "ANALYSE · FILTRES PAR DATE DE SAISIE · EXPORT")
 
     # Listes de choix construites depuis df (déjà filtré par année si SEL_YEAR)
     _base_opts = df  # base pour les options = données de l'année choisie
@@ -3483,8 +3513,10 @@ elif "Actuariat" in page:
                 echu=int((pf[ek].str.strip().isin(["ECHU","ASSURE ECHU"])).sum()) if ek in pf.columns else 0
                 tx_act=actifs/max(nb,1)*100; tx_res=resil/max(nb-inact,1)*100
                 ca_t=float(ca["CHIFAFFA"].fillna(0).sum()) if ca is not None and "CHIFAFFA" in ca.columns else 0
-                sin_t=float(sin["Réglement Total"].fillna(0).sum()) if sin is not None and "Réglement Total" in sin.columns else 0
-                sap_t=float(sin["SAP au 31/12/2025"].fillna(0).sum()) if sin is not None and "SAP au 31/12/2025" in sin.columns else 0
+                _c_r_act = next((c for c in sin.columns if "glement" in c.lower() and "otal" in c.lower()), None) if sin is not None else None
+                _c_s_act = next((c for c in sin.columns if c.upper().startswith("SAP")), None) if sin is not None else None
+                sin_t = float(sin[_c_r_act].fillna(0).sum()) if sin is not None and _c_r_act else 0
+                sap_t = float(sin[_c_s_act].fillna(0).sum()) if sin is not None and _c_s_act else 0
                 sp=sin_t/max(ca_t,1)*100; charge_u=sin_t+sap_t; burning=charge_u/max(actifs,1)*1000
                 monten=float(pf["MONTENCA"].fillna(0).apply(lambda x: float(str(x).replace(" ","").replace(",",".")) if str(x).replace(" ","").replace(",",".").replace(".","",1).replace("-","",1).isdigit() else 0).sum()) if "MONTENCA" in pf.columns else 0
                 indics=[
@@ -3535,8 +3567,8 @@ elif "Actuariat" in page:
                     prov["Cout moy clos"]    = prov["Regle"] / (prov["Nb"] - prov["Ouvert"]).replace(0, np.nan)
                 fig=go.Figure()
                 _lbl_nat = prov[_act_nat].astype(str).str[:22]
-                fig.add_bar(y=_lbl_nat, x=prov["Regle"], name="Réglé",     marker_color=GREEN, orientation="h")
-                fig.add_bar(y=_lbl_nat, x=prov["SAP"],   name="SAP résid.", marker_color=AMBER, orientation="h")
+                fig.add_bar(y=_lbl_nat, x=prov["Regle"] if "Regle" in prov.columns else [0]*len(prov), name="Réglé", marker_color=GREEN, orientation="h", text=[fmt(v,"") for v in (prov["Regle"] if "Regle" in prov.columns else [0]*len(prov))], textposition="auto", textfont=dict(size=9))
+                fig.add_bar(y=_lbl_nat, x=prov["SAP"] if "SAP" in prov.columns else [0]*len(prov), name="SAP résiduel", marker_color=AMBER, orientation="h", text=[fmt(v,"") for v in (prov["SAP"] if "SAP" in prov.columns else [0]*len(prov))], textposition="auto", textfont=dict(size=9))
                 fig.update_layout(barmode="stack",yaxis=dict(autorange="reversed"))
                 fig_style(fig,360,"📌 Structure Réglé / SAP par nature"); st.plotly_chart(fig,use_container_width=True)
                 pv = prov.copy()
@@ -3919,10 +3951,11 @@ elif "Saisie BIA" in page:
                     st.session_state["bia_step"] = 5; st.rerun()
         else:
             section("Étape 2 — Identification & Agence")
-            c1,c2,c3=st.columns(3)
+            c1,c2,c3 = st.columns(3)
+            with c1: si("f_agence","Agence",AGENCES)
             with c2: ti("f_code_appo","Code apporteur","Ex : AFG001")
             with c3: ti("f_nom_appo","Nom apporteur")
-            c4,c5=st.columns(2)
+            c4,c5 = st.columns(2)
             with c4: ti("f_realis","Réalisateur",user["nom"])
             with c5: si("f_deja","Déjà assuré AFGVie ?",["Non","Oui"])
             if st.session_state.get("f_deja")=="Oui": ti("f_num_ct","N° contrat existant")
@@ -5050,16 +5083,41 @@ elif "Commerciaux" in page:
             a.download_button("📥 CSV",dl_csv(grp),"classement.csv","text/csv",use_container_width=True,key="dl_rank")
             b.download_button("📥 Excel",dl_xlsx(grp.head(50000)),"classement.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_rank_xl")
         with t_p:
-            t30=grp.head(30)
-            fig=go.Figure(go.Bar(
-                x=t30["CA"],
-                y=t30[ag_k].fillna("N/A").astype(str).str[:25],
-                name="CA",marker_color=GREEN,orientation="h",
-                text=[fmt(v) for v in t30["CA"]],
+            _top10 = grp.head(10)
+            _top10_lbl = _top10[ag_k].fillna("N/A").astype(str).str[:28]
+            _top10_ca  = _top10["CA"]
+            fig_t10 = go.Figure(go.Bar(
+                x=_top10_ca, y=_top10_lbl,
+                name="CA", marker_color=[GREEN if i < 3 else TEAL for i in range(len(_top10))],
+                orientation="h",
+                text=[fmt(v) for v in _top10_ca],
                 textposition="outside", textfont=dict(size=10)))
-            fig.update_layout(yaxis=dict(autorange="reversed"))
-            fig_style(fig,500,"📊 Pareto CA — Top 30")
-            st.plotly_chart(fig,use_container_width=True)
+            fig_t10.update_layout(yaxis=dict(autorange="reversed"))
+            fig_style(fig_t10, 420, "🏆 CA par apporteur — Top 10")
+            st.plotly_chart(fig_t10, use_container_width=True)
+
+            # Top 5 évolution CA si données multi-années disponibles
+            if ca is not None and "ANNEE" in ca.columns and "CHIFAFFA" in ca.columns:
+                _top5_names = grp.head(5)[ag_k].fillna("N/A").astype(str).tolist()
+                _evol = ca[ca[ag_k].fillna("N/A").astype(str).isin(_top5_names)].copy() if ag_k in ca.columns else pd.DataFrame()
+                if not _evol.empty:
+                    _evol["ANNEE"] = _evol["ANNEE"].astype(str)
+                    _evol_g = _evol.groupby(["ANNEE", ag_k])["CHIFAFFA"].sum().reset_index()
+                    fig_evol = go.Figure()
+                    _colors_evol = [GREEN, BLUE, AMBER, RED, TEAL]
+                    for _j, _nm in enumerate(_top5_names):
+                        _d = _evol_g[_evol_g[ag_k].astype(str) == _nm].sort_values("ANNEE")
+                        if not _d.empty:
+                            fig_evol.add_scatter(
+                                x=_d["ANNEE"], y=_d["CHIFAFFA"],
+                                name=str(_nm)[:20],
+                                mode="lines+markers+text",
+                                line=dict(color=_colors_evol[_j % 5], width=2),
+                                marker=dict(size=8),
+                                text=[fmt(v,"") for v in _d["CHIFAFFA"]],
+                                textposition="top center", textfont=dict(size=8))
+                    fig_style(fig_evol, 350, "📈 Évolution CA — Top 5 apporteurs")
+                    st.plotly_chart(fig_evol, use_container_width=True)
     except Exception as _com_err:
         st.error(f"Erreur onglet Commerciaux : {_com_err}")
 
@@ -5183,8 +5241,8 @@ elif "Sinistres" in page:
                 c1,c2=st.columns(2)
                 with c1:
                     fig=go.Figure()
-                    fig.add_bar(y=nat["Nature Sinistre"].str[:22],x=nat["Réglé"],name="Réglé",marker_color=RED,orientation="h")
-                    fig.add_bar(y=nat["Nature Sinistre"].str[:22],x=nat["SAP"],name="SAP",marker_color=AMBER,orientation="h")
+                    fig.add_bar(y=nat.iloc[:,0].astype(str).str[:25] if "Nature Sinistre" not in nat.columns else nat["Nature Sinistre"].astype(str).str[:25],x=nat["Réglé"],name="Réglé",marker_color=RED,orientation="h")
+                    fig.add_bar(y=nat.iloc[:,0].astype(str).str[:25] if "Nature Sinistre" not in nat.columns else nat["Nature Sinistre"].astype(str).str[:25],x=nat["SAP"],name="SAP",marker_color=AMBER,orientation="h")
                     fig.update_layout(barmode="stack",yaxis=dict(autorange="reversed"))
                     fig_style(fig,360,"💊 Réglé + SAP par nature"); st.plotly_chart(fig,use_container_width=True)
                 with c2:
@@ -5997,399 +6055,399 @@ elif "Saisie BIA" in page:
             b2.download_button("📥 Excel BIA",dl_xlsx(df_bia_e),"bia.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_bia_xl_e")
 
 
-    elif "Rapport PDF" in page:
-        section("📄 Rapport DG — Génération PDF","SYNTHÈSE ACTUARIELLE · CIMA · AFG BÉNIN VIE")
-        st.markdown(f"""
-        <div style="background:linear-gradient(135deg,{NAVY},{GREEN2});border-radius:12px;
-             padding:1.2rem 1.5rem;margin-bottom:16px">
-          <div style="color:{MINT};font-size:11px;font-weight:700;text-transform:uppercase;
-               letter-spacing:.08em;margin-bottom:4px">📄 Rapport confidentiel</div>
-          <div style="color:white;font-size:14px;font-weight:700">
-            AFG Assurances Bénin Vie — Rapport de Gestion · {period_lbl}</div>
-          <div style="color:rgba(255,255,255,.5);font-size:10px;margin-top:3px">
-            À l'attention de la Direction Générale · Conforme CIMA · Groupe AFG Holding</div>
-        </div>""", unsafe_allow_html=True)
+elif "Rapport PDF" in page:
+    section("📄 Rapport DG — Génération PDF","SYNTHÈSE ACTUARIELLE · CIMA · AFG BÉNIN VIE")
+    st.markdown(f"""
+    <div style="background:linear-gradient(135deg,{NAVY},{GREEN2});border-radius:12px;
+         padding:1.2rem 1.5rem;margin-bottom:16px">
+      <div style="color:{MINT};font-size:11px;font-weight:700;text-transform:uppercase;
+           letter-spacing:.08em;margin-bottom:4px">📄 Rapport confidentiel</div>
+      <div style="color:white;font-size:14px;font-weight:700">
+        AFG Assurances Bénin Vie — Rapport de Gestion · {period_lbl}</div>
+      <div style="color:rgba(255,255,255,.5);font-size:10px;margin-top:3px">
+        À l'attention de la Direction Générale · Conforme CIMA · Groupe AFG Holding</div>
+    </div>""", unsafe_allow_html=True)
 
-        rc1,rc2,rc3 = st.columns(3)
-        s_kpis  = rc1.checkbox("📊 KPIs Portefeuille", value=True, key="rp_kpis")
-        s_ca    = rc1.checkbox("💰 Chiffre d'Affaires", value=True, key="rp_ca")
-        s_com   = rc2.checkbox("👥 Commerciaux",        value=True, key="rp_com")
-        s_sin   = rc2.checkbox("⚠️ Sinistres",           value=True, key="rp_sin")
-        s_cima  = rc3.checkbox("🏛️ Scorecard CIMA",     value=True, key="rp_cima")
-        dest    = st.text_input("Destinataire", value="M. le Directeur Général", key="rp_dest")
-        auteur  = st.text_input("Rédigé par",  value=user["nom"],                 key="rp_auteur")
-        st.markdown("---")
+    rc1,rc2,rc3 = st.columns(3)
+    s_kpis  = rc1.checkbox("📊 KPIs Portefeuille", value=True, key="rp_kpis")
+    s_ca    = rc1.checkbox("💰 Chiffre d'Affaires", value=True, key="rp_ca")
+    s_com   = rc2.checkbox("👥 Commerciaux",        value=True, key="rp_com")
+    s_sin   = rc2.checkbox("⚠️ Sinistres",           value=True, key="rp_sin")
+    s_cima  = rc3.checkbox("🏛️ Scorecard CIMA",     value=True, key="rp_cima")
+    dest    = st.text_input("Destinataire", value="M. le Directeur Général", key="rp_dest")
+    auteur  = st.text_input("Rédigé par",  value=user["nom"],                 key="rp_auteur")
+    st.markdown("---")
 
-        if pf is None and ca is None:
-            alert("Chargez au moins une base de données pour générer le rapport.", "warn")
-        else:
-            # Aperçu
-            ap1,ap2,ap3,ap4 = st.columns(4)
-            if pf is not None:
-                _act_r = int((pf["ETAT_POLICE"].str.strip().isin(["ACTIF"])).sum()) if "ETAT_POLICE" in pf.columns else 0
-                ap1.metric("Polices", f"{len(pf):,}")
-                ap2.metric("Actives", f"{_act_r:,}")
-            if ca is not None:
-                ap3.metric("CA global", fmt(float(ca["CHIFAFFA"].fillna(0).sum()) if "CHIFAFFA" in ca.columns else 0))
-            if sin is not None:
-                ap4.metric("Sinistres", fmt(float(sin["Réglement Total"].fillna(0).sum()) if "Réglement Total" in sin.columns else 0))
-            st.markdown("")
+    if pf is None and ca is None:
+        alert("Chargez au moins une base de données pour générer le rapport.", "warn")
+    else:
+        # Aperçu
+        ap1,ap2,ap3,ap4 = st.columns(4)
+        if pf is not None:
+            _act_r = int((pf["ETAT_POLICE"].str.strip().isin(["ACTIF"])).sum()) if "ETAT_POLICE" in pf.columns else 0
+            ap1.metric("Polices", f"{len(pf):,}")
+            ap2.metric("Actives", f"{_act_r:,}")
+        if ca is not None:
+            ap3.metric("CA global", fmt(float(ca["CHIFAFFA"].fillna(0).sum()) if "CHIFAFFA" in ca.columns else 0))
+        if sin is not None:
+            ap4.metric("Sinistres", fmt(float(sin["Réglement Total"].fillna(0).sum()) if "Réglement Total" in sin.columns else 0))
+        st.markdown("")
 
-            if st.button("🖨️ Générer le rapport PDF", type="primary",
-                         use_container_width=True, key="gen_pdf_btn"):
-                with st.spinner("⏳ Génération du rapport PDF en cours…"):
-                    try:
-                        from reportlab.lib.pagesizes import A4
-                        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-                        from reportlab.lib.units import cm
-                        from reportlab.lib import colors as rl_colors
-                        from reportlab.platypus import (SimpleDocTemplate, Paragraph,
-                            Spacer, Table, TableStyle, HRFlowable)
-                        from reportlab.lib.enums import TA_CENTER, TA_RIGHT
-                        import io as _io
-                        from datetime import datetime as _dt
+        if st.button("🖨️ Générer le rapport PDF", type="primary",
+                     use_container_width=True, key="gen_pdf_btn"):
+            with st.spinner("⏳ Génération du rapport PDF en cours…"):
+                try:
+                    from reportlab.lib.pagesizes import A4
+                    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+                    from reportlab.lib.units import cm
+                    from reportlab.lib import colors as rl_colors
+                    from reportlab.platypus import (SimpleDocTemplate, Paragraph,
+                        Spacer, Table, TableStyle, HRFlowable)
+                    from reportlab.lib.enums import TA_CENTER, TA_RIGHT
+                    import io as _io
+                    from datetime import datetime as _dt
 
-                        _buf = _io.BytesIO()
-                        doc  = SimpleDocTemplate(_buf, pagesize=A4,
-                            leftMargin=2*cm, rightMargin=2*cm,
-                            topMargin=2.5*cm, bottomMargin=2*cm)
+                    _buf = _io.BytesIO()
+                    doc  = SimpleDocTemplate(_buf, pagesize=A4,
+                        leftMargin=2*cm, rightMargin=2*cm,
+                        topMargin=2.5*cm, bottomMargin=2*cm)
 
-                        C_N = rl_colors.HexColor("#0D1F3C")
-                        C_G = rl_colors.HexColor("#1A7F6E")
-                        C_R = rl_colors.HexColor("#C0392B")
-                        C_A = rl_colors.HexColor("#CA6F1E")
-                        C_L = rl_colors.HexColor("#F3F6FA")
-                        C_W = rl_colors.white
-                        C_M = rl_colors.HexColor("#A9DFBF")
+                    C_N = rl_colors.HexColor("#0D1F3C")
+                    C_G = rl_colors.HexColor("#1A7F6E")
+                    C_R = rl_colors.HexColor("#C0392B")
+                    C_A = rl_colors.HexColor("#CA6F1E")
+                    C_L = rl_colors.HexColor("#F3F6FA")
+                    C_W = rl_colors.white
+                    C_M = rl_colors.HexColor("#A9DFBF")
 
-                        st_ti = ParagraphStyle("T",fontName="Helvetica-Bold",fontSize=16,
-                            textColor=C_W,alignment=TA_CENTER,spaceAfter=4)
-                        st_su = ParagraphStyle("S",fontName="Helvetica",fontSize=9,
-                            textColor=C_M,alignment=TA_CENTER,spaceAfter=4)
-                        st_h1 = ParagraphStyle("H1",fontName="Helvetica-Bold",fontSize=12,
-                            textColor=C_N,spaceBefore=12,spaceAfter=5)
-                        st_h2 = ParagraphStyle("H2",fontName="Helvetica-Bold",fontSize=10,
-                            textColor=C_G,spaceBefore=8,spaceAfter=4)
-                        st_bd = ParagraphStyle("B",fontName="Helvetica",fontSize=9,
-                            textColor=rl_colors.HexColor("#2C3E50"),spaceAfter=4,leading=13)
-                        st_bld= ParagraphStyle("Bo",fontName="Helvetica-Bold",fontSize=9,
-                            textColor=C_N,spaceAfter=3)
-                        st_sm = ParagraphStyle("Sm",fontName="Helvetica",fontSize=8,
-                            textColor=rl_colors.grey,spaceAfter=3)
+                    st_ti = ParagraphStyle("T",fontName="Helvetica-Bold",fontSize=16,
+                        textColor=C_W,alignment=TA_CENTER,spaceAfter=4)
+                    st_su = ParagraphStyle("S",fontName="Helvetica",fontSize=9,
+                        textColor=C_M,alignment=TA_CENTER,spaceAfter=4)
+                    st_h1 = ParagraphStyle("H1",fontName="Helvetica-Bold",fontSize=12,
+                        textColor=C_N,spaceBefore=12,spaceAfter=5)
+                    st_h2 = ParagraphStyle("H2",fontName="Helvetica-Bold",fontSize=10,
+                        textColor=C_G,spaceBefore=8,spaceAfter=4)
+                    st_bd = ParagraphStyle("B",fontName="Helvetica",fontSize=9,
+                        textColor=rl_colors.HexColor("#2C3E50"),spaceAfter=4,leading=13)
+                    st_bld= ParagraphStyle("Bo",fontName="Helvetica-Bold",fontSize=9,
+                        textColor=C_N,spaceAfter=3)
+                    st_sm = ParagraphStyle("Sm",fontName="Helvetica",fontSize=8,
+                        textColor=rl_colors.grey,spaceAfter=3)
 
-                        def _tbl_style(data, col_widths, header_bg=None):
-                            t = Table(data, colWidths=col_widths)
-                            _bg = header_bg or C_N
-                            t.setStyle(TableStyle([
-                                ("BACKGROUND",(0,0),(-1,0),_bg),
-                                ("TEXTCOLOR",(0,0),(-1,0),C_W),
-                                ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
-                                ("FONTSIZE",(0,0),(-1,-1),8.5),
-                                ("ROWBACKGROUNDS",(0,1),(-1,-1),[C_L, C_W]),
-                                ("ALIGN",(1,0),(-1,-1),"RIGHT"),
-                                ("GRID",(0,0),(-1,-1),0.3,rl_colors.HexColor("#DDE3EE")),
-                                ("TOPPADDING",(0,0),(-1,-1),4),
-                                ("BOTTOMPADDING",(0,0),(-1,-1),4),
-                                ("LEFTPADDING",(0,0),(-1,-1),7),
-                            ]))
-                            return t
-
-                        def _sec(txt):
-                            t = Table([[Paragraph(txt, ParagraphStyle("SH",
-                                fontName="Helvetica-Bold",fontSize=11,textColor=C_W))]],
-                                colWidths=[17*cm])
-                            t.setStyle(TableStyle([
-                                ("BACKGROUND",(0,0),(-1,-1),C_G),
-                                ("LEFTPADDING",(0,0),(-1,-1),10),
-                                ("TOPPADDING",(0,0),(-1,-1),6),
-                                ("BOTTOMPADDING",(0,0),(-1,-1),6),
-                            ]))
-                            return t
-
-                        story = []
-
-                        # En-tête
-                        # En-tête avec logo AFG encodé base64
-                        import base64 as _b64
-                        try:
-                            from reportlab.platypus import Image as RLImage
-                            from io import BytesIO as _BIO
-                            # Logo AFG depuis le code
-                            _logo_b64_pdf = LOGO_B64  # variable globale
-                            _logo_bytes = _b64.b64decode(_logo_b64_pdf)
-                            _logo_img = RLImage(_BIO(_logo_bytes), width=4*cm, height=1.8*cm)
-                            _logo_img.hAlign = 'CENTER'
-                            story.append(_logo_img)
-                            story.append(Spacer(1, 0.2*cm))
-                        except Exception:
-                            pass
-                        hdr_t = Table([[Paragraph("AFG ASSURANCES BÉNIN VIE", st_ti)],
-                            [Paragraph("RAPPORT DE GESTION — DIRECTION GÉNÉRALE", st_su)],
-                            [Paragraph(f"Période d'analyse : {period_lbl}  ·  Édité le {_dt.now().strftime('%d %B %Y')}", st_su)]],
-                            colWidths=[17*cm])
-                        hdr_t.setStyle(TableStyle([
-                            ("BACKGROUND",(0,0),(-1,-1),C_N),
-                            ("ALIGN",(0,0),(-1,-1),"CENTER"),
-                            ("TOPPADDING",(0,0),(-1,-1),14),
-                            ("BOTTOMPADDING",(0,0),(-1,-1),14),
+                    def _tbl_style(data, col_widths, header_bg=None):
+                        t = Table(data, colWidths=col_widths)
+                        _bg = header_bg or C_N
+                        t.setStyle(TableStyle([
+                            ("BACKGROUND",(0,0),(-1,0),_bg),
+                            ("TEXTCOLOR",(0,0),(-1,0),C_W),
+                            ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
+                            ("FONTSIZE",(0,0),(-1,-1),8.5),
+                            ("ROWBACKGROUNDS",(0,1),(-1,-1),[C_L, C_W]),
+                            ("ALIGN",(1,0),(-1,-1),"RIGHT"),
+                            ("GRID",(0,0),(-1,-1),0.3,rl_colors.HexColor("#DDE3EE")),
+                            ("TOPPADDING",(0,0),(-1,-1),4),
+                            ("BOTTOMPADDING",(0,0),(-1,-1),4),
+                            ("LEFTPADDING",(0,0),(-1,-1),7),
                         ]))
-                        story.append(hdr_t)
+                        return t
+
+                    def _sec(txt):
+                        t = Table([[Paragraph(txt, ParagraphStyle("SH",
+                            fontName="Helvetica-Bold",fontSize=11,textColor=C_W))]],
+                            colWidths=[17*cm])
+                        t.setStyle(TableStyle([
+                            ("BACKGROUND",(0,0),(-1,-1),C_G),
+                            ("LEFTPADDING",(0,0),(-1,-1),10),
+                            ("TOPPADDING",(0,0),(-1,-1),6),
+                            ("BOTTOMPADDING",(0,0),(-1,-1),6),
+                        ]))
+                        return t
+
+                    story = []
+
+                    # En-tête
+                    # En-tête avec logo AFG encodé base64
+                    import base64 as _b64
+                    try:
+                        from reportlab.platypus import Image as RLImage
+                        from io import BytesIO as _BIO
+                        # Logo AFG depuis le code
+                        _logo_b64_pdf = LOGO_B64  # variable globale
+                        _logo_bytes = _b64.b64decode(_logo_b64_pdf)
+                        _logo_img = RLImage(_BIO(_logo_bytes), width=4*cm, height=1.8*cm)
+                        _logo_img.hAlign = 'CENTER'
+                        story.append(_logo_img)
+                        story.append(Spacer(1, 0.2*cm))
+                    except Exception:
+                        pass
+                    hdr_t = Table([[Paragraph("AFG ASSURANCES BÉNIN VIE", st_ti)],
+                        [Paragraph("RAPPORT DE GESTION — DIRECTION GÉNÉRALE", st_su)],
+                        [Paragraph(f"Période d'analyse : {period_lbl}  ·  Édité le {_dt.now().strftime('%d %B %Y')}", st_su)]],
+                        colWidths=[17*cm])
+                    hdr_t.setStyle(TableStyle([
+                        ("BACKGROUND",(0,0),(-1,-1),C_N),
+                        ("ALIGN",(0,0),(-1,-1),"CENTER"),
+                        ("TOPPADDING",(0,0),(-1,-1),14),
+                        ("BOTTOMPADDING",(0,0),(-1,-1),14),
+                    ]))
+                    story.append(hdr_t)
+                    story.append(Spacer(1,0.3*cm))
+                    info_t = Table([
+                        ["Destinataire :", dest],
+                        ["Rédigé par :", auteur],
+                        ["Classification :", "CONFIDENTIEL — Usage interne"],
+                        ["Référence :", f"AFG-RPT-{_dt.now().strftime('%Y%m%d')}"],
+                    ], colWidths=[5*cm,12*cm])
+                    info_t.setStyle(TableStyle([
+                        ("FONTNAME",(0,0),(0,-1),"Helvetica-Bold"),
+                        ("FONTSIZE",(0,0),(-1,-1),9),
+                        ("TEXTCOLOR",(0,0),(0,-1),C_N),
+                        ("ROWBACKGROUNDS",(0,0),(-1,-1),[C_L,C_W]),
+                        ("TOPPADDING",(0,0),(-1,-1),5),
+                        ("BOTTOMPADDING",(0,0),(-1,-1),5),
+                        ("LEFTPADDING",(0,0),(-1,-1),8),
+                    ]))
+                    story.append(info_t)
+                    story.append(Spacer(1,0.4*cm))
+                    story.append(HRFlowable(width="100%",thickness=2,color=C_G,spaceAfter=6))
+
+                    # 1. KPIs
+                    if s_kpis and pf is not None:
+                        story.append(_sec("1.  PORTEFEUILLE DE POLICES"))
+                        story.append(Spacer(1,0.2*cm))
+                        _nb  = len(pf); _ek="ETAT_POLICE"
+                        _act = int((pf[_ek].str.strip().isin(["ACTIF"])).sum()) if _ek in pf.columns else 0
+                        _res = int((pf[_ek].str.strip()=="RESILIE").sum()) if _ek in pf.columns else 0
+                        _ina = int((pf[_ek].str.strip()=="INACTIF").sum()) if _ek in pf.columns else 0
+                        _ec  = int((pf[_ek].str.strip().isin(["ECHU","ASSURE ECHU"])).sum()) if _ek in pf.columns else 0
+                        _mon = float(pf["MONTENCA"].fillna(0).sum()) if "MONTENCA" in pf.columns else 0
+                        _txa = _act/_nb*100 if _nb else 0
+                        _txr = _res/max(_nb-_ina,1)*100
+                        kd   = [["Indicateur","Valeur","Note"],
+                            ["Total polices",         f"{_nb:,}",   "Ensemble du portefeuille"],
+                            ["Polices actives",        f"{_act:,}", f"Taux activité : {_txa:.1f}%"],
+                            ["Polices résiliées",      f"{_res:,}", f"Tx CIMA : {_txr:.1f}% (seuil ≤25%)"],
+                            ["Polices échues",         f"{_ec:,}",  "ECHU + ASSURE ECHU"],
+                            ["Encaissements (MONTENCA)",fmt(_mon),  "Total encaissements FCFA"]]
+                        story.append(_tbl_style(kd,[7*cm,4*cm,6*cm]))
+                        story.append(Spacer(1,0.2*cm))
+                        story.append(Paragraph(
+                            f"Le portefeuille compte <b>{_nb:,} polices</b> dont "
+                            f"<b>{_act:,} actives ({_txa:.1f}%)</b>. "
+                            f"Taux résiliation : <b>{_txr:.1f}%</b>"
+                            f"{' — conforme CIMA.' if _txr<=25 else ' — DÉPASSE LE SEUIL CIMA (25%).'}",
+                            st_bd))
+
+                    # 2. CA
+                    if s_ca and ca is not None:
                         story.append(Spacer(1,0.3*cm))
-                        info_t = Table([
-                            ["Destinataire :", dest],
-                            ["Rédigé par :", auteur],
-                            ["Classification :", "CONFIDENTIEL — Usage interne"],
-                            ["Référence :", f"AFG-RPT-{_dt.now().strftime('%Y%m%d')}"],
-                        ], colWidths=[5*cm,12*cm])
-                        info_t.setStyle(TableStyle([
-                            ("FONTNAME",(0,0),(0,-1),"Helvetica-Bold"),
+                        story.append(_sec("2.  CHIFFRE D'AFFAIRES"))
+                        story.append(Spacer(1,0.2*cm))
+                        _cat = float(ca["CHIFAFFA"].fillna(0).sum()) if "CHIFAFFA" in ca.columns else 0
+                        _cm  = float(ca["COMMAPPO"].fillna(0).sum()) if "COMMAPPO" in ca.columns else 0
+                        _pr  = float(ca["PRIMNETT"].fillna(0).sum()) if "PRIMNETT" in ca.columns else 0
+                        _nq  = len(ca); _tk = _cat/_nq if _nq else 0
+                        cd   = [["Indicateur","Valeur","Note"],
+                            ["CA brut total",      fmt(_cat),   "CHIFAFFA total"],
+                            ["Prime nette totale", fmt(_pr),    "Après chargements"],
+                            ["Commissions",        fmt(_cm),    f"Taux : {_cm/_cat*100:.1f}%" if _cat else "—"],
+                            ["Nb quittances",      f"{_nq:,}", "Émissions totales"],
+                            ["Ticket moyen",       fmt(_tk),   "CA/quittance"]]
+                        story.append(_tbl_style(cd,[7*cm,4*cm,6*cm]))
+                        if "LIBECATE" in ca.columns:
+                            story.append(Spacer(1,0.2*cm))
+                            story.append(Paragraph("Répartition par produit (Top 8) :", st_h2))
+                            _cp = ca.groupby("LIBECATE")["CHIFAFFA"].sum().reset_index()
+                            _cp = _cp.sort_values("CHIFAFFA",ascending=False).head(8)
+                            _cp["Part"] = (_cp["CHIFAFFA"]/_cat*100).round(1)
+                            pd_   = [["Produit","CA (FCFA)","Part %"]] + [
+                                [str(r["LIBECATE"])[:38],fmt(r["CHIFAFFA"]),f"{r['Part']:.1f}%"]
+                                for _,r in _cp.iterrows()]
+                            story.append(_tbl_style(pd_,[9*cm,4.5*cm,3.5*cm]))
+
+                    # 3. Commerciaux
+                    if s_com and ca is not None:
+                        story.append(Spacer(1,0.3*cm))
+                        story.append(_sec("3.  PERFORMANCE COMMERCIALE & PARTENAIRES"))
+                        story.append(Spacer(1,0.2*cm))
+                        if _agk in ca.columns:
+                            _g = ca.groupby(_agk).agg(CA=("CHIFAFFA","sum"),NbQ=("CHIFAFFA","count")).reset_index()
+                            if "COMMAPPO" in ca.columns:
+                                _gc = ca.groupby(_agk)["COMMAPPO"].sum()
+                                _g["Comm"] = _gc.reindex(_g[_agk]).values
+                            else:
+                                _g["Comm"] = 0
+                            _g = _g.sort_values("CA",ascending=False).head(15)
+                            _gt = _g["CA"].sum()
+                            _g["Part"] = (_g["CA"]/_gt*100).round(1)
+                            comD = [["Commercial / Apporteur","CA (FCFA)","Nb affaires","Commission","Part %"]]
+                            for _,r in _g.iterrows():
+                                comD.append([str(r[_agk])[:28], fmt(r["CA"]),
+                                    f"{r['NbQ']:,}", fmt(r["Comm"]), f"{r['Part']:.1f}%"])
+                            story.append(_tbl_style(comD,[7*cm,3.5*cm,2.2*cm,2.5*cm,1.8*cm]))
+                            story.append(Spacer(1,0.2*cm))
+                            # Partenaires financiers (code intermédiaire 3 chiffres, hors 100)
+                            _col_ci = next((c for c in ["CODEINTE","CODEAPPO","CODE_INTER"] if c in ca.columns), None)
+                            _col_ni = next((c for c in ["NOM_APPORT","NOM_APPO","NOM_INTERMEDIAIRE"] if c in ca.columns), None)
+                            if _col_ci:
+                                _ca_part = ca.copy()
+                                _ca_part[_col_ci] = _ca_part[_col_ci].astype(str).str.strip()
+                                _ca_part = _ca_part[
+                                    (_ca_part[_col_ci].str.len() == 3) &
+                                    (_ca_part[_col_ci] != "100") &
+                                    (_ca_part[_col_ci].str.isdigit())
+                                ]
+                                if not _ca_part.empty:
+                                    _grp_part_key = _col_ci if _col_ni is None else [_col_ci, _col_ni]
+                                    _gp = _ca_part.groupby(_grp_part_key).agg(
+                                        CA=("CHIFAFFA","sum"), NbAff=("CHIFAFFA","count")
+                                    ).reset_index().sort_values("CA",ascending=False).head(10)
+                                    story.append(Paragraph("Partenaires financiers (codes 3 chiffres, hors 100) :", st_h2))
+                                    _pD_hdr = ["Code","Partenaire","CA (FCFA)","Nb affaires"] if _col_ni else ["Code","CA (FCFA)","Nb affaires"]
+                                    _pD = [_pD_hdr]
+                                    for _,r in _gp.iterrows():
+                                        if _col_ni and isinstance(_grp_part_key, list):
+                                            _pD.append([str(r[_col_ci]), str(r[_col_ni])[:25], fmt(r["CA"]), f"{r['NbAff']:,}"])
+                                        else:
+                                            _pD.append([str(r[_col_ci]), fmt(r["CA"]), f"{r['NbAff']:,}"])
+                                    _pw = [2*cm,6*cm,4.5*cm,4.5*cm] if _col_ni else [3*cm,8*cm,6*cm]
+                                    story.append(_tbl_style(_pD, _pw))
+
+                    # 4. Sinistres
+                    if s_sin and sin is not None:
+                        story.append(Spacer(1,0.3*cm))
+                        story.append(_sec("4.  SINISTRES ET PRESTATIONS"))
+                        story.append(Spacer(1,0.2*cm))
+                        _st  = float(sin["Réglement Total"].fillna(0).sum()) if "Réglement Total" in sin.columns else 0
+                        _ss  = float(sin["SAP au 31/12/2025"].fillna(0).sum()) if "SAP au 31/12/2025" in sin.columns else 0
+                        _sh  = float(sin["Réglement Honoraires"].fillna(0).sum()) if "Réglement Honoraires" in sin.columns else 0
+                        _sc  = int((sin["Sort Sinistre"]=="Cloturé").sum()) if "Sort Sinistre" in sin.columns else 0
+                        _so  = int((sin["Sort Sinistre"]=="Ouvert").sum()) if "Sort Sinistre" in sin.columns else 0
+                        _sn  = len(sin)
+                        _ca2 = float(ca["CHIFAFFA"].fillna(0).sum()) if ca is not None and "CHIFAFFA" in ca.columns else 1
+                        _sp  = _st/_ca2*100
+                        _cu  = _st+_ss+_sh
+                        sd   = [["Indicateur","Valeur","Note"],
+                            ["Total réglé",       fmt(_st),      "Montant total règlements"],
+                            ["SAP (provisions)",  fmt(_ss),      "Sinistres à payer"],
+                            ["Honoraires",        fmt(_sh),      "Experts médicaux"],
+                            ["Charge ultime",     fmt(_cu),      "Réglé + SAP + Honoraires"],
+                            ["Ratio S/P",         f"{_sp:.1f}%", f"Seuil CIMA ≤80% {'✓' if _sp<=80 else '⚠'}"],
+                            ["Dossiers ouverts",  f"{_so:,}",    f"Sur {_sn:,} dossiers"],
+                            ["Dossiers clos",     f"{_sc:,}",    f"Taux clôture : {_sc/_sn*100:.1f}%" if _sn else "—"]]
+                        story.append(_tbl_style(sd,[6*cm,4*cm,7*cm]))
+
+                    # 5. CIMA
+                    if s_cima and pf is not None:
+                        story.append(Spacer(1,0.3*cm))
+                        story.append(_sec("5.  SCORECARD CONFORMITÉ CIMA"))
+                        story.append(Spacer(1,0.2*cm))
+                        _nb2 = len(pf); _ek2="ETAT_POLICE"
+                        _a2  = int((pf[_ek2].str.strip().isin(["ACTIF"])).sum()) if _ek2 in pf.columns else 0
+                        _r2  = int((pf[_ek2].str.strip()=="RESILIE").sum()) if _ek2 in pf.columns else 0
+                        _i2  = int((pf[_ek2].str.strip()=="INACTIF").sum()) if _ek2 in pf.columns else 0
+                        _c2  = float(ca["CHIFAFFA"].fillna(0).sum()) if ca is not None and "CHIFAFFA" in ca.columns else 1
+                        _s2  = float(sin["Réglement Total"].fillna(0).sum()) if sin is not None and "Réglement Total" in sin.columns else 0
+                        _ta2 = _a2/_nb2*100 if _nb2 else 0
+                        _tr2 = _r2/max(_nb2-_i2,1)*100
+                        _sp2 = _s2/_c2*100
+                        _in2 = _i2/_nb2*100 if _nb2 else 0
+                        # Formules des taux CIMA
+                        _st_f = ParagraphStyle("Ff",fontName="Helvetica",fontSize=8,
+                            textColor=rl_colors.HexColor("#333"),leading=12,spaceAfter=2)
+                        story.append(Paragraph("<b>Formules de calcul des indicateurs :</b>", st_h2))
+                        _fd = [
+                            ["Indicateur","Formule","Valeur"],
+                            ["Taux activite net",
+                             f"Actifs / (Total - Inactifs) x 100 = {_a2:,} / {max(_nb2-_i2,1):,} x 100",
+                             f"{_ta2:.1f}%"],
+                            ["Taux resiliation",
+                             f"Resilies / (Total - Inactifs) x 100 = {_r2:,} / {max(_nb2-_i2,1):,} x 100",
+                             f"{_tr2:.1f}%"],
+                            ["Ratio S/P",
+                             f"Reglements / CA brut x 100 = {fmt(_s2)} / {fmt(_c2)} x 100",
+                             f"{_sp2:.1f}%"],
+                            ["Part inactifs",
+                             f"Inactifs / Total x 100 = {_i2:,} / {max(_nb2,1):,} x 100",
+                             f"{_in2:.1f}%"],
+                        ]
+                        _ft = Table(_fd, colWidths=[4*cm, 10*cm, 3*cm])
+                        _ft.setStyle(TableStyle([
+                            ("BACKGROUND",(0,0),(-1,0),C_N),("TEXTCOLOR",(0,0),(-1,0),C_W),
+                            ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
+                            ("FONTSIZE",(0,0),(-1,-1),8),
+                            ("ROWBACKGROUNDS",(0,1),(-1,-1),[C_L,C_W]),
+                            ("GRID",(0,0),(-1,-1),0.3,rl_colors.HexColor("#DDE3EE")),
+                            ("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4),
+                            ("LEFTPADDING",(0,0),(-1,-1),5),("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+                            ("FONTNAME",(2,1),(2,-1),"Helvetica-Bold"),
+                            ("TEXTCOLOR",(2,1),(2,-1),C_G),
+                        ]))
+                        story.append(_ft)
+                        story.append(Spacer(1,0.3*cm))
+                        cm_d = [["Indicateur CIMA","Valeur","Seuil","Statut"],
+                            ["Taux d'activité net",  f"{_ta2:.1f}%", "≥ 50%", "CONFORME" if _ta2>=50 else "NON CONFORME"],
+                            ["Taux résiliation",     f"{_tr2:.1f}%", "≤ 25%", "CONFORME" if _tr2<=25 else "NON CONFORME"],
+                            ["Ratio S/P",            f"{_sp2:.1f}%", "≤ 80%", "CONFORME" if _sp2<=80 else "NON CONFORME"],
+                            ["Part inactifs",        f"{_in2:.1f}%", "≤ 5%",  "CONFORME" if _in2<=5 else "NON CONFORME"]]
+                        t_cm = Table(cm_d, colWidths=[6*cm,3*cm,3*cm,5*cm])
+                        _cm_style = TableStyle([
+                            ("BACKGROUND",(0,0),(-1,0),C_N),
+                            ("TEXTCOLOR",(0,0),(-1,0),C_W),
+                            ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
                             ("FONTSIZE",(0,0),(-1,-1),9),
-                            ("TEXTCOLOR",(0,0),(0,-1),C_N),
-                            ("ROWBACKGROUNDS",(0,0),(-1,-1),[C_L,C_W]),
+                            ("ROWBACKGROUNDS",(0,1),(-1,-1),[C_L,C_W]),
+                            ("ALIGN",(1,0),(-1,-1),"CENTER"),
+                            ("GRID",(0,0),(-1,-1),0.3,rl_colors.HexColor("#DDE3EE")),
                             ("TOPPADDING",(0,0),(-1,-1),5),
                             ("BOTTOMPADDING",(0,0),(-1,-1),5),
                             ("LEFTPADDING",(0,0),(-1,-1),8),
-                        ]))
-                        story.append(info_t)
-                        story.append(Spacer(1,0.4*cm))
-                        story.append(HRFlowable(width="100%",thickness=2,color=C_G,spaceAfter=6))
+                        ])
+                        for _i in range(1,len(cm_d)):
+                            _ok = cm_d[_i][3]=="CONFORME"
+                            _cm_style.add("TEXTCOLOR",(3,_i),(3,_i),C_G if _ok else C_R)
+                            _cm_style.add("FONTNAME",(3,_i),(3,_i),"Helvetica-Bold")
+                        t_cm.setStyle(_cm_style)
+                        story.append(t_cm)
 
-                        # 1. KPIs
-                        if s_kpis and pf is not None:
-                            story.append(_sec("1.  PORTEFEUILLE DE POLICES"))
-                            story.append(Spacer(1,0.2*cm))
-                            _nb  = len(pf); _ek="ETAT_POLICE"
-                            _act = int((pf[_ek].str.strip().isin(["ACTIF"])).sum()) if _ek in pf.columns else 0
-                            _res = int((pf[_ek].str.strip()=="RESILIE").sum()) if _ek in pf.columns else 0
-                            _ina = int((pf[_ek].str.strip()=="INACTIF").sum()) if _ek in pf.columns else 0
-                            _ec  = int((pf[_ek].str.strip().isin(["ECHU","ASSURE ECHU"])).sum()) if _ek in pf.columns else 0
-                            _mon = float(pf["MONTENCA"].fillna(0).sum()) if "MONTENCA" in pf.columns else 0
-                            _txa = _act/_nb*100 if _nb else 0
-                            _txr = _res/max(_nb-_ina,1)*100
-                            kd   = [["Indicateur","Valeur","Note"],
-                                ["Total polices",         f"{_nb:,}",   "Ensemble du portefeuille"],
-                                ["Polices actives",        f"{_act:,}", f"Taux activité : {_txa:.1f}%"],
-                                ["Polices résiliées",      f"{_res:,}", f"Tx CIMA : {_txr:.1f}% (seuil ≤25%)"],
-                                ["Polices échues",         f"{_ec:,}",  "ECHU + ASSURE ECHU"],
-                                ["Encaissements (MONTENCA)",fmt(_mon),  "Total encaissements FCFA"]]
-                            story.append(_tbl_style(kd,[7*cm,4*cm,6*cm]))
-                            story.append(Spacer(1,0.2*cm))
-                            story.append(Paragraph(
-                                f"Le portefeuille compte <b>{_nb:,} polices</b> dont "
-                                f"<b>{_act:,} actives ({_txa:.1f}%)</b>. "
-                                f"Taux résiliation : <b>{_txr:.1f}%</b>"
-                                f"{' — conforme CIMA.' if _txr<=25 else ' — DÉPASSE LE SEUIL CIMA (25%).'}",
-                                st_bd))
+                    # Conclusion
+                    story.append(Spacer(1,0.4*cm))
+                    story.append(HRFlowable(width="100%",thickness=1,color=C_G,spaceAfter=6))
+                    story.append(Paragraph("CONCLUSION",st_h1))
+                    story.append(Paragraph(
+                        f"Le présent rapport dresse un état de la situation actuarielle "
+                        f"et commerciale d'AFG Assurances Bénin Vie "
+                        f"pour la période du <b>{period_lbl}</b>. "
+                        f"Les données présentées proviennent des bases de gestion "
+                        f"officielles de la compagnie et ont été traitées conformément "
+                        f"aux exigences du Code CIMA.",st_bd))
+                    story.append(Spacer(1,0.2*cm))
+                    story.append(Paragraph(
+                        f"<i>Document confidentiel — AFG Assurances Bénin Vie · "
+                        f"Groupe AFG Holding · Conforme CIMA · {_dt.now().strftime('%d/%m/%Y')}</i>",st_sm))
 
-                        # 2. CA
-                        if s_ca and ca is not None:
-                            story.append(Spacer(1,0.3*cm))
-                            story.append(_sec("2.  CHIFFRE D'AFFAIRES"))
-                            story.append(Spacer(1,0.2*cm))
-                            _cat = float(ca["CHIFAFFA"].fillna(0).sum()) if "CHIFAFFA" in ca.columns else 0
-                            _cm  = float(ca["COMMAPPO"].fillna(0).sum()) if "COMMAPPO" in ca.columns else 0
-                            _pr  = float(ca["PRIMNETT"].fillna(0).sum()) if "PRIMNETT" in ca.columns else 0
-                            _nq  = len(ca); _tk = _cat/_nq if _nq else 0
-                            cd   = [["Indicateur","Valeur","Note"],
-                                ["CA brut total",      fmt(_cat),   "CHIFAFFA total"],
-                                ["Prime nette totale", fmt(_pr),    "Après chargements"],
-                                ["Commissions",        fmt(_cm),    f"Taux : {_cm/_cat*100:.1f}%" if _cat else "—"],
-                                ["Nb quittances",      f"{_nq:,}", "Émissions totales"],
-                                ["Ticket moyen",       fmt(_tk),   "CA/quittance"]]
-                            story.append(_tbl_style(cd,[7*cm,4*cm,6*cm]))
-                            if "LIBECATE" in ca.columns:
-                                story.append(Spacer(1,0.2*cm))
-                                story.append(Paragraph("Répartition par produit (Top 8) :", st_h2))
-                                _cp = ca.groupby("LIBECATE")["CHIFAFFA"].sum().reset_index()
-                                _cp = _cp.sort_values("CHIFAFFA",ascending=False).head(8)
-                                _cp["Part"] = (_cp["CHIFAFFA"]/_cat*100).round(1)
-                                pd_   = [["Produit","CA (FCFA)","Part %"]] + [
-                                    [str(r["LIBECATE"])[:38],fmt(r["CHIFAFFA"]),f"{r['Part']:.1f}%"]
-                                    for _,r in _cp.iterrows()]
-                                story.append(_tbl_style(pd_,[9*cm,4.5*cm,3.5*cm]))
-
-                        # 3. Commerciaux
-                        if s_com and ca is not None:
-                            story.append(Spacer(1,0.3*cm))
-                            story.append(_sec("3.  PERFORMANCE COMMERCIALE & PARTENAIRES"))
-                            story.append(Spacer(1,0.2*cm))
-                            if _agk in ca.columns:
-                                _g = ca.groupby(_agk).agg(CA=("CHIFAFFA","sum"),NbQ=("CHIFAFFA","count")).reset_index()
-                                if "COMMAPPO" in ca.columns:
-                                    _gc = ca.groupby(_agk)["COMMAPPO"].sum()
-                                    _g["Comm"] = _gc.reindex(_g[_agk]).values
-                                else:
-                                    _g["Comm"] = 0
-                                _g = _g.sort_values("CA",ascending=False).head(15)
-                                _gt = _g["CA"].sum()
-                                _g["Part"] = (_g["CA"]/_gt*100).round(1)
-                                comD = [["Commercial / Apporteur","CA (FCFA)","Nb affaires","Commission","Part %"]]
-                                for _,r in _g.iterrows():
-                                    comD.append([str(r[_agk])[:28], fmt(r["CA"]),
-                                        f"{r['NbQ']:,}", fmt(r["Comm"]), f"{r['Part']:.1f}%"])
-                                story.append(_tbl_style(comD,[7*cm,3.5*cm,2.2*cm,2.5*cm,1.8*cm]))
-                                story.append(Spacer(1,0.2*cm))
-                                # Partenaires financiers (code intermédiaire 3 chiffres, hors 100)
-                                _col_ci = next((c for c in ["CODEINTE","CODEAPPO","CODE_INTER"] if c in ca.columns), None)
-                                _col_ni = next((c for c in ["NOM_APPORT","NOM_APPO","NOM_INTERMEDIAIRE"] if c in ca.columns), None)
-                                if _col_ci:
-                                    _ca_part = ca.copy()
-                                    _ca_part[_col_ci] = _ca_part[_col_ci].astype(str).str.strip()
-                                    _ca_part = _ca_part[
-                                        (_ca_part[_col_ci].str.len() == 3) &
-                                        (_ca_part[_col_ci] != "100") &
-                                        (_ca_part[_col_ci].str.isdigit())
-                                    ]
-                                    if not _ca_part.empty:
-                                        _grp_part_key = _col_ci if _col_ni is None else [_col_ci, _col_ni]
-                                        _gp = _ca_part.groupby(_grp_part_key).agg(
-                                            CA=("CHIFAFFA","sum"), NbAff=("CHIFAFFA","count")
-                                        ).reset_index().sort_values("CA",ascending=False).head(10)
-                                        story.append(Paragraph("Partenaires financiers (codes 3 chiffres, hors 100) :", st_h2))
-                                        _pD_hdr = ["Code","Partenaire","CA (FCFA)","Nb affaires"] if _col_ni else ["Code","CA (FCFA)","Nb affaires"]
-                                        _pD = [_pD_hdr]
-                                        for _,r in _gp.iterrows():
-                                            if _col_ni and isinstance(_grp_part_key, list):
-                                                _pD.append([str(r[_col_ci]), str(r[_col_ni])[:25], fmt(r["CA"]), f"{r['NbAff']:,}"])
-                                            else:
-                                                _pD.append([str(r[_col_ci]), fmt(r["CA"]), f"{r['NbAff']:,}"])
-                                        _pw = [2*cm,6*cm,4.5*cm,4.5*cm] if _col_ni else [3*cm,8*cm,6*cm]
-                                        story.append(_tbl_style(_pD, _pw))
-
-                        # 4. Sinistres
-                        if s_sin and sin is not None:
-                            story.append(Spacer(1,0.3*cm))
-                            story.append(_sec("4.  SINISTRES ET PRESTATIONS"))
-                            story.append(Spacer(1,0.2*cm))
-                            _st  = float(sin["Réglement Total"].fillna(0).sum()) if "Réglement Total" in sin.columns else 0
-                            _ss  = float(sin["SAP au 31/12/2025"].fillna(0).sum()) if "SAP au 31/12/2025" in sin.columns else 0
-                            _sh  = float(sin["Réglement Honoraires"].fillna(0).sum()) if "Réglement Honoraires" in sin.columns else 0
-                            _sc  = int((sin["Sort Sinistre"]=="Cloturé").sum()) if "Sort Sinistre" in sin.columns else 0
-                            _so  = int((sin["Sort Sinistre"]=="Ouvert").sum()) if "Sort Sinistre" in sin.columns else 0
-                            _sn  = len(sin)
-                            _ca2 = float(ca["CHIFAFFA"].fillna(0).sum()) if ca is not None and "CHIFAFFA" in ca.columns else 1
-                            _sp  = _st/_ca2*100
-                            _cu  = _st+_ss+_sh
-                            sd   = [["Indicateur","Valeur","Note"],
-                                ["Total réglé",       fmt(_st),      "Montant total règlements"],
-                                ["SAP (provisions)",  fmt(_ss),      "Sinistres à payer"],
-                                ["Honoraires",        fmt(_sh),      "Experts médicaux"],
-                                ["Charge ultime",     fmt(_cu),      "Réglé + SAP + Honoraires"],
-                                ["Ratio S/P",         f"{_sp:.1f}%", f"Seuil CIMA ≤80% {'✓' if _sp<=80 else '⚠'}"],
-                                ["Dossiers ouverts",  f"{_so:,}",    f"Sur {_sn:,} dossiers"],
-                                ["Dossiers clos",     f"{_sc:,}",    f"Taux clôture : {_sc/_sn*100:.1f}%" if _sn else "—"]]
-                            story.append(_tbl_style(sd,[6*cm,4*cm,7*cm]))
-
-                        # 5. CIMA
-                        if s_cima and pf is not None:
-                            story.append(Spacer(1,0.3*cm))
-                            story.append(_sec("5.  SCORECARD CONFORMITÉ CIMA"))
-                            story.append(Spacer(1,0.2*cm))
-                            _nb2 = len(pf); _ek2="ETAT_POLICE"
-                            _a2  = int((pf[_ek2].str.strip().isin(["ACTIF"])).sum()) if _ek2 in pf.columns else 0
-                            _r2  = int((pf[_ek2].str.strip()=="RESILIE").sum()) if _ek2 in pf.columns else 0
-                            _i2  = int((pf[_ek2].str.strip()=="INACTIF").sum()) if _ek2 in pf.columns else 0
-                            _c2  = float(ca["CHIFAFFA"].fillna(0).sum()) if ca is not None and "CHIFAFFA" in ca.columns else 1
-                            _s2  = float(sin["Réglement Total"].fillna(0).sum()) if sin is not None and "Réglement Total" in sin.columns else 0
-                            _ta2 = _a2/_nb2*100 if _nb2 else 0
-                            _tr2 = _r2/max(_nb2-_i2,1)*100
-                            _sp2 = _s2/_c2*100
-                            _in2 = _i2/_nb2*100 if _nb2 else 0
-                            # Formules des taux CIMA
-                            _st_f = ParagraphStyle("Ff",fontName="Helvetica",fontSize=8,
-                                textColor=rl_colors.HexColor("#333"),leading=12,spaceAfter=2)
-                            story.append(Paragraph("<b>Formules de calcul des indicateurs :</b>", st_h2))
-                            _fd = [
-                                ["Indicateur","Formule","Valeur"],
-                                ["Taux activite net",
-                                 f"Actifs / (Total - Inactifs) x 100 = {_a2:,} / {max(_nb2-_i2,1):,} x 100",
-                                 f"{_ta2:.1f}%"],
-                                ["Taux resiliation",
-                                 f"Resilies / (Total - Inactifs) x 100 = {_r2:,} / {max(_nb2-_i2,1):,} x 100",
-                                 f"{_tr2:.1f}%"],
-                                ["Ratio S/P",
-                                 f"Reglements / CA brut x 100 = {fmt(_s2)} / {fmt(_c2)} x 100",
-                                 f"{_sp2:.1f}%"],
-                                ["Part inactifs",
-                                 f"Inactifs / Total x 100 = {_i2:,} / {max(_nb2,1):,} x 100",
-                                 f"{_in2:.1f}%"],
-                            ]
-                            _ft = Table(_fd, colWidths=[4*cm, 10*cm, 3*cm])
-                            _ft.setStyle(TableStyle([
-                                ("BACKGROUND",(0,0),(-1,0),C_N),("TEXTCOLOR",(0,0),(-1,0),C_W),
-                                ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
-                                ("FONTSIZE",(0,0),(-1,-1),8),
-                                ("ROWBACKGROUNDS",(0,1),(-1,-1),[C_L,C_W]),
-                                ("GRID",(0,0),(-1,-1),0.3,rl_colors.HexColor("#DDE3EE")),
-                                ("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4),
-                                ("LEFTPADDING",(0,0),(-1,-1),5),("VALIGN",(0,0),(-1,-1),"MIDDLE"),
-                                ("FONTNAME",(2,1),(2,-1),"Helvetica-Bold"),
-                                ("TEXTCOLOR",(2,1),(2,-1),C_G),
-                            ]))
-                            story.append(_ft)
-                            story.append(Spacer(1,0.3*cm))
-                            cm_d = [["Indicateur CIMA","Valeur","Seuil","Statut"],
-                                ["Taux d'activité net",  f"{_ta2:.1f}%", "≥ 50%", "CONFORME" if _ta2>=50 else "NON CONFORME"],
-                                ["Taux résiliation",     f"{_tr2:.1f}%", "≤ 25%", "CONFORME" if _tr2<=25 else "NON CONFORME"],
-                                ["Ratio S/P",            f"{_sp2:.1f}%", "≤ 80%", "CONFORME" if _sp2<=80 else "NON CONFORME"],
-                                ["Part inactifs",        f"{_in2:.1f}%", "≤ 5%",  "CONFORME" if _in2<=5 else "NON CONFORME"]]
-                            t_cm = Table(cm_d, colWidths=[6*cm,3*cm,3*cm,5*cm])
-                            _cm_style = TableStyle([
-                                ("BACKGROUND",(0,0),(-1,0),C_N),
-                                ("TEXTCOLOR",(0,0),(-1,0),C_W),
-                                ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
-                                ("FONTSIZE",(0,0),(-1,-1),9),
-                                ("ROWBACKGROUNDS",(0,1),(-1,-1),[C_L,C_W]),
-                                ("ALIGN",(1,0),(-1,-1),"CENTER"),
-                                ("GRID",(0,0),(-1,-1),0.3,rl_colors.HexColor("#DDE3EE")),
-                                ("TOPPADDING",(0,0),(-1,-1),5),
-                                ("BOTTOMPADDING",(0,0),(-1,-1),5),
-                                ("LEFTPADDING",(0,0),(-1,-1),8),
-                            ])
-                            for _i in range(1,len(cm_d)):
-                                _ok = cm_d[_i][3]=="CONFORME"
-                                _cm_style.add("TEXTCOLOR",(3,_i),(3,_i),C_G if _ok else C_R)
-                                _cm_style.add("FONTNAME",(3,_i),(3,_i),"Helvetica-Bold")
-                            t_cm.setStyle(_cm_style)
-                            story.append(t_cm)
-
-                        # Conclusion
-                        story.append(Spacer(1,0.4*cm))
-                        story.append(HRFlowable(width="100%",thickness=1,color=C_G,spaceAfter=6))
-                        story.append(Paragraph("CONCLUSION",st_h1))
-                        story.append(Paragraph(
-                            f"Le présent rapport dresse un état de la situation actuarielle "
-                            f"et commerciale d'AFG Assurances Bénin Vie "
-                            f"pour la période du <b>{period_lbl}</b>. "
-                            f"Les données présentées proviennent des bases de gestion "
-                            f"officielles de la compagnie et ont été traitées conformément "
-                            f"aux exigences du Code CIMA.",st_bd))
-                        story.append(Spacer(1,0.2*cm))
-                        story.append(Paragraph(
-                            f"<i>Document confidentiel — AFG Assurances Bénin Vie · "
-                            f"Groupe AFG Holding · Conforme CIMA · {_dt.now().strftime('%d/%m/%Y')}</i>",st_sm))
-
-                        doc.build(story)
-                        _pdf = _buf.getvalue()
-                        st.success(f"✅ Rapport généré — {len(_pdf)//1024} Ko")
-                        st.download_button("📥 Télécharger le rapport PDF",
-                            data=_pdf,
-                            file_name=f"AFG_Rapport_DG_{period_lbl.replace(' ','_')}_{_dt.now().strftime('%Y%m%d')}.pdf",
-                            mime="application/pdf",
-                            use_container_width=True, type="primary",
-                            key="dl_pdf_final")
-                    except ImportError:
-                        alert("La bibliothèque <b>reportlab</b> n'est pas installée.", "danger")
-                    except Exception as _e:
-                        alert(f"Erreur génération PDF : {_e}", "danger")
-                        import traceback; st.code(traceback.format_exc())
+                    doc.build(story)
+                    _pdf = _buf.getvalue()
+                    st.success(f"✅ Rapport généré — {len(_pdf)//1024} Ko")
+                    st.download_button("📥 Télécharger le rapport PDF",
+                        data=_pdf,
+                        file_name=f"AFG_Rapport_DG_{period_lbl.replace(' ','_')}_{_dt.now().strftime('%Y%m%d')}.pdf",
+                        mime="application/pdf",
+                        use_container_width=True, type="primary",
+                        key="dl_pdf_final")
+                except ImportError:
+                    alert("La bibliothèque <b>reportlab</b> n'est pas installée.", "danger")
+                except Exception as _e:
+                    alert(f"Erreur génération PDF : {_e}", "danger")
+                    import traceback; st.code(traceback.format_exc())
 
 
-    # ── FOOTER ────────────────────────────────────────────────────────────────────
-    st.markdown(f"""
-    <div style="background:{NAVY};color:rgba(255,255,255,.3);text-align:center;
-         font-size:10px;padding:12px;border-radius:10px;margin-top:20px;border-top:3px solid {GREEN}">
-      © 2025 <strong style="color:{MINT}">AFG Assurances Bénin Vie</strong>
-      · Dashboard Actuariel Expert v3.0 · Conforme CIMA · 306 295 polices · Groupe AFG Holding
-      · <em>Données confidentielles — Accès restreint</em>
-    </div>""", unsafe_allow_html=True)
+# ── FOOTER ────────────────────────────────────────────────────────────────────
+st.markdown(f"""
+<div style="background:{NAVY};color:rgba(255,255,255,.3);text-align:center;
+     font-size:10px;padding:12px;border-radius:10px;margin-top:20px;border-top:3px solid {GREEN}">
+  © 2025 <strong style="color:{MINT}">AFG Assurances Bénin Vie</strong>
+  · Dashboard Actuariel Expert v3.0 · Conforme CIMA · 306 295 polices · Groupe AFG Holding
+  · <em>Données confidentielles — Accès restreint</em>
+</div>""", unsafe_allow_html=True)
