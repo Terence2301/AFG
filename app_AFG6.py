@@ -2520,7 +2520,7 @@ elif "Portefeuille" in page:
         f"Produit : {prod_sel}" if prod_sel != "Tous" else None,
         f"Périodicité : {peri_sel}" if peri_sel != "Toutes" else None,
         f"Ville : {ville_sel}" if ville_sel != "Toutes" else None,
-        f"Recherche : {srch_pf}" if srch_pf.strip() else None,
+        f"Recherche : {_srch_pf_val}" if _srch_pf_val else None,
     ] if x]
     if _filters_active:
         st.markdown(
@@ -2883,36 +2883,35 @@ elif "Commerciaux" in page and "Partenaires" not in page:
             fig_style(fig_p, 420, f"📊 Pareto CA — Top 10 apporteurs · {period_lbl}")
             st.plotly_chart(fig_p, use_container_width=True)
         with c2:
-            # Évolution CA Top 5 par année
-            _df_evo_src = df_com if "df_com" in dir() and df_com is not None else (
-                          df_com_src if "df_com_src" in dir() else None)
-            _ca_k_evo   = "CHIFAFFA" if _df_evo_src is not None and "CHIFAFFA" in _df_evo_src.columns else "MONTENCA"
-            if _df_evo_src is not None and "ANNEE" in _df_evo_src.columns:
+            # Évolution CA Top 5 par année (si ANNEE dispo), sinon distribution
+            _ca_k_evo = "CHIFAFFA" if "CHIFAFFA" in df_com.columns else "MONTENCA"
+            _has_annee = "ANNEE" in df_com.columns
+            _evo_ok = False
+            if _has_annee:
                 _top5 = grp.head(5)[ag_k].tolist()
-                _evo5 = _df_evo_src[_df_evo_src[ag_k].isin(_top5)].groupby(
+                _evo5 = df_com[df_com[ag_k].isin(_top5)].groupby(
                     ["ANNEE", ag_k])[_ca_k_evo].sum().reset_index()
-                if not _evo5.empty:
+                if not _evo5.empty and _evo5["ANNEE"].nunique() > 1:
                     fig_evo = go.Figure()
                     for _nm in _top5:
-                        _d = _evo5[_evo5[ag_k]==_nm].sort_values("ANNEE")
+                        _d = _evo5[_evo5[ag_k] == _nm].sort_values("ANNEE")
                         if not _d.empty:
                             fig_evo.add_scatter(
                                 x=_d["ANNEE"].astype(str), y=_d[_ca_k_evo],
                                 mode="lines+markers+text",
                                 name=str(_nm)[:20],
-                                text=[fmt(v,"") for v in _d[_ca_k_evo]],
+                                text=[fmt(v, "") for v in _d[_ca_k_evo]],
                                 textposition="top center",
                                 textfont=dict(size=8))
                     fig_style(fig_evo, 420, "📈 Évolution CA — Top 5 apporteurs")
                     st.plotly_chart(fig_evo, use_container_width=True)
-                else:
-                    st.info("Données d'évolution insuffisantes.")
-            else:
-                # Distribution des CA (fallback si pas de colonne ANNEE)
-                fig2 = go.Figure(go.Histogram(x=grp["CA"],nbinsx=25,
-                    marker_color=GREEN,opacity=.85))
-            fig_style(fig2,520,"📊 Distribution CA par commercial")
-            st.plotly_chart(fig2,use_container_width=True)
+                    _evo_ok = True
+            if not _evo_ok:
+                # Fallback : distribution des CA
+                fig_dist = go.Figure(go.Histogram(
+                    x=grp["CA"], nbinsx=25, marker_color=GREEN, opacity=.85))
+                fig_style(fig_dist, 420, "📊 Distribution du CA par apporteur")
+                st.plotly_chart(fig_dist, use_container_width=True)
 
     with t_stat:
         c1,c2 = st.columns(2)
@@ -4216,6 +4215,7 @@ elif "Saisie BIA" in page:
             b1, b2 = st.columns(2)
             if b1.button("← Retour", key="ret5_pa"):
                 st.session_state["bia_step"] = 3; st.rerun()
+            if b2.button("Suivant ▶", type="primary", key="nxt5_pa"):
                 st.session_state["bia_step"] = 7; st.rerun()
 
         # ══════════════════════════════════════════════════════════════════════
@@ -4364,7 +4364,10 @@ elif "Saisie BIA" in page:
             b1,b2 = st.columns(2)
             if b1.button("← Retour", key="ret5_gen"):
                 st.session_state["bia_step"] = 4; st.rerun()
+            if b2.button("Suivant ▶", type="primary", key="nxt5_gen"):
                 st.session_state["bia_step"] = 6; st.rerun()
+
+    elif step==6:
         # Courtier PA0 : pas de questionnaire médical  rediriger vers validation
         if _is_crt_step:
             st.session_state["bia_step"] = 7; st.rerun()
@@ -4395,6 +4398,8 @@ elif "Saisie BIA" in page:
                     st.session_state[f"f_{qk}d"]=st.text_input("Précisions :",value=st.session_state.get(f"f_{qk}d",""),placeholder="Soyez précis(e)",key=f"d_{qk}")
         b1,b2=st.columns(2)
         if b1.button("← Retour", key="ret6_gen"): st.session_state["bia_step"]=5; st.rerun()
+        if b2.button("Suivant ▶", type="primary", key="nxt6_gen"):
+            st.session_state["bia_step"] = 7; st.rerun()
 
     elif step==7 or (step==5 and _is_crt_step):
         if _is_crt_step:
