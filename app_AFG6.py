@@ -2316,7 +2316,187 @@ elif "Analyse CA" in page:
             kpi(c6,"Part du CA total",pct(part),"vs toutes périodes","blue",icon="📊")
 
             st.markdown("")
-            t_evo, t_prod, t_int, t_raw = st.tabs(["📈 Évolution","🛒 Par produit","🤝 Par intermédiaire","🔍 Données brutes"])
+            t_evo, t_cmp, t_prod, t_int, t_raw = st.tabs(
+                ["📈 Évolution","⚖️ Comparaison périodes","🛒 Par produit",
+                 "🤝 Par intermédiaire","🔍 Données brutes"])
+
+            # ══════════════════════════════════════════════════════════════════
+            #  COMPARAISON DE DEUX PÉRIODES — CA et nombre de contrats
+            # ══════════════════════════════════════════════════════════════════
+            with t_cmp:
+                section("⚖️ Comparaison de deux périodes",
+                        "CHIFFRE D'AFFAIRES · NOMBRE DE CONTRATS · VARIATION")
+
+                if "DATECOMP" not in ca.columns:
+                    alert("Colonne DATECOMP absente — comparaison impossible.","warn")
+                else:
+                    _cmp_base = ca.copy()
+                    _cmp_base["_DT"] = pd.to_datetime(_cmp_base["DATECOMP"], errors="coerce")
+                    _cmp_base = _cmp_base.dropna(subset=["_DT"])
+
+                    if _cmp_base.empty:
+                        alert("Aucune date de comptabilisation exploitable.","warn")
+                    else:
+                        _ca_col  = "CHIFAFFA" if "CHIFAFFA" in _cmp_base.columns else "MONTENCA"
+                        _dmin    = _cmp_base["_DT"].min().date()
+                        _dmax    = _cmp_base["_DT"].max().date()
+
+                        # ── Choix de la granularité ──────────────────────────
+                        _gran_opts = ["Année","Semestre","Trimestre","Mois","Semaine"]
+                        _gran = st.radio("Granularité de comparaison", _gran_opts,
+                                          horizontal=True, key="cmp_gran")
+
+                        # Construire l'étiquette de période selon la granularité
+                        def _periode_label(dt_series, gran):
+                            if gran == "Année":
+                                return dt_series.dt.year.astype(str)
+                            if gran == "Semestre":
+                                return (dt_series.dt.year.astype(str) + "-S"
+                                        + ((dt_series.dt.month - 1)//6 + 1).astype(str))
+                            if gran == "Trimestre":
+                                return (dt_series.dt.year.astype(str) + "-T"
+                                        + dt_series.dt.quarter.astype(str))
+                            if gran == "Mois":
+                                return dt_series.dt.strftime("%Y-%m")
+                            # Semaine
+                            return (dt_series.dt.isocalendar().year.astype(str) + "-S"
+                                    + dt_series.dt.isocalendar().week.astype(str).str.zfill(2))
+
+                        _cmp_base["_PER"] = _periode_label(_cmp_base["_DT"], _gran)
+                        _periodes = sorted(_cmp_base["_PER"].unique().tolist(), reverse=True)
+
+                        if len(_periodes) < 2:
+                            alert(f"Une seule période disponible en granularité « {_gran} ». "
+                                  "Choisissez une granularité plus fine.","info")
+                        else:
+                            cc1, cc2 = st.columns(2)
+                            _p1 = cc1.selectbox("Période A", _periodes, index=0, key="cmp_p1")
+                            _p2 = cc2.selectbox("Période B", _periodes,
+                                                index=min(1,len(_periodes)-1), key="cmp_p2")
+
+                            _dA = _cmp_base[_cmp_base["_PER"] == _p1]
+                            _dB = _cmp_base[_cmp_base["_PER"] == _p2]
+
+                            # ── Indicateurs des deux périodes ────────────────
+                            _caA, _caB = float(_dA[_ca_col].fillna(0).sum()), float(_dB[_ca_col].fillna(0).sum())
+                            _nbA, _nbB = len(_dA), len(_dB)
+                            _ctA = _dA["POLICE_KEY"].nunique() if "POLICE_KEY" in _dA.columns else _nbA
+                            _ctB = _dB["POLICE_KEY"].nunique() if "POLICE_KEY" in _dB.columns else _nbB
+                            _tmA = _caA/max(_nbA,1)
+                            _tmB = _caB/max(_nbB,1)
+
+                            def _var(a, b):
+                                """Variation A par rapport à B, en %."""
+                                if b == 0: return 0.0
+                                return (a - b) / abs(b) * 100
+
+                            _vCA = _var(_caA, _caB)
+                            _vNB = _var(_nbA, _nbB)
+                            _vCT = _var(_ctA, _ctB)
+                            _vTM = _var(_tmA, _tmB)
+
+                            st.markdown(f"""
+                            <div style="background:{NAVY};border-radius:10px;padding:10px 16px;
+                                 margin:10px 0;color:white;font-size:12px;text-align:center">
+                              <b>{_p1}</b> &nbsp;comparé à&nbsp; <b>{_p2}</b>
+                              &nbsp;·&nbsp; granularité : {_gran}
+                            </div>""", unsafe_allow_html=True)
+
+                            m1,m2,m3,m4 = st.columns(4)
+                            kpi(m1,"Chiffre d'affaires", fmt(_caA),
+                                f"{'▲' if _vCA>=0 else '▼'} {abs(_vCA):.1f}% vs {_p2}",
+                                "teal" if _vCA>=0 else "red", icon="💰")
+                            kpi(m2,"Nb quittances", f"{_nbA:,}",
+                                f"{'▲' if _vNB>=0 else '▼'} {abs(_vNB):.1f}% vs {_p2}",
+                                "teal" if _vNB>=0 else "red", icon="🧾")
+                            kpi(m3,"Nb contrats", f"{_ctA:,}",
+                                f"{'▲' if _vCT>=0 else '▼'} {abs(_vCT):.1f}% vs {_p2}",
+                                "teal" if _vCT>=0 else "red", icon="📄")
+                            kpi(m4,"Ticket moyen", fmt(_tmA),
+                                f"{'▲' if _vTM>=0 else '▼'} {abs(_vTM):.1f}% vs {_p2}",
+                                "blue", icon="🎫")
+
+                            st.markdown("---")
+
+                            # ── Tableau comparatif détaillé ──────────────────
+                            _tbl_cmp = pd.DataFrame({
+                                "Indicateur": ["Chiffre d'affaires (FCFA)","Nb quittances",
+                                               "Nb contrats distincts","Ticket moyen (FCFA)"],
+                                _p1:          [fmt(_caA,""), f"{_nbA:,}", f"{_ctA:,}", fmt(_tmA,"")],
+                                _p2:          [fmt(_caB,""), f"{_nbB:,}", f"{_ctB:,}", fmt(_tmB,"")],
+                                "Écart":      [fmt(_caA-_caB,""), f"{_nbA-_nbB:+,}",
+                                               f"{_ctA-_ctB:+,}", fmt(_tmA-_tmB,"")],
+                                "Variation":  [f"{_vCA:+.1f}%", f"{_vNB:+.1f}%",
+                                               f"{_vCT:+.1f}%", f"{_vTM:+.1f}%"],
+                            })
+                            st.dataframe(_tbl_cmp, use_container_width=True, hide_index=True)
+
+                            # ── Graphiques comparatifs ───────────────────────
+                            g1, g2 = st.columns(2)
+                            with g1:
+                                fig_cA = go.Figure(go.Bar(
+                                    x=[_p1,_p2], y=[_caA,_caB],
+                                    marker_color=[GREEN, NAVY],
+                                    text=[fmt(_caA,""), fmt(_caB,"")],
+                                    textposition="outside", textfont=dict(size=11)))
+                                fig_cA.update_layout(yaxis=dict(title="CA (FCFA)"))
+                                fig_style(fig_cA, 320, "💰 Chiffre d'affaires")
+                                st.plotly_chart(fig_cA, use_container_width=True)
+                            with g2:
+                                fig_cN = go.Figure()
+                                fig_cN.add_bar(x=[_p1,_p2], y=[_nbA,_nbB],
+                                    name="Quittances", marker_color=AMBER,
+                                    text=[f"{_nbA:,}", f"{_nbB:,}"],
+                                    textposition="outside", textfont=dict(size=10))
+                                fig_cN.add_bar(x=[_p1,_p2], y=[_ctA,_ctB],
+                                    name="Contrats", marker_color=BLUE,
+                                    text=[f"{_ctA:,}", f"{_ctB:,}"],
+                                    textposition="outside", textfont=dict(size=10))
+                                fig_cN.update_layout(barmode="group", yaxis=dict(title="Nombre"))
+                                fig_style(fig_cN, 320, "🧾 Volumes")
+                                st.plotly_chart(fig_cN, use_container_width=True)
+
+                            # ── Comparaison par produit ──────────────────────
+                            _prod_col = next((c for c in ["LIBECATE","NOMPRODUIT"]
+                                              if c in _cmp_base.columns), None)
+                            if _prod_col:
+                                st.markdown("---")
+                                section("Comparaison par produit","CA ET VOLUMES")
+                                _gA = _dA.groupby(_prod_col)[_ca_col].agg(["sum","count"])
+                                _gB = _dB.groupby(_prod_col)[_ca_col].agg(["sum","count"])
+                                _mg = _gA.join(_gB, how="outer", lsuffix="_A", rsuffix="_B").fillna(0)
+                                _mg["Var CA %"] = _mg.apply(
+                                    lambda r: ((r["sum_A"]-r["sum_B"])/abs(r["sum_B"])*100)
+                                              if r["sum_B"] else 0.0, axis=1)
+                                _mg = _mg.sort_values("sum_A", ascending=False).head(12).reset_index()
+
+                                fig_pr = go.Figure()
+                                fig_pr.add_bar(y=_mg[_prod_col].astype(str).str[:24],
+                                    x=_mg["sum_A"], name=str(_p1),
+                                    orientation="h", marker_color=GREEN)
+                                fig_pr.add_bar(y=_mg[_prod_col].astype(str).str[:24],
+                                    x=_mg["sum_B"], name=str(_p2),
+                                    orientation="h", marker_color=NAVY)
+                                fig_pr.update_layout(barmode="group",
+                                    yaxis=dict(autorange="reversed"),
+                                    xaxis=dict(title="CA (FCFA)"),
+                                    legend=dict(orientation="h", y=-0.15))
+                                fig_style(fig_pr, 420, f"🛒 CA par produit — {_p1} vs {_p2}")
+                                st.plotly_chart(fig_pr, use_container_width=True)
+
+                                _disp = _mg.copy()
+                                _disp.columns = [_prod_col, f"CA {_p1}", f"Nb {_p1}",
+                                                 f"CA {_p2}", f"Nb {_p2}", "Var CA %"]
+                                for _c in [f"CA {_p1}", f"CA {_p2}"]:
+                                    _disp[_c] = _disp[_c].apply(lambda x: fmt(x,""))
+                                for _c in [f"Nb {_p1}", f"Nb {_p2}"]:
+                                    _disp[_c] = _disp[_c].astype(int).apply(lambda x: f"{x:,}")
+                                _disp["Var CA %"] = _disp["Var CA %"].apply(lambda x: f"{x:+.1f}%")
+                                st.dataframe(_disp, use_container_width=True, hide_index=True)
+
+                                st.download_button("📥 Export comparaison (CSV)",
+                                    dl_csv(_mg), f"comparaison_{_p1}_vs_{_p2}.csv",
+                                    "text/csv", use_container_width=True, key="dl_cmp_csv")
 
             with t_evo:
                 if "DATECOMP" in df.columns:
@@ -2912,33 +3092,68 @@ elif "Commerciaux" in page and "Partenaires" not in page:
         with c2:
             # Évolution CA Top 5 par année (si ANNEE dispo), sinon distribution
             _ca_k_evo = "CHIFAFFA" if "CHIFAFFA" in df_com.columns else "MONTENCA"
-            _has_annee = "ANNEE" in df_com.columns
             _evo_ok = False
-            if _has_annee:
+            if "ANNEE" in df_com.columns:
+                _dfe = df_com.copy()
+                # Forcer ANNEE en entier (peut arriver en datetime ou en texte)
+                _dfe["_AN"] = pd.to_numeric(_dfe["ANNEE"], errors="coerce")
+                if _dfe["_AN"].isna().all():
+                    _dfe["_AN"] = pd.to_datetime(_dfe["ANNEE"], errors="coerce").dt.year
+                _dfe = _dfe.dropna(subset=["_AN"])
+                _dfe["_AN"] = _dfe["_AN"].astype(int)
+
                 _top5 = grp.head(5)[ag_k].tolist()
-                _evo5 = df_com[df_com[ag_k].isin(_top5)].groupby(
-                    ["ANNEE", ag_k])[_ca_k_evo].sum().reset_index()
-                if not _evo5.empty and _evo5["ANNEE"].nunique() > 1:
+                _evo5 = (_dfe[_dfe[ag_k].isin(_top5)]
+                         .groupby(["_AN", ag_k])[_ca_k_evo].sum().reset_index())
+
+                # Une courbe n'a de sens qu'avec au moins 2 années
+                if not _evo5.empty and _evo5["_AN"].nunique() >= 2:
                     fig_evo = go.Figure()
                     for _nm in _top5:
-                        _d = _evo5[_evo5[ag_k] == _nm].sort_values("ANNEE")
+                        _d = _evo5[_evo5[ag_k] == _nm].sort_values("_AN")
                         if not _d.empty:
                             fig_evo.add_scatter(
-                                x=_d["ANNEE"].astype(str), y=_d[_ca_k_evo],
-                                mode="lines+markers+text",
-                                name=str(_nm)[:20],
-                                text=[fmt(v, "") for v in _d[_ca_k_evo]],
-                                textposition="top center",
-                                textfont=dict(size=8))
+                                x=_d["_AN"].astype(str), y=_d[_ca_k_evo],
+                                mode="lines+markers",
+                                name=str(_nm)[:22],
+                                line=dict(width=2.5), marker=dict(size=7),
+                                hovertemplate="%{fullData.name}<br>%{x} : %{y:,.0f} FCFA<extra></extra>")
+                    fig_evo.update_layout(
+                        xaxis=dict(type="category", title="Année"),
+                        yaxis=dict(title="CA (FCFA)"),
+                        legend=dict(orientation="h", y=-0.18, font=dict(size=9)))
                     fig_style(fig_evo, 420, "📈 Évolution CA — Top 5 apporteurs")
                     st.plotly_chart(fig_evo, use_container_width=True)
                     _evo_ok = True
+                elif not _evo5.empty:
+                    # Une seule année : comparatif en barres verticales
+                    _an_uniq = int(_evo5["_AN"].iloc[0])
+                    _cmp = _evo5.sort_values(_ca_k_evo, ascending=False)
+                    fig_cmp = go.Figure(go.Bar(
+                        x=_cmp[ag_k].astype(str).str[:22], y=_cmp[_ca_k_evo],
+                        marker_color=GREEN,
+                        text=[fmt(v, "") for v in _cmp[_ca_k_evo]],
+                        textposition="outside", textfont=dict(size=9)))
+                    fig_cmp.update_layout(yaxis=dict(title="CA (FCFA)"))
+                    fig_style(fig_cmp, 420, f"📊 CA Top 5 apporteurs — Exercice {_an_uniq}")
+                    st.plotly_chart(fig_cmp, use_container_width=True)
+                    _evo_ok = True
             if not _evo_ok:
-                # Fallback : distribution des CA
-                fig_dist = go.Figure(go.Histogram(
-                    x=grp["CA"], nbinsx=25, marker_color=GREEN, opacity=.85))
-                fig_style(fig_dist, 420, "📊 Distribution du CA par apporteur")
-                st.plotly_chart(fig_dist, use_container_width=True)
+                # Classement en barres horizontales — bien plus lisible
+                # qu'un histogramme quand les CA sont très dispersés
+                _rank = grp.head(15).copy()
+                _rank["_lbl"] = _rank[ag_k].fillna("N/A").astype(str).str[:26]
+                fig_rank = go.Figure(go.Bar(
+                    x=_rank["CA"], y=_rank["_lbl"],
+                    orientation="h", marker_color=GREEN,
+                    text=[fmt(v, "") for v in _rank["CA"]],
+                    textposition="outside", textfont=dict(size=9),
+                    hovertemplate="%{y}<br>CA : %{x:,.0f} FCFA<extra></extra>"))
+                fig_rank.update_layout(
+                    yaxis=dict(autorange="reversed"),
+                    xaxis=dict(title="CA (FCFA)"))
+                fig_style(fig_rank, 420, "📊 Classement CA — Top 15 apporteurs")
+                st.plotly_chart(fig_rank, use_container_width=True)
 
     with t_stat:
         c1,c2 = st.columns(2)
@@ -3575,7 +3790,7 @@ elif "Sinistres" in page:
 # ═══════════════════════════════════════════════════════════════════════════════
 elif "Actuariat" in page:
         section("📐 Actuariat Avancé","CIMA · SAP · BURNING COST · JOINTURES")
-        t_c,t_p,t_l=st.tabs(["🏛️ CIMA & Solvabilité","📌 Provisions SAP","🔗 Liaison inter-bases"])
+        t_c,t_p = st.tabs(["🏛️ CIMA & Solvabilité","📌 Provisions SAP"])
         with t_c:
             if pf is None: alert("Chargez le Portefeuille.","warn")
             else:
@@ -3680,39 +3895,6 @@ elif "Actuariat" in page:
                         "provisions.xlsx",
                         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         use_container_width=True, key="dl_prov_xl")
-        with t_l:
-            section("🔗 Liaison inter-bases","POLICE_KEY · MATCHING · CA × PF × SIN")
-            if pf is not None and ca is not None and "POLICE_KEY" in pf.columns and "POLICE_KEY" in ca.columns:
-                mc=ca["POLICE_KEY"].isin(pf["POLICE_KEY"]).sum()
-                ms=sin["POLICE_KEY"].isin(pf["POLICE_KEY"]).sum() if sin is not None and "POLICE_KEY" in sin.columns else 0
-                mcs=sin["POLICE_KEY"].isin(ca["POLICE_KEY"]).sum() if sin is not None and "POLICE_KEY" in sin.columns and "POLICE_KEY" in ca.columns else 0
-                l1,l2,l3=st.columns(3)
-                kpi(l1,"CA ↔ PF",f"{mc:,}",f"{mc/max(len(ca),1)*100:.1f}% des quittances","teal",icon="🔗")
-                kpi(l2,"SIN ↔ PF",f"{ms:,}",f"{ms/max(len(sin) if sin is not None else 1,1)*100:.1f}%","teal",icon="🔗")
-                kpi(l3,"SIN ↔ CA",f"{mcs:,}",f"{mcs/max(len(sin) if sin is not None else 1,1)*100:.1f}%","blue",icon="🔗")
-                section("📊 Top polices — Jointure CA × PF × SIN","CA DÉCROISSANT")
-                pf_lk=pf[["POLICE_KEY","LIBECATE","ETAT_POLICE","NOM_ASSU","LIBEVILL","NOM_APP"]].drop_duplicates("POLICE_KEY")
-                ca_pf=ca.merge(pf_lk,on="POLICE_KEY",how="inner",suffixes=("","_PF"))
-                if sin is not None and "POLICE_KEY" in sin.columns:
-                    sin_agg=sin.groupby("POLICE_KEY").agg(Regle=(_c_regle_,"sum") if _c_regle_ else ("CHIFAFFA","count"),SAP=(_c_sap_,"sum") if _c_sap_ else ("CHIFAFFA","count"),NbSin=("POLICE_KEY","count")).reset_index()
-                    ca_pf=ca_pf.merge(sin_agg,on="POLICE_KEY",how="left")
-                else:
-                    ca_pf["Réglé"]=np.nan; ca_pf["SAP"]=np.nan; ca_pf["NbSin"]=np.nan
-                tp=ca_pf.groupby(["POLICE_KEY","LIBECATE","ETAT_POLICE","NOM_ASSU","NOM_APP"]).agg(
-                    CA=("CHIFAFFA","sum"),NbQ=("CHIFAFFA","count"),
-                    Regle=("Réglé","first"),SAP=("SAP","first"),NbSin=("NbSin","first")
-                ).reset_index().sort_values("CA",ascending=False).head(30)
-                tp_d=tp.copy()
-                for c_ in ["CA","Réglé","SAP"]: tp_d[c_]=tp_d[c_].apply(lambda x:fmt(x) if pd.notna(x) else "—")
-                tp_d["NbSin"]=tp_d["NbSin"].apply(lambda x:str(int(x)) if pd.notna(x) else "0")
-                st.dataframe(tp_d,use_container_width=True,hide_index=True)
-                a,_=st.columns(2)
-                a.download_button("📥 CSV jointure 3 bases",dl_csv(tp),"jointure_3bases.csv","text/csv",use_container_width=True,key="dl_join3")
-            else: alert("Chargez le Portefeuille et la Base CA.","info")
-
-    # ═══════════════════════════════════════════════════════════════════════════════
-    # 
-# PAGE — PRÉVISIONS & TENDANCES
 # ═══════════════════════════════════════════════════════════════════════════════
 elif "Prévisions" in page:
         section("🔮 Prévisions & Tendances","MODÈLE POLYNOMIAL · SAISONNALITÉ · PROJECTION")
