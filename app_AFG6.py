@@ -2584,20 +2584,23 @@ elif "Analyse CA" in page:
                     _npf = next((c for c in ["NOM_APP","NOM_APPORT","NOM_APPO"]
                                  if pf is not None and c in pf.columns), None)
                     df_i["_CK"] = df_i[_cca].astype(str).str.strip()
+                    # Dictionnaire code -> nom sur bases completes
+                    _mn = {}
                     if _cpf and _npf:
-                        _rf = pf[[_cpf,_npf]].dropna(subset=[_cpf]).astype({_cpf:str})
-                        _rf[_cpf] = _rf[_cpf].str.strip()
-                        _rf = (_rf.groupby(_cpf)[_npf]
-                                 .agg(lambda s: s.dropna().iloc[0] if s.notna().any() else None)
-                                 .reset_index().rename(columns={_cpf:"_CK",_npf:"_NR"}))
-                        df_i = df_i.merge(_rf, on="_CK", how="left")
-                    else:
-                        df_i["_NR"] = None
-                    # Repli sur un nom present dans le CA si le Portefeuille ne donne rien
+                        _t = pf[[_cpf,_npf]].dropna()
+                        _t = _t[_t[_npf].astype(str).str.strip() != ""]
+                        for _c,_n in zip(_t[_cpf].astype(str).str.strip(),
+                                         _t[_npf].astype(str).str.strip()):
+                            _mn.setdefault(_c,_n)
                     _nca = next((c for c in ["NOM_APPORT","NOM_APPO","NOM_INTERMEDIAIRE","NOM_APP"]
-                                 if c in df_i.columns), None)
+                                 if c in ca.columns), None)
                     if _nca:
-                        df_i["_NR"] = df_i["_NR"].fillna(df_i[_nca])
+                        _t2 = ca[[_cca,_nca]].dropna()
+                        _t2 = _t2[_t2[_nca].astype(str).str.strip() != ""]
+                        for _c,_n in zip(_t2[_cca].astype(str).str.strip(),
+                                         _t2[_nca].astype(str).str.strip()):
+                            _mn.setdefault(_c,_n)
+                    df_i["_NR"] = df_i["_CK"].map(_mn)
                     df_i["_APP"] = [
                         (f"{n} ({c})" if pd.notna(n) and str(n).strip() else f"Code {c}")
                         for n, c in zip(df_i["_NR"], df_i["_CK"])]
@@ -3042,17 +3045,26 @@ elif "Commerciaux" in page and "Partenaires" not in page:
         _nom_pf  = next((c for c in ["NOM_APP","NOM_APPORT","NOM_APPO"]
                          if c in pf.columns), None)
         if _code_pf and _nom_pf:
-            # Table de correspondance code -> nom, issue du Portefeuille
-            _ref = (pf[[_code_pf, _nom_pf]].dropna(subset=[_code_pf])
-                      .astype({_code_pf: str}))
-            _ref[_code_pf] = _ref[_code_pf].str.strip()
-            _ref = (_ref.groupby(_code_pf)[_nom_pf]
-                        .agg(lambda s: s.dropna().iloc[0] if s.notna().any() else None)
-                        .reset_index()
-                        .rename(columns={_code_pf: "_CODE_K", _nom_pf: "_NOM_REF"}))
+            # Dictionnaire code -> nom construit sur les bases COMPLETES
+            # (Portefeuille puis CA tous exercices), afin qu'un exercice ou le
+            # nom est absent de la base CA reste correctement libelle.
+            _map_nom = {}
+            _t = pf[[_code_pf, _nom_pf]].dropna()
+            _t = _t[_t[_nom_pf].astype(str).str.strip() != ""]
+            for _c, _n in zip(_t[_code_pf].astype(str).str.strip(),
+                              _t[_nom_pf].astype(str).str.strip()):
+                _map_nom.setdefault(_c, _n)
+            _nca = next((c for c in ["NOM_APPORT","NOM_APPO","NOM_INTERMEDIAIRE","NOM_APP"]
+                         if c in ca.columns), None)
+            if _nca:
+                _t2 = ca[[_code_ca, _nca]].dropna()
+                _t2 = _t2[_t2[_nca].astype(str).str.strip() != ""]
+                for _c, _n in zip(_t2[_code_ca].astype(str).str.strip(),
+                                  _t2[_nca].astype(str).str.strip()):
+                    _map_nom.setdefault(_c, _n)
             df_com = df_com.copy()
-            df_com["_CODE_K"] = df_com[_code_ca].astype(str).str.strip()
-            df_com = df_com.merge(_ref, on="_CODE_K", how="left")
+            df_com["_CODE_K"]  = df_com[_code_ca].astype(str).str.strip()
+            df_com["_NOM_REF"] = df_com["_CODE_K"].map(_map_nom)
             # Libelle final : "NOM (CODE)" ou "CODE" si le nom est absent
             df_com["_APPORTEUR"] = df_com.apply(
                 lambda r: (f"{r['_NOM_REF']} ({r['_CODE_K']})"
@@ -3078,7 +3090,9 @@ elif "Commerciaux" in page and "Partenaires" not in page:
     else:                             _agg_com["Comm"]     = ("CHIFAFFA","count")
     if "POLICE_KEY" in df_com.columns: _agg_com["NbPolices"] = ("POLICE_KEY","nunique")
     else:                              _agg_com["NbPolices"] = ("CHIFAFFA","count")
-    grp = df_com.groupby(ag_k).agg(**_agg_com).reset_index().sort_values("CA",ascending=False).reset_index(drop=True)
+    grp = (df_com.groupby(ag_k, dropna=False).agg(**_agg_com)
+                 .reset_index().sort_values("CA",ascending=False).reset_index(drop=True))
+    grp[ag_k] = grp[ag_k].fillna("Non renseigné").astype(str)
     grp.index += 1
     tot = grp["CA"].sum()
     grp["Part %"]    = (grp["CA"]/max(tot,1)*100).round(2)
@@ -3221,16 +3235,48 @@ elif "Partenaires" in page:
     # Identifier la colonne code intermédiaire : CODEINTE (priorité)
     _col_code = next((c for c in ["CODEINTE","CODE_INTER","CODEINTER","CODEAPPO"]
                       if c in df_part_all.columns), None)
-    # Nom de l'intermédiaire : NOM_APPORT priorité
-    _col_nom  = next((c for c in ["NOM_APPORT","NOM_APPO","NOM_INTERMEDIAIRE","NOM_APP"]
-                      if c in df_part_all.columns), None)
-
     if _col_code is None:
         alert("Colonne code intermédiaire introuvable (CODE_INTER / CODEAPPO).","warn")
         st.stop()
 
-    # Construire CODEAPPO_STR normalisé
-    df_part_all["_CODE_STR"] = df_part_all[_col_code].astype(str).str.strip().str.zfill(3)
+    df_part_all = df_part_all.copy()
+    df_part_all["_CODE_STR"] = (df_part_all[_col_code]
+                                .astype(str).str.strip().str.zfill(3))
+
+    # ── Résolution du nom : le code vient du CA, le nom du Portefeuille ───────
+    # La colonne nom du CA est vide sur certains exercices (ex. 2025) ; on la
+    # complète systématiquement par une table de correspondance code -> nom
+    # construite sur l'INTÉGRALITÉ du Portefeuille et de la base CA.
+    _ref_nom = {}
+
+    # 1) Depuis le Portefeuille (source de référence)
+    if pf is not None:
+        _cpf = next((c for c in ["CODEINTE_P","CODEINTE","CODEAPPO","CODE_APPO"]
+                     if c in pf.columns), None)
+        _npf = next((c for c in ["NOM_APP","NOM_APPORT","NOM_APPO","NOM_INTERMEDIAIRE"]
+                     if c in pf.columns), None)
+        if _cpf and _npf:
+            _t = pf[[_cpf,_npf]].dropna()
+            _t = _t[_t[_npf].astype(str).str.strip() != ""]
+            for _c, _n in zip(_t[_cpf].astype(str).str.strip().str.zfill(3),
+                              _t[_npf].astype(str).str.strip()):
+                _ref_nom.setdefault(_c, _n)
+
+    # 2) Complété par la base CA complète (tous exercices confondus)
+    _nca_all = next((c for c in ["NOM_APPORT","NOM_APPO","NOM_INTERMEDIAIRE","NOM_APP"]
+                     if c in ca.columns), None)
+    if _nca_all:
+        _t2 = ca[[_col_code,_nca_all]].dropna()
+        _t2 = _t2[_t2[_nca_all].astype(str).str.strip() != ""]
+        for _c, _n in zip(_t2[_col_code].astype(str).str.strip().str.zfill(3),
+                          _t2[_nca_all].astype(str).str.strip()):
+            _ref_nom.setdefault(_c, _n)
+
+    # Libellé final : jamais vide
+    df_part_all["_NOM_PART"] = df_part_all["_CODE_STR"].map(_ref_nom)
+    df_part_all["_NOM_PART"] = df_part_all["_NOM_PART"].fillna(
+        "Code " + df_part_all["_CODE_STR"].astype(str))
+    _col_nom = "_NOM_PART"
 
     # Partenaires financiers = code 3 chiffres numériques, hors 100
     def _is_pf(x):
@@ -3249,7 +3295,7 @@ elif "Partenaires" in page:
     p1,p2,p3,p4 = st.columns(4)
     kpi(p1,"CA partenaires",fmt(ca_pf_tot),f"{pct(ca_pf_tot/max(ca_total,1)*100)}","blue",icon="🏦")
     kpi(p2,"CA réseau interne",fmt(ca_ri_tot),f"{pct(ca_ri_tot/max(ca_total,1)*100)}","teal",icon="🏢")
-    kpi(p3,"Nb partenaires",str(df_pf["_CODE_STR"].nunique()),"Codes distincts","",icon="🤝")
+    kpi(p3,"Nb partenaires",nb_full(df_pf["_CODE_STR"].nunique()),"Codes distincts","",icon="🤝")
     _nq_pf = int(df_pf["CHIFAFFA"].count()) if "CHIFAFFA" in df_pf.columns else 1
     kpi(p4,"Ticket moyen",fmt(ca_pf_tot/max(_nq_pf,1)),"CA / quittance","amber",icon="🎫")
 
@@ -3263,43 +3309,59 @@ elif "Partenaires" in page:
                 _grp_cols.append(_col_nom)
             _agg_p = {"CA":("CHIFAFFA","sum"), "NbQ":("CHIFAFFA","count")}
             if "COMMAPPO" in df_pf.columns: _agg_p["Commission"] = ("COMMAPPO","sum")
-            dp = df_pf.groupby(_grp_cols).agg(**_agg_p).reset_index()
+            dp = df_pf.groupby(_grp_cols, dropna=False).agg(**_agg_p).reset_index()
             dp = dp.sort_values("CA",ascending=False)
             dp["Part %"] = (dp["CA"]/max(ca_pf_tot,1)*100).round(2)
             dp.index = range(1, len(dp)+1)
 
             c1p,c2p = st.columns(2)
             with c1p:
-                # Libellé : nom si dispo, sinon code
-                _par_lbl_col = _col_nom if (_col_nom and _col_nom in dp.columns) else "_CODE_STR"
-                _par_lbl15   = dp[_par_lbl_col].astype(str).str[:22].head(15)
-                _par_val15   = dp["CA"].head(15)
+                # Libellé "NOM (CODE)" — jamais vide, jamais un index numérique
+                if _col_nom in dp.columns:
+                    dp["_LBL"] = (dp[_col_nom].fillna("").astype(str).str.strip()
+                                    .str[:24] + " (" + dp["_CODE_STR"].astype(str) + ")")
+                    dp["_LBL"] = dp["_LBL"].str.replace(r"^\s*\(", "Code (", regex=True)
+                else:
+                    dp["_LBL"] = "Code " + dp["_CODE_STR"].astype(str)
+                _par_lbl_col = "_LBL"
+                _d15         = dp.head(15)
+                _par_lbl15   = _d15["_LBL"]
+                _par_val15   = _d15["CA"]
 
                 fig = go.Figure(go.Bar(
                     x=_par_val15, y=_par_lbl15,
                     orientation="h", marker_color=BLUE,
-                    text=[fmt(v) for v in _par_val15],
-                    textposition="outside", textfont=dict(size=9)))
+                    text=[fmt_full(v,"") for v in _par_val15],
+                    textposition="outside", textfont=dict(size=9),
+                    customdata=_par_val15,
+                    hovertemplate="%{y}<br>CA : %{customdata:,.0f} FCFA<extra></extra>"))
                 fig.update_layout(yaxis=dict(autorange="reversed"))
                 _yr_lbl_p = f" · {SEL_YEAR}" if SEL_YEAR else f" · {period_lbl}"
                 fig_style(fig, 420, f"CA par partenaire{_yr_lbl_p}")
                 st.plotly_chart(fig, use_container_width=True)
             with c2p:
                 dp_top = dp.head(10)
-                _pie_lbl = dp_top[_par_lbl_col].astype(str).str[:18]
                 fig2 = go.Figure(go.Pie(
-                    labels=_pie_lbl, values=dp_top["CA"], hole=.4,
-                    textinfo="percent+label", textfont=dict(size=10)))
+                    labels=dp_top["_LBL"].astype(str).str[:26],
+                    values=dp_top["CA"], hole=.4,
+                    textinfo="percent", textfont=dict(size=10),
+                    hovertemplate="%{label}<br>CA : %{value:,.0f} FCFA<br>"
+                                  "Part : %{percent}<extra></extra>"))
+                fig2.update_layout(legend=dict(font=dict(size=9)))
                 fig_style(fig2, 420, "Part de marché — Top 10")
                 st.plotly_chart(fig2, use_container_width=True)
 
             # Tableau — renommer proprement sans réindexer colonnes
-            dp_d = dp.copy()
-            # Formatage des montants
+            dp_d = dp.drop(columns=["_LBL"], errors="ignore").copy()
+            if _col_nom in dp_d.columns:
+                dp_d[_col_nom] = (dp_d[_col_nom].fillna("").astype(str).str.strip()
+                                    .replace("", "—"))
             if "CA" in dp_d.columns:
-                dp_d["CA"] = dp_d["CA"].apply(fmt)
+                dp_d["CA"] = dp_d["CA"].apply(lambda x: fmt_full(x,""))
+            if "NbQ" in dp_d.columns:
+                dp_d["NbQ"] = dp_d["NbQ"].apply(nb_full)
             if "Commission" in dp_d.columns:
-                dp_d["Commission"] = dp_d["Commission"].apply(fmt)
+                dp_d["Commission"] = dp_d["Commission"].apply(lambda x: fmt_full(x,""))
             if "Part %" in dp_d.columns:
                 dp_d["Part %"] = dp_d["Part %"].apply(lambda x: f"{x:.2f}%")
             # Renommer les colonnes de façon lisible
