@@ -468,8 +468,8 @@ def generer_pdf_rapport(pf, ca, sin, period_lbl, user_nom,
     story.append(Spacer(1,20))
     story.append(HRFlowable(width="100%",thickness=1,color=C_GREEN,spaceAfter=6))
     story.append(Paragraph(
-        f"© {date.today().year} AFG Assurances Bénin Vie · Rapport confidentiel · "
-        f"Généré automatiquement par le Dashboard Actuariel Expert v3.0",
+        f"© {date.today().year} AFG Assurances Bénin Vie · Document confidentiel · "
+        f"Département Technique · Diffusion restreinte",
         s_small))
 
     doc.build(story)
@@ -1431,7 +1431,6 @@ ALL_PAGES = [
     "🔮  Prévisions & Tendances",
     "📝  Saisie BIA",
     "🗂️  Base BIA",
-    "📤  Exports",
     "📄  Rapport PDF",
 ]
 # Seule page visible sans aucune base chargée
@@ -5686,7 +5685,53 @@ elif "Base BIA" in page:
                             ("LEFTPADDING",(0,0),(-1,-1),8),
                         ]))
                         story.append(info_t)
-                        story.append(Spacer(1,0.4*cm))
+                        story.append(Spacer(1,0.35*cm))
+
+                        # ── Synthese executive : les chiffres cles en un coup d'oeil ──
+                        _sx_nb  = len(_pf_r) if _pf_r is not None else 0
+                        _sx_act = (int((_pf_r["ETAT_POLICE"].str.strip()=="ACTIF").sum())
+                                   if (_pf_r is not None and "ETAT_POLICE" in _pf_r.columns) else 0)
+                        _sx_ca  = (float(_ca_r["CHIFAFFA"].fillna(0).sum())
+                                   if (_ca_r is not None and "CHIFAFFA" in _ca_r.columns) else 0)
+                        _sx_nq  = len(_ca_r) if _ca_r is not None else 0
+                        _sx_cr  = next((c for c in (_sin_r.columns if _sin_r is not None else [])
+                                        if "glement" in c.lower() and "otal" in c.lower()), None)
+                        _sx_sin = float(_sin_r[_sx_cr].fillna(0).sum()) if _sx_cr else 0
+                        _sx_sp  = (_sx_sin/_sx_ca*100) if _sx_ca else 0
+
+                        story.append(Paragraph("SYNTHÈSE", st_h1))
+                        _sx_rows = [
+                            ["Polices du périmètre", nb_full(_sx_nb),
+                             "Polices actives", nb_full(_sx_act)],
+                            ["Chiffre d'affaires", fmt_full(_sx_ca),
+                             "Quittances émises", nb_full(_sx_nq)],
+                            ["Sinistres réglés", fmt_full(_sx_sin),
+                             "Ratio S/P", f"{_sx_sp:.1f} %"],
+                        ]
+                        _sx_t = Table(_sx_rows, colWidths=[4.6*cm,3.9*cm,4.6*cm,3.9*cm])
+                        _sx_t.setStyle(TableStyle([
+                            ("FONTNAME",(0,0),(0,-1),"Helvetica"),
+                            ("FONTNAME",(2,0),(2,-1),"Helvetica"),
+                            ("FONTNAME",(1,0),(1,-1),"Helvetica-Bold"),
+                            ("FONTNAME",(3,0),(3,-1),"Helvetica-Bold"),
+                            ("FONTSIZE",(0,0),(-1,-1),9),
+                            ("TEXTCOLOR",(1,0),(1,-1),C_G),
+                            ("TEXTCOLOR",(3,0),(3,-1),C_G),
+                            ("ROWBACKGROUNDS",(0,0),(-1,-1),[C_L,C_W]),
+                            ("BOX",(0,0),(-1,-1),.6,C_N),
+                            ("INNERGRID",(0,0),(-1,-1),.25,rl_colors.HexColor("#DDE3EE")),
+                            ("TOPPADDING",(0,0),(-1,-1),6),
+                            ("BOTTOMPADDING",(0,0),(-1,-1),6),
+                            ("LEFTPADDING",(0,0),(-1,-1),8),
+                        ]))
+                        story.append(_sx_t)
+                        story.append(Spacer(1,0.2*cm))
+                        story.append(Paragraph(
+                            f"Le périmètre retenu pour ce rapport est <b>{period_lbl}</b>. "
+                            f"Les montants sont exprimés en francs CFA et arrondis à l'unité. "
+                            f"Chaque section présente les indicateurs, la représentation "
+                            f"graphique associée et une note de lecture.", st_bd))
+                        story.append(Spacer(1,0.35*cm))
                         story.append(HRFlowable(width="100%",thickness=2,color=C_G,spaceAfter=6))
 
                         # 1. KPIs
@@ -5779,6 +5824,38 @@ elif "Base BIA" in page:
                                     f"les trois premiers produits en représentent <b>{_c3:.1f} %</b>, "
                                     f"{'traduisant une concentration marquée à surveiller' if _c3 >= 70 else 'ce qui reflète une répartition équilibrée'}."
                                     .replace(",", " "), st_bd))
+
+                            # Evolution mensuelle du CA sur le perimetre
+                            _cdt = next((c for c in ["DATECOMP","DATEEFFE"]
+                                         if c in _ca_r.columns), None)
+                            if _cdt:
+                                _ev = _ca_r[[_cdt,"CHIFAFFA"]].copy()
+                                _ev["_M"] = pd.to_datetime(_ev[_cdt], errors="coerce")
+                                _ev = _ev.dropna(subset=["_M"])
+                                if not _ev.empty:
+                                    _ev["_ML"] = _ev["_M"].dt.strftime("%Y-%m")
+                                    _evg = (_ev.groupby("_ML")["CHIFAFFA"].sum()
+                                              .reset_index().sort_values("_ML"))
+                                    if len(_evg) >= 2:
+                                        _evg = _evg.tail(12)
+                                        story.append(Spacer(1,0.2*cm))
+                                        story.append(_g_barv(
+                                            _evg["_ML"].tolist(),
+                                            _evg["CHIFAFFA"].tolist(),
+                                            f"Évolution mensuelle du chiffre d'affaires — {period_lbl}"))
+                                        _mx = _evg.loc[_evg["CHIFAFFA"].idxmax()]
+                                        _mn = _evg.loc[_evg["CHIFAFFA"].idxmin()]
+                                        _moy = float(_evg["CHIFAFFA"].mean())
+                                        story.append(Spacer(1,0.12*cm))
+                                        story.append(Paragraph(
+                                            f"<b>Lecture.</b> Sur les {len(_evg)} mois observés, "
+                                            f"la production mensuelle moyenne ressort à "
+                                            f"<b>{fmt_full(_moy)}</b>. Le mois le plus actif est "
+                                            f"<b>{_mx['_ML']}</b> ({fmt_full(_mx['CHIFAFFA'])}), "
+                                            f"le plus faible <b>{_mn['_ML']}</b> "
+                                            f"({fmt_full(_mn['CHIFAFFA'])}), soit un rapport de "
+                                            f"<b>{_mx['CHIFAFFA']/max(_mn['CHIFAFFA'],1):.1f}</b> "
+                                            f"entre les deux extrêmes.", st_bd))
 
                         # 3. Commerciaux
                         if s_com and _ca_r is not None:
@@ -6051,22 +6128,51 @@ elif "Base BIA" in page:
                         story.append(Spacer(1,0.2*cm))
                         story.append(Paragraph(
                             f"<i>Document confidentiel — AFG Assurances Bénin Vie · "
-                            f"Groupe AFG Holding · Conforme CIMA · {_dt.now().strftime('%d/%m/%Y')}</i>",st_sm))
+                            f"Groupe AFG Holding · Conforme CIMA · "
+                            f"Établi le {_dt.now().strftime('%d/%m/%Y')}</i>",st_sm))
+                        story.append(Spacer(1,0.5*cm))
+                        story.append(Table(
+                            [["", ""],
+                             ["Le Département Technique", "Visa de la Direction Générale"],
+                             ["", ""], ["", ""]],
+                            colWidths=[8.5*cm, 8.5*cm],
+                            style=TableStyle([
+                                ("FONTNAME",(0,1),(-1,1),"Helvetica-Bold"),
+                                ("FONTSIZE",(0,0),(-1,-1),8.5),
+                                ("TEXTCOLOR",(0,1),(-1,1),C_N),
+                                ("ALIGN",(0,0),(-1,-1),"CENTER"),
+                                ("LINEABOVE",(0,3),(0,3),.6,C_N),
+                                ("LINEABOVE",(1,3),(1,3),.6,C_N),
+                                ("TOPPADDING",(0,2),(-1,2),22),
+                            ])))
 
                         doc.build(story)
-                        _pdf = _buf.getvalue()
-                        st.success(f"✅ Rapport généré — {len(_pdf)//1024} Ko")
-                        st.download_button("📥 Télécharger le rapport PDF",
-                            data=_pdf,
-                            file_name=f"AFG_Rapport_DG_{period_lbl.replace(' ','_')}_{_dt.now().strftime('%Y%m%d')}.pdf",
-                            mime="application/pdf",
-                            use_container_width=True, type="primary",
-                            key="dl_pdf_final")
+                        # Le PDF est conserve en session : le bouton de
+                        # telechargement reste disponible apres le re-rendu
+                        # declenche par le clic sur "Generer".
+                        st.session_state["_rapport_pdf"] = _buf.getvalue()
+                        st.session_state["_rapport_nom"] = (
+                            f"AFG_Rapport_DG_{period_lbl.replace(' ','_')}"
+                            f"_{_dt.now().strftime('%Y%m%d')}.pdf")
+                        st.session_state["_rapport_lbl"] = period_lbl
                     except ImportError:
                         alert("La bibliothèque <b>reportlab</b> n'est pas installée.", "danger")
                     except Exception as _e:
                         alert(f"Erreur génération PDF : {_e}", "danger")
                         import traceback; st.code(traceback.format_exc())
+
+            # ── Telechargement (persiste entre les re-rendus) ─────────────────
+            if st.session_state.get("_rapport_pdf"):
+                _pdfb = st.session_state["_rapport_pdf"]
+                st.markdown("")
+                st.success(f"Rapport prêt — {len(_pdfb)//1024} Ko · "
+                           f"période {st.session_state.get('_rapport_lbl', period_lbl)}")
+                st.download_button("📥 Télécharger le rapport PDF",
+                    data=_pdfb,
+                    file_name=st.session_state.get("_rapport_nom","rapport_afg.pdf"),
+                    mime="application/pdf",
+                    use_container_width=True, type="primary",
+                    key="dl_pdf_final")
 
 
     # ── FOOTER ────────────────────────────────────────────────────────────────────
