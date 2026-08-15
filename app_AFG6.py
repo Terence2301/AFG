@@ -1442,7 +1442,15 @@ VISIBLE_DEFAULT = ["📝  Saisie BIA"]
 #         Dès qu'AU MOINS une base est chargée  toutes les pages se débloquent.
 #         Ce calcul est fait à chaque rendu (pas besoin de bouton).
 _any_data     = (st.session_state.pf_ok or st.session_state.ca_ok or st.session_state.sin_ok)
-SEL_YEAR = st.session_state.get("sel_year_num", None)
+# L'annee selectionnee est lue depuis la cle du widget : Streamlit restaure
+# l'etat des widgets AVANT d'executer le script, donc la valeur est a jour
+# des le debut du run (contrairement a une cle ecrite plus bas dans la sidebar).
+def _sel_year_now():
+    _v = st.session_state.get("yr_sel", st.session_state.get("filtre_annee"))
+    if _v in (None, "", "Toutes les années"): return None
+    try:    return int(str(_v).strip())
+    except: return None
+SEL_YEAR = _sel_year_now()
 _can_analysis = can_see_analytics(user)   # PDG ou ACTUAIRE uniquement
 _is_courtier  = is_courtier(user)         # Courtiers  Saisie BIA uniquement
 
@@ -2393,8 +2401,13 @@ elif "Analyse CA" in page:
                         else:
                             k1,k2 = st.columns(2)
                             _pA = k1.selectbox("Période A", _pers, index=0, key="cmp_pa")
-                            _pB = k2.selectbox("Période B", _pers,
-                                               index=min(1,len(_pers)-1), key="cmp_pb")
+                            # La periode B ne peut pas etre identique a la periode A :
+                            # elle est retiree de la liste proposee.
+                            _pers_b = [p for p in _pers if p != _pA]
+                            _prevb  = st.session_state.get("cmp_pb")
+                            _ixb    = _pers_b.index(_prevb) if _prevb in _pers_b else 0
+                            _pB = k2.selectbox("Période B  (≠ A)", _pers_b,
+                                               index=_ixb, key="cmp_pb")
                             _dA = _cb[_cb["_PER"] == _pA]
                             _dB = _cb[_cb["_PER"] == _pB]
                             _caA = float(_dA[_cak].fillna(0).sum())
@@ -2679,25 +2692,23 @@ elif "Analyse CA" in page:
 # ═══════════════════════════════════════════════════════════════════════════════
 elif "Portefeuille" in page:
     if pf is None: alert("Chargez le Portefeuille dans la barre latérale.","warn"); st.stop()
-    df_all = pf  # portefeuille complet
-    # Filtre par année via SEL_YEAR (sélecteur sidebar)
+    df_all = pf  # portefeuille complet (reference pour les totaux)
+    # ── Perimetre analyse : annee de saisie (DATESOUS) puis periode ──────────
+    # Priorite : filtre annee de la sidebar > filtre periode > tout
     if SEL_YEAR:
-        _yr_col = next((c for c in ["ANNEESOUS","ANNEE"] if c in pf.columns), None)
-        if _yr_col:
-            fi_yr = pf[pf[_yr_col].astype(str).str.strip() == str(SEL_YEAR)].copy()
-        elif "DATESOUS" in pf.columns:
-            _tmp = pf.copy()
-            _tmp["_yr"] = pd.to_datetime(_tmp["DATESOUS"], errors="coerce").dt.year
-            fi_yr = _tmp[_tmp["_yr"] == SEL_YEAR].copy()
-        else:
-            fi_yr = pf.copy()
-        df = fi_yr if not fi_yr.empty else pf
+        df = pf[year_mask(pf, ["DATESOUS","ANNEESOUS","ANNEE","DATEEFFE"], SEL_YEAR)].copy()
+        _pf_scope = f"Année de saisie {SEL_YEAR}"
     else:
-        df = df_all
+        df = pf_f()
+        _pf_scope = period_lbl
+    if df is None or df.empty:
+        alert(f"Aucune police saisie sur <b>{_pf_scope}</b>. "
+              f"Affichage du portefeuille complet.", "warn")
+        df, _pf_scope = df_all, "Toutes périodes"
 
     # Titre dynamique selon filtre année
-    _pf_yr_lbl = f" · Année {SEL_YEAR}" if SEL_YEAR else ""
-    section(f"📋 Portefeuille{_pf_yr_lbl}","ANALYSE · FILTRES · EXPORT")
+    section(f"📋 Portefeuille — {_pf_scope}",
+            "PÉRIMÈTRE : DATE DE SAISIE · FILTRES · EXPORT")
 
     # Listes de choix construites depuis df (déjà filtré par année si SEL_YEAR)
     _base_opts = df  # base pour les options = données de l'année choisie
@@ -2775,7 +2786,7 @@ elif "Portefeuille" in page:
     coti_p=float(fi["COTI_PERIODIQUE"].fillna(0).sum()) if "COTI_PERIODIQUE" in fi.columns and nb else 0
 
     c1,c2,c3,c4,c5 = st.columns(5)
-    kpi(c1,"Polices filtrées",f"{nb:,}",f"sur {len(df_all):,} total","",icon="📋")
+    kpi(c1,"Polices",nb_full(nb),f"{_pf_scope} · {len(df_all):,} au total".replace(","," "),"",icon="📋")
     kpi(c2,"Actives",f"{actifs:,}",pct(actifs/max(nb,1)*100),"",icon="✅")
     kpi(c3,"Résiliées",f"{resil:,}",pct(resil/max(nb,1)*100),"red",icon="📉")
     kpi(c4,"Encaissements",fmt(monten),"MONTENCA","teal",icon="💰")
@@ -2819,8 +2830,8 @@ elif "Portefeuille" in page:
                              "ECHU":"#5A6478","ASSURE ECHU":"#2C3E50","SUSPENDU":BLUE}
                     ec=fi["ETAT_POLICE"].str.strip().value_counts().reset_index()
                     ec.columns=["État","Nb"]
-                    fig2=go.Figure(go.Pie(labels=ec["Etat"],values=ec["Nb"],hole=.44,
-                        marker_colors=[etat_c_.get(e,"#888") for e in ec["Etat"]],
+                    fig2=go.Figure(go.Pie(labels=ec["État"],values=ec["Nb"],hole=.44,
+                        marker_colors=[etat_c_.get(e,"#888") for e in ec["État"]],
                         textinfo="percent+label", textfont=dict(size=11)))
                     fig_style(fig2,380,"États du portefeuille")
                     st.plotly_chart(fig2,use_container_width=True)
@@ -3553,16 +3564,19 @@ elif "Clients" in page:
 # ═══════════════════════════════════════════════════════════════════════════════
 elif "Sinistres" in page:
     if sin is None: alert("Chargez le fichier Prestations.","warn"); st.stop()
-    df_s = sin  # tout le fichier
-    # Filtre par année
-    if SEL_YEAR and "ANNEE_SIN" in sin.columns:
-        _sin_yr = sin[sin["ANNEE_SIN"] == SEL_YEAR].copy()
-        df_sf = _sin_yr if not _sin_yr.empty else sin_f()
-    elif SEL_YEAR and "Exercice Sinistre" in sin.columns:
-        _sin_yr = sin[sin["Exercice Sinistre"].astype(str) == str(SEL_YEAR)].copy()
-        df_sf = _sin_yr if not _sin_yr.empty else sin_f()
+    df_s = sin  # base complete (reference)
+    # ── Perimetre : exercice sinistre puis periode ───────────────────────────
+    if SEL_YEAR:
+        df_sf = sin[year_mask(sin,
+            ["ANNEE_SIN","Exercice Sinistre","Date Survenance","DATECOMP"],
+            SEL_YEAR)].copy()
+        _sin_scope = f"Exercice {SEL_YEAR}"
     else:
         df_sf = sin_f()
+        _sin_scope = period_lbl
+    if df_sf is None or df_sf.empty:
+        alert(f"Aucun dossier sur <b>{_sin_scope}</b>. Affichage de toutes les périodes.","warn")
+        df_sf, _sin_scope = sin.copy(), "Toutes périodes"
     # Résolution colonnes sinistres — noms exacts vérifiés sur fichier AFG réel
     def _find_col(df, *candidates):
         """
@@ -3617,32 +3631,47 @@ elif "Sinistres" in page:
         st.warning(f"⚠️ Colonnes non trouvées : {_missing_cols} | "
                    f"Colonnes disponibles : {list(sin.columns[:10])}")
 
-    section(f"⚠️ Sinistres & Prestations — {period_lbl}","ANALYSE ACTUARIELLE · SAP · S/P")
+    section(f"⚠️ Sinistres & Prestations — {_sin_scope}","ANALYSE ACTUARIELLE · SAP · S/P")
     # Noms exacts vérifiés sur fichier AFG réel
     _c_tot  = "Réglement Total"     if "Réglement Total"     in sin.columns else next((c for c in sin.columns if "glement" in c and "otal" in c), None)
     _c_sap  = "SAP au 31/12/2025"  if "SAP au 31/12/2025"  in sin.columns else next((c for c in sin.columns if c.startswith("SAP")), None)
     _c_hon  = "Réglement Honoraires" if "Réglement Honoraires" in sin.columns else next((c for c in sin.columns if "glement" in c and "onnor" in c), None)
-    tot_sin = float(sin[_c_tot].fillna(0).sum()) if _c_tot and _c_tot in sin.columns else 0
-    tot_sap = float(sin[_c_sap].fillna(0).sum()) if _c_sap and _c_sap in sin.columns else 0
-    tot_hon = float(sin[_c_hon].fillna(0).sum()) if _c_hon and _c_hon in sin.columns else 0
+    # Tous les indicateurs sont calcules sur le PERIMETRE FILTRE (df_sf)
+    _S = df_sf
+    tot_sin = float(_S[_c_tot].fillna(0).sum()) if _c_tot and _c_tot in _S.columns else 0
+    tot_sap = float(_S[_c_sap].fillna(0).sum()) if _c_sap and _c_sap in _S.columns else 0
+    tot_hon = float(_S[_c_hon].fillna(0).sum()) if _c_hon and _c_hon in _S.columns else 0
     charge_u=tot_sin+tot_sap+tot_hon
-    nb_sin=len(sin); nb_clos=int((sin[_c_sort_]=="Cloturé").sum()) if _c_sort_ and _c_sort_ in sin.columns else 0
-    nb_ouv=int((sin[_c_sort_]=="Ouvert").sum()) if _c_sort_ and _c_sort_ in sin.columns else 0
-    ca_all=float(ca["CHIFAFFA"].fillna(0).sum()) if ca is not None and "CHIFAFFA" in ca.columns else 0
+    nb_sin  = len(_S)
+    nb_clos = int((_S[_c_sort_]=="Cloturé").sum()) if _c_sort_ and _c_sort_ in _S.columns else 0
+    nb_ouv  = int((_S[_c_sort_]=="Ouvert").sum())  if _c_sort_ and _c_sort_ in _S.columns else 0
+    # CA de reference : meme perimetre que les sinistres pour un S/P coherent
+    _ca_ref_df = ca_f() if (ca is not None and SEL_YEAR is None) else (
+                 ca[year_mask(ca,["ANNEE","DATECOMP","DATEEFFE"],SEL_YEAR)]
+                 if (ca is not None and SEL_YEAR) else None)
+    if _ca_ref_df is None or _ca_ref_df.empty: _ca_ref_df = ca
+    ca_all = float(_ca_ref_df["CHIFAFFA"].fillna(0).sum()) if (
+             _ca_ref_df is not None and "CHIFAFFA" in _ca_ref_df.columns) else 0
     sp=tot_sin/max(ca_all,1)*100; cout_m=tot_sin/max(nb_clos,1)
     actifs_n=int((pf["ETAT_POLICE"].str.strip()=="ACTIF").sum()) if pf is not None and "ETAT_POLICE" in pf.columns else 1
     burning=charge_u/max(actifs_n,1)*1000
 
     c1,c2,c3,c4,c5,c6=st.columns(6)
-    kpi(c1,"Total réglé",fmt(tot_sin),"Toutes périodes","red",icon="💊")
-    kpi(c2,"SAP (provisions)",fmt(tot_sap),"Au 31/12/2025","amber",icon="📌")
-    kpi(c3,"Charge ultime",fmt(charge_u),"Réglé+SAP+Hon.","red",icon="⚖️")
-    kpi(c4,"Ratio S/P",pct(sp),"vs CA","red" if sp>80 else "amber",icon="📐")
-    kpi(c5,"Coût moy/clos",fmt(cout_m),"Dossiers clos","teal",icon="💰")
-    kpi(c6,"Burning Cost",fmt(burning),"Charge/1 000 actifs","red",icon="🔥")
+    kpi(c1,"Total réglé",     fmt_full(tot_sin), _sin_scope,            "red",  icon="💊")
+    kpi(c2,"SAP (provisions)",fmt_full(tot_sap), "Provisions restantes","amber",icon="📌")
+    kpi(c3,"Charge ultime",   fmt_full(charge_u),"Réglé+SAP+Honoraires","red",  icon="⚖️")
+    kpi(c4,"Ratio S/P",       pct(sp),           "vs CA même période",
+        "red" if sp>80 else "amber", icon="📐")
+    kpi(c5,"Coût moy/clos",   fmt_full(cout_m),  f"{nb_clos:,} dossiers clos".replace(","," "),
+        "teal", icon="💰")
+    kpi(c6,"Burning Cost",    fmt_full(burning), "Charge/1 000 actifs", "red", icon="🔥")
 
-    if not df_sf.empty and len(df_sf)<len(sin):
-        alert(f"Période filtrée : {len(df_sf):,} dossiers (sur {len(sin):,}) pour {period_lbl}. Les KPIs ci-dessus couvrent toutes les périodes.","info")
+    st.markdown(f"<div style='font-size:11px;color:#667;margin:4px 0 10px'>"
+                f"Périmètre : <b>{_sin_scope}</b> — "
+                f"<b>{nb_full(nb_sin)}</b> dossiers sur {nb_full(len(sin))} "
+                f"({nb_sin/max(len(sin),1)*100:.1f} %) · "
+                f"{nb_full(nb_ouv)} ouverts · {nb_full(nb_clos)} clos</div>",
+                unsafe_allow_html=True)
 
     t_n,t_e,t_p,t_tri,t_r=st.tabs(["🏷️ Par nature","📈 Évolution","🛒 Par produit","📐 Triangle dev.","🔍 Données brutes"])
 
@@ -3742,24 +3771,37 @@ elif "Sinistres" in page:
         section("Triangle de développement — Décès",
                 "SURVENANCE (lignes) × COMPTABILISATION (colonnes) · RÈGLEMENTS")
 
-        # ── 1. Isoler les DÉCÈS et les regrouper sous un libellé unique ────────
-        _tri_src = df_sf.copy() if not df_sf.empty else sin.copy()
+        # ── 1. Isoler les DÉCÈS sur la base COMPLÈTE ──────────────────────────
+        # Un triangle de développement se construit toujours sur l'historique
+        # intégral : le filtre de période de la barre latérale ne s'y applique
+        # pas, sinon les exercices antérieurs disparaîtraient et les facteurs
+        # de développement seraient faux.
+        _tri_src = sin.copy()
         _c_nat_t = next((c for c in _tri_src.columns
                          if "ature" in c.lower() and "ini" in c.lower()), None)
         if _c_nat_t:
             _msk_dc = _tri_src[_c_nat_t].astype(str).str.upper().str.contains(
                 r"D[EÉ]C[EÈ]|DECES|DEATH|MORTAL", regex=True, na=False)
-            _n_avant = len(_tri_src)
-            _tri_src = _tri_src[_msk_dc].copy()
+            _n_avant  = len(_tri_src)
+            _natures  = sorted(_tri_src.loc[_msk_dc, _c_nat_t].dropna().unique().tolist())
+            _tri_src  = _tri_src[_msk_dc].copy()
+            _nb_deces = len(_tri_src)
             if _tri_src.empty:
-                alert("Aucun dossier de nature DÉCÈS sur la période sélectionnée.","warn")
-                st.stop()
-            # Toutes les variantes de libellé décès sont fusionnées
-            _natures = sorted(_tri_src[_c_nat_t].dropna().unique().tolist())
-            _tri_src[_c_nat_t] = "Décès"
-            st.info(f"ℹ️ {len(_tri_src):,} dossiers **Décès** retenus sur {_n_avant:,} "
-                    f"— {len(_natures)} libellé(s) fusionné(s) : {', '.join(str(n)[:28] for n in _natures[:6])}"
-                    + (" …" if len(_natures) > 6 else ""))
+                alert("Aucun dossier de nature <b>Décès</b> dans la base Prestations. "
+                      "Vérifiez la colonne « Nature Sinistre ».","warn")
+            else:
+                _tri_src[_c_nat_t] = "Décès"
+                d1, d2, d3 = st.columns(3)
+                kpi(d1, "Décès recensés", nb_full(_nb_deces),
+                    f"sur {nb_full(_n_avant)} dossiers", "red", icon="🕯️")
+                kpi(d2, "Part des décès", f"{_nb_deces/max(_n_avant,1)*100:.1f} %",
+                    "de la base Prestations", "amber", icon="📊")
+                kpi(d3, "Libellés fusionnés", nb_full(len(_natures)),
+                    "regroupés sous « Décès »", "teal", icon="🔗")
+                st.caption("Historique intégral — le filtre de période ne s'applique "
+                           "pas au triangle. Libellés regroupés : "
+                           + ", ".join(str(n)[:30] for n in _natures[:8])
+                           + (" …" if len(_natures) > 8 else ""))
         else:
             alert("Colonne « Nature Sinistre » introuvable — triangle sur tous les dossiers.","warn")
 
@@ -4066,6 +4108,12 @@ elif "Saisie BIA" in page:
     kpi(c2,"Validés",str(nb_val),f"{nb_val/max(nb_bia,1)*100:.0f}%","",icon="✅")
     kpi(c3,"Cotisations",fmt(cot_tot),"Total FCFA","blue",icon="💰")
 
+    # Callback de selection produit : evite le NotFoundError (removeChild)
+    # provoque par un st.rerun() declenche depuis l'interieur d'un expander.
+    def _pick_prod(code):
+        st.session_state["bia_prod"] = code
+        st.session_state["bia_step"] = 2
+
     # ── Étape 1 : Sélection du produit ─────────────────────────────────────────
     _is_crt_step = is_courtier(user)
     GC = {"Groupe 1": RED, "Groupe 2": GREEN}   # défini AVANT tout usage
@@ -4164,9 +4212,9 @@ elif "Saisie BIA" in page:
                     200 F/mois  Capital 200 000 F  (unique : 2 000 F)<br>
                     300 F/mois  Capital 300 000 F  (unique : 3 000 F)
                   </div></div>""", unsafe_allow_html=True)
-                if st.button("Choisir AVIGBO (221)", key="bp_221", use_container_width=True):
-                    st.session_state["bia_prod"]="221"
-                    st.session_state["bia_step"]=2; st.rerun()
+                st.button("Choisir AVIGBO (221)", key="bp_221",
+                          use_container_width=True,
+                          on_click=_pick_prod, args=("221",))
             with col_b:
                 st.markdown(f"""<div style="border:2px solid {RED}44;border-radius:10px;
                   padding:12px 14px;margin-bottom:6px">
@@ -4179,9 +4227,9 @@ elif "Saisie BIA" in page:
                     800 F/mois  Capital 1 000 000 F (unique : 96 000 F)<br>
                     1 200 F/mois  Capital 1 500 000 F (unique : 144 000 F)
                   </div></div>""", unsafe_allow_html=True)
-                if st.button("Choisir VIGNINOU (220)", key="bp_220", use_container_width=True):
-                    st.session_state["bia_prod"]="220"
-                    st.session_state["bia_step"]=2; st.rerun()
+                st.button("Choisir VIGNINOU (220)", key="bp_220",
+                          use_container_width=True,
+                          on_click=_pick_prod, args=("220",))
 
         # Prévoyance Auto (PA0) — visible pour PDG et ACTUAIRE
         with st.expander("🚗 Prévoyance Auto (PA0)", expanded=False):
@@ -4197,9 +4245,9 @@ elif "Saisie BIA" in page:
                 1 500 FCFA/an  Capital 350 000 FCFA<br>
                 2 000 FCFA/an  Capital 500 000 FCFA
               </div></div>""", unsafe_allow_html=True)
-            if st.button("Choisir Prévoyance Auto (PA0)", key="bp_PA0", use_container_width=True):
-                st.session_state["bia_prod"]="PA0"
-                st.session_state["bia_step"]=2; st.rerun()
+            st.button("Choisir Prévoyance Auto (PA0)", key="bp_PA0",
+                      use_container_width=True,
+                      on_click=_pick_prod, args=("PA0",))
 
         with st.expander("💰 Groupe 2 — Épargne & Capitalisation", expanded=True):
             st.markdown(f"""<div style="border:2px solid {GREEN}44;border-radius:10px;
@@ -4212,9 +4260,9 @@ elif "Saisie BIA" in page:
                 Périodicités : Journalière · Hebdomadaire · Mensuelle · Trimestrielle · Semestrielle · Annuelle · Unique<br>
                 Chargements : 1% acquisition + 0.5% gestion · Taux technique : 3.5%
               </div></div>""", unsafe_allow_html=True)
-            if st.button("Choisir Épargne", key="bp_EP0", use_container_width=True):
-                st.session_state["bia_prod"]="EP0"
-                st.session_state["bia_step"]=2; st.rerun()
+            st.button("Choisir Épargne", key="bp_EP0",
+                      use_container_width=True,
+                      on_click=_pick_prod, args=("EP0",))
 
         if "bia_prod" not in st.session_state:
             alert("Sélectionnez un produit pour afficher le formulaire BIA.","info")
