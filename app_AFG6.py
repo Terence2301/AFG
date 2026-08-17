@@ -478,6 +478,21 @@ def generer_pdf_rapport(pf, ca, sin, period_lbl, user_nom,
 
 
 
+def normaliser_nature(serie):
+    """Regroupe les variantes de deces sous un libelle unique.
+
+    « Deces », « Deces Membre », « Deces Emprunteur », « Deces Conjoint »…
+    deviennent tous « Deces ». Les autres natures sont laissees intactes,
+    seule la casse est harmonisee (Titre).
+    """
+    s = serie.astype(str).str.strip()
+    msk = s.str.upper().str.contains(r"D[EÉ]C[EÈ]|DECES|DEATH|MORTAL",
+                                     regex=True, na=False)
+    out = s.str.title()
+    out[msk] = "Décès"
+    return out
+
+
 def _fmt_periode(periodicite: str) -> str:
     return {"Journalière":"jour","Hebdomadaire":"sem.","Mensuelle":"mois",
             "Trimestrielle":"trim.","Semestrielle":"sem.","Annuelle":"an","Unique":"unique"}.get(periodicite, periodicite)
@@ -3310,7 +3325,127 @@ elif "Partenaires" in page:
     kpi(p4,"Ticket moyen",fmt(ca_pf_tot/max(_nq_pf,1)),"CA / quittance","amber",icon="🎫")
 
     st.markdown("")
-    tp1,tp2,tp3 = st.tabs(["📊 Par partenaire","🥧 Réseau vs Partenaires","🔍 Données brutes"])
+    tp1,tp2,tpE,tp3 = st.tabs(["📊 Par partenaire","🥧 Réseau vs Partenaires",
+                               "📈 Évolution & comparaison N/N-1","🔍 Données brutes"])
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  EVOLUTION MENSUELLE PAR PARTENAIRE + COMPARAISON N vs N-1
+    #  Le perimetre est volontairement la base CA complete : une comparaison
+    #  annuelle exige de disposer des deux exercices simultanement.
+    # ══════════════════════════════════════════════════════════════════════════
+    with tpE:
+        _ev_base = ca.copy()
+        _ev_base["_CODE_STR"] = (_ev_base[_col_code].astype(str)
+                                 .str.strip().str.zfill(3))
+        _ev_base["_NOM_PART"] = _ev_base["_CODE_STR"].map(_ref_nom)
+        _ev_base["_NOM_PART"] = _ev_base["_NOM_PART"].fillna(
+            "Code " + _ev_base["_CODE_STR"].astype(str))
+        _ev_base["_LBL"] = (_ev_base["_NOM_PART"].astype(str).str[:26]
+                            + " (" + _ev_base["_CODE_STR"] + ")")
+        # Restreindre aux partenaires financiers : code 3 chiffres, hors 100
+        _mp = (_ev_base["_CODE_STR"].str.fullmatch(r"\d{3}", na=False)
+               & (_ev_base["_CODE_STR"] != "100"))
+        _ev_base = _ev_base[_mp]
+
+        _cdt_e = next((c for c in ["DATECOMP","DATEEFFE","DATESOUS"]
+                       if c in _ev_base.columns), None)
+        if _cdt_e is None or _ev_base.empty:
+            alert("Aucune date exploitable pour construire l'évolution mensuelle.","warn")
+        else:
+            _ev_base["_DT"] = pd.to_datetime(_ev_base[_cdt_e], errors="coerce")
+            _ev_base = _ev_base.dropna(subset=["_DT"])
+            _ev_base["_AN"]   = _ev_base["_DT"].dt.year
+            _ev_base["_MOIS"] = _ev_base["_DT"].dt.month
+            _cak = "CHIFAFFA" if "CHIFAFFA" in _ev_base.columns else "MONTENCA"
+
+            # ── Selecteurs ────────────────────────────────────────────────────
+            _tous  = ["Tous les partenaires"] + sorted(
+                        _ev_base.groupby("_LBL")[_cak].sum()
+                                .sort_values(ascending=False).index.tolist())
+            _annees_e = sorted(_ev_base["_AN"].dropna().astype(int).unique().tolist(),
+                               reverse=True)
+            e1,e2 = st.columns([2,1])
+            _part_sel = e1.selectbox("Partenaire", _tous, key="part_evo_sel")
+            _an_n     = e2.selectbox("Exercice N", _annees_e,
+                                     index=0, key="part_evo_an")
+            _an_n1    = _an_n - 1
+
+            _dfe = _ev_base if _part_sel == "Tous les partenaires" else \
+                   _ev_base[_ev_base["_LBL"] == _part_sel]
+
+            _MOIS_FR = ["Jan","Fév","Mar","Avr","Mai","Juin",
+                        "Juil","Août","Sep","Oct","Nov","Déc"]
+
+            # ── 1. Evolution mensuelle : N et N-1 superposes ──────────────────
+            _sN  = (_dfe[_dfe["_AN"] == _an_n ].groupby("_MOIS")[_cak].sum()
+                        .reindex(range(1,13), fill_value=0))
+            _sN1 = (_dfe[_dfe["_AN"] == _an_n1].groupby("_MOIS")[_cak].sum()
+                        .reindex(range(1,13), fill_value=0))
+
+            figE = go.Figure()
+            if _sN1.sum() > 0:
+                figE.add_bar(x=_MOIS_FR, y=_sN1.values, name=f"{_an_n1}",
+                    marker_color=NAVY, opacity=.55,
+                    hovertemplate="%{x} "+str(_an_n1)+"<br>%{y:,.0f} FCFA<extra></extra>")
+            figE.add_bar(x=_MOIS_FR, y=_sN.values, name=f"{_an_n}",
+                marker_color=GREEN,
+                hovertemplate="%{x} "+str(_an_n)+"<br>%{y:,.0f} FCFA<extra></extra>")
+            figE.add_scatter(x=_MOIS_FR, y=_sN.values, mode="lines+markers",
+                name=f"Tendance {_an_n}", line=dict(color=RED, width=2))
+            figE.update_layout(barmode="group",
+                               yaxis=dict(title="CA (FCFA)"),
+                               legend=dict(orientation="h", y=-0.16))
+            fig_style(figE, 400,
+                      f"Évolution mensuelle — {_part_sel} · {_an_n} vs {_an_n1}")
+            st.plotly_chart(figE, use_container_width=True)
+
+            # ── 2. Comparaison mois par mois N / N-1 ──────────────────────────
+            _cmp = pd.DataFrame({
+                "Mois":  _MOIS_FR,
+                f"{_an_n1}": _sN1.values,
+                f"{_an_n}":  _sN.values,
+            })
+            _cmp["Écart"] = _cmp[f"{_an_n}"] - _cmp[f"{_an_n1}"]
+            _cmp["Var %"] = np.where(_cmp[f"{_an_n1}"] > 0,
+                                     _cmp["Écart"] / _cmp[f"{_an_n1}"] * 100,
+                                     np.nan)
+
+            figV = go.Figure(go.Bar(
+                x=_MOIS_FR, y=_cmp["Var %"],
+                marker_color=[GREEN if (pd.notna(v) and v >= 0) else RED
+                              for v in _cmp["Var %"]],
+                text=[("—" if pd.isna(v) else f"{v:+.0f}%") for v in _cmp["Var %"]],
+                textposition="outside", textfont=dict(size=9),
+                hovertemplate="%{x}<br>Variation : %{y:+.1f}%<extra></extra>"))
+            figV.add_hline(y=0, line_color="#888", line_width=1)
+            figV.update_layout(yaxis=dict(title="Variation (%)"))
+            fig_style(figV, 300, f"Variation mensuelle {_an_n} / {_an_n1}")
+            st.plotly_chart(figV, use_container_width=True)
+
+            # ── 3. Indicateurs de synthese ────────────────────────────────────
+            _tN, _tN1 = float(_sN.sum()), float(_sN1.sum())
+            _vG  = ((_tN - _tN1)/_tN1*100) if _tN1 else 0
+            _mMx = _cmp.loc[_cmp[f"{_an_n}"].idxmax()]
+            _nbM = int((_cmp[f"{_an_n}"] > 0).sum())
+            g1,g2,g3,g4 = st.columns(4)
+            kpi(g1, f"CA {_an_n}",  fmt_full(_tN),  f"{_nbM} mois actifs", "teal", icon="💰")
+            kpi(g2, f"CA {_an_n1}", fmt_full(_tN1), "Exercice précédent",  "",     icon="📅")
+            kpi(g3, "Variation",    f"{_vG:+.1f} %", f"{_an_n} vs {_an_n1}",
+                "teal" if _vG >= 0 else "red", icon="📈" if _vG >= 0 else "📉")
+            kpi(g4, "Meilleur mois", str(_mMx["Mois"]), fmt_full(_mMx[f"{_an_n}"]),
+                "blue", icon="🏆")
+
+            # ── 4. Tableau detaille ───────────────────────────────────────────
+            _cmp_d = _cmp.copy()
+            for _c in [f"{_an_n1}", f"{_an_n}", "Écart"]:
+                _cmp_d[_c] = _cmp_d[_c].apply(lambda x: fmt_full(x, ""))
+            _cmp_d["Var %"] = _cmp["Var %"].apply(
+                lambda x: "—" if pd.isna(x) else f"{x:+.1f} %")
+            st.dataframe(_cmp_d, use_container_width=True, hide_index=True)
+            st.download_button("📥 Export comparaison mensuelle",
+                dl_csv(_cmp), f"evolution_{_an_n}_vs_{_an_n1}.csv", "text/csv",
+                use_container_width=True, key="dl_evo_part")
+
 
     with tp1:
         if not df_pf.empty:
@@ -3677,7 +3812,10 @@ elif "Sinistres" in page:
     with t_n:
         if _c_nat_ and _c_regle_:
             try:
-                nat = _safe_groupby(sin, _c_nat_,
+                # Les variantes de deces sont fusionnees sous un libelle unique
+                _sn = df_sf.copy()
+                _sn[_c_nat_] = normaliser_nature(_sn[_c_nat_])
+                nat = _safe_groupby(_sn, _c_nat_,
                     {"Nb":(_c_nat_,"count"),
                      "Réglé":(_c_regle_,"sum"),
                      **( {"SAP":(_c_sap_,"sum")} if _c_sap_ else {})},
@@ -5841,7 +5979,8 @@ elif "Rapport PDF" in page:
                                     story.append(Spacer(1,0.2*cm))
                                     story.append(_g_barv(
                                         _evg["_ML"].tolist(),
-                                        _evg["CHIFAFFA"].tolist(),
+                                        [_evg["CHIFAFFA"].tolist()],
+                                        ["Chiffre d'affaires"],
                                         f"Évolution mensuelle du chiffre d'affaires — {period_lbl}"))
                                     _mx = _evg.loc[_evg["CHIFAFFA"].idxmax()]
                                     _mn = _evg.loc[_evg["CHIFAFFA"].idxmin()]
@@ -5948,6 +6087,69 @@ elif "Rapport PDF" in page:
                                     _pw = [2*cm,6*cm,4.5*cm,4.5*cm] if _col_ni else [3*cm,8*cm,6*cm]
                                     story.append(_tbl_style(_pD, _pw))
 
+                        # ── Comparaison de production N / N-1 ─────────────────
+                        # Etablie sur la base CA complete : une comparaison
+                        # annuelle suppose de disposer des deux exercices.
+                        _cd_r = next((c for c in ["DATECOMP","DATEEFFE","DATESOUS"]
+                                      if c in ca.columns), None)
+                        if _cd_r:
+                            _rb = ca.copy()
+                            _rb["_DT"] = pd.to_datetime(_rb[_cd_r], errors="coerce")
+                            _rb = _rb.dropna(subset=["_DT"])
+                            _rb["_AN"] = _rb["_DT"].dt.year
+                            _cak_r = "CHIFAFFA" if "CHIFAFFA" in _rb.columns else "MONTENCA"
+                            _ans_r = sorted(_rb["_AN"].unique().tolist())
+                            if len(_ans_r) >= 2:
+                                _aN, _aN1 = int(_ans_r[-1]), int(_ans_r[-2])
+                                _mN  = (_rb[_rb["_AN"]==_aN ].groupby(_rb["_DT"].dt.month)[_cak_r]
+                                          .sum().reindex(range(1,13), fill_value=0))
+                                _mN1 = (_rb[_rb["_AN"]==_aN1].groupby(_rb["_DT"].dt.month)[_cak_r]
+                                          .sum().reindex(range(1,13), fill_value=0))
+                                _MFR = ["Jan","Fév","Mar","Avr","Mai","Juin",
+                                        "Juil","Août","Sep","Oct","Nov","Déc"]
+                                story.append(Spacer(1,0.25*cm))
+                                story.append(Paragraph(
+                                    f"Production mensuelle comparée — {_aN} / {_aN1} :", st_h2))
+                                story.append(_g_barv(
+                                    _MFR, [_mN1.tolist(), _mN.tolist()],
+                                    [str(_aN1), str(_aN)],
+                                    f"Chiffre d'affaires mensuel — {_aN} vs {_aN1}",
+                                    h=7*cm))
+
+                                _tN_r, _tN1_r = float(_mN.sum()), float(_mN1.sum())
+                                _vr = ((_tN_r-_tN1_r)/_tN1_r*100) if _tN1_r else 0
+                                _cmpR = [["Mois", f"{_aN1} (FCFA)", f"{_aN} (FCFA)",
+                                          "Écart", "Var."]]
+                                for _k in range(12):
+                                    _v1, _v0 = float(_mN.iloc[_k]), float(_mN1.iloc[_k])
+                                    _vv = ((_v1-_v0)/_v0*100) if _v0 else None
+                                    _cmpR.append([_MFR[_k], fmt_full(_v0,""), fmt_full(_v1,""),
+                                                  fmt_full(_v1-_v0,""),
+                                                  "—" if _vv is None else f"{_vv:+.0f} %"])
+                                _cmpR.append(["TOTAL", fmt_full(_tN1_r,""), fmt_full(_tN_r,""),
+                                              fmt_full(_tN_r-_tN1_r,""), f"{_vr:+.1f} %"])
+                                story.append(Spacer(1,0.15*cm))
+                                story.append(_tbl_style(_cmpR,
+                                    [2.4*cm,3.9*cm,3.9*cm,3.6*cm,2.7*cm]))
+
+                                _nb_h = int(sum(1 for _k in range(12)
+                                                if _mN.iloc[_k] > _mN1.iloc[_k]))
+                                _sens = "progresse" if _vr >= 0 else "recule"
+                                story.append(Spacer(1,0.15*cm))
+                                story.append(Paragraph(
+                                    f"<b>Lecture.</b> La production {_sens} de "
+                                    f"<b>{abs(_vr):.1f} %</b> entre {_aN1} et {_aN}, "
+                                    f"passant de <b>{fmt_full(_tN1_r)}</b> à "
+                                    f"<b>{fmt_full(_tN_r)}</b>. "
+                                    f"<b>{_nb_h} mois sur 12</b> affichent une production "
+                                    f"supérieure à celle de l'exercice précédent"
+                                    + (", ce qui traduit une dynamique installée."
+                                       if _nb_h >= 8 else
+                                       ", signe d'une reprise encore inégale."
+                                       if _nb_h >= 5 else
+                                       ", ce qui appelle un examen des causes du retrait."),
+                                    st_bd))
+
                     # 4. Sinistres
                     if s_sin and _sin_r is not None:
                         story.append(Spacer(1,0.3*cm))
@@ -5981,20 +6183,73 @@ elif "Rapport PDF" in page:
                                 f"Décomposition de la charge sinistres — {period_lbl}",
                                 h=6*cm))
 
-                        # Graphique : sinistres par nature (top 6)
+                        # Structure de la charge par nature de sinistre
+                        # Les variantes de deces sont regroupees sous un libelle unique
                         _c_nat_r = next((c for c in _sin_r.columns
                                          if "ature" in c.lower() and "ini" in c.lower()), None)
                         _c_reg_r = next((c for c in _sin_r.columns
                                          if "glement" in c.lower() and "otal" in c.lower()), None)
+                        _c_sap_r = next((c for c in _sin_r.columns
+                                         if c.upper().startswith("SAP")), None)
                         if _c_nat_r and _c_reg_r:
-                            _gn = (_sin_r.groupby(_c_nat_r)[_c_reg_r].sum()
-                                   .sort_values(ascending=False).head(6))
-                            if not _gn.empty and _gn.sum() > 0:
+                            _sr = _sin_r.copy()
+                            _sr[_c_nat_r] = normaliser_nature(_sr[_c_nat_r])
+                            _agg_n = {"Nb": (_c_nat_r,"count"), "Regle": (_c_reg_r,"sum")}
+                            if _c_sap_r: _agg_n["SAP"] = (_c_sap_r,"sum")
+                            _gnat = _sr.groupby(_c_nat_r).agg(**_agg_n).reset_index()
+                            if "SAP" not in _gnat.columns: _gnat["SAP"] = 0.0
+                            _gnat["Charge"] = _gnat["Regle"] + _gnat["SAP"]
+                            _gnat = _gnat.sort_values("Charge", ascending=False)
+                            _tot_ch = float(_gnat["Charge"].sum())
+
+                            if not _gnat.empty and _tot_ch > 0:
+                                # Tableau : poids de chaque nature dans la charge
+                                _nt = [["Nature de sinistre","Dossiers","Réglé (FCFA)",
+                                        "SAP (FCFA)","Charge","Part"]]
+                                for _, _r in _gnat.head(8).iterrows():
+                                    _nt.append([
+                                        str(_r[_c_nat_r])[:30],
+                                        nb_full(int(_r["Nb"])),
+                                        fmt_full(_r["Regle"], ""),
+                                        fmt_full(_r["SAP"], ""),
+                                        fmt_full(_r["Charge"], ""),
+                                        f"{_r['Charge']/_tot_ch*100:.1f} %"])
+                                story.append(Spacer(1,0.2*cm))
+                                story.append(Paragraph(
+                                    "Décomposition de la charge par nature "
+                                    "(décès regroupés) :", st_h2))
+                                story.append(_tbl_style(_nt,
+                                    [4.3*cm,2*cm,2.9*cm,2.6*cm,2.9*cm,1.8*cm]))
+
+                                # Graphique en barres : charge par nature
+                                _g8 = _gnat.head(8)
                                 story.append(Spacer(1,0.15*cm))
                                 story.append(_g_barh(
-                                    _gn.index.astype(str).tolist(), _gn.values.tolist(),
-                                    f"Règlements par nature de sinistre — {period_lbl}",
+                                    _g8[_c_nat_r].astype(str).tolist(),
+                                    _g8["Charge"].tolist(),
+                                    f"Charge par nature de sinistre — {period_lbl}",
                                     h=6.5*cm, coul=C_R))
+
+                                # Note de lecture sur la concentration
+                                _n1  = _gnat.iloc[0]
+                                _p1  = float(_n1["Charge"])/_tot_ch*100
+                                _p3  = float(_gnat.head(3)["Charge"].sum())/_tot_ch*100
+                                _dc  = _gnat[_gnat[_c_nat_r].astype(str)
+                                             .str.upper().str.startswith("DÉCÈS")]
+                                _pdc = (float(_dc["Charge"].sum())/_tot_ch*100
+                                        if not _dc.empty else 0)
+                                _ndc = int(_dc["Nb"].sum()) if not _dc.empty else 0
+                                story.append(Spacer(1,0.15*cm))
+                                story.append(Paragraph(
+                                    f"<b>Lecture.</b> La charge se concentre sur "
+                                    f"<b>{str(_n1[_c_nat_r])[:32]}</b>, qui absorbe "
+                                    f"<b>{_p1:.1f} %</b> du total ; les trois premières "
+                                    f"natures en cumulent <b>{_p3:.1f} %</b>. "
+                                    + (f"Le risque décès, toutes garanties confondues, "
+                                       f"représente <b>{_ndc:,} dossiers</b> pour "
+                                       f"<b>{_pdc:.1f} %</b> de la charge."
+                                       .replace(",", " ") if _ndc else ""),
+                                    st_bd))
 
                         # Commentaire analytique
                         _sp_msg = ("en conformité avec la norme CIMA (seuil ≤ 80 %)"
