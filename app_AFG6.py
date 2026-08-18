@@ -4256,10 +4256,15 @@ elif "Saisie BIA" in page:
         st.session_state.pop("bia_step", None)
 
     # ── Étape 1 : Sélection du produit ─────────────────────────────────────────
-    _is_crt_step = is_courtier(user)
+    # _is_courtier_role : l'utilisateur est un courtier, il n'accède qu'à PA0.
+    # _is_crt_step      : le formulaire suit le parcours court en 3 étapes.
+    #                     Ce parcours s'applique à Prévoyance Auto quel que
+    #                     soit l'utilisateur (courtier, PDG ou actuaire).
+    _is_courtier_role = is_courtier(user)
+    _is_crt_step      = _is_courtier_role
     GC = {"Groupe 1": RED, "Groupe 2": GREEN}   # défini AVANT tout usage
 
-    if _is_crt_step:
+    if _is_courtier_role:
         # ── COURTIER : flux PA0 uniquement ───────────────────────────────────
         section("Prévoyance Auto — BIA","AFG ASSURANCES BÉNIN VIE")
 
@@ -4439,6 +4444,26 @@ elif "Saisie BIA" in page:
         is_vigninou = prod["code"] == "220"
         is_deces    = prod["code"] in ("220", "221")
         is_epargne  = prod["code"] == "EP0"
+
+        # Prévoyance Auto suit le parcours court en 3 étapes,
+        # identique à celui du courtier, y compris pour le PDG.
+        if prod["code"] == "PA0":
+            _is_crt_step = True
+            st.session_state.setdefault("f_peri",  "Annuelle")
+            st.session_state.setdefault("f_gar",   "Avec garantie décès")
+            st.session_state.setdefault("f_duree", 1)
+            if not st.session_state.get("f_courtier_nom"):
+                st.session_state["f_courtier_nom"] = st.session_state.get(
+                    "f_nom_appo", "") or ""
+
+    # ── Parcours PA0 hors courtier : saisie de l'apporteur ───────────────────
+    if _is_crt_step and not _is_courtier_role:
+        _nc = st.text_input("Courtier ou apporteur",
+                            value=st.session_state.get("f_courtier_nom",""),
+                            placeholder="Nom ou sigle du distributeur",
+                            key="inp_crt_pdg")
+        st.session_state["f_courtier_nom"] = _nc
+        st.session_state["f_nom_appo"]     = _nc
 
     # ── Logo courtier affiché en haut ────────────────────────────────────────
     if _is_crt_step:
@@ -5086,7 +5111,7 @@ elif "Saisie BIA" in page:
                 return data["numero_bia"]
             return None
         # ── Impression BIA (courtier PA0 uniquement) ─────────────────────────
-        if _is_crt_step and st.button("🖨️ Imprimer le BIA — 2 exemplaires",
+        if st.button("🖨️ Imprimer le BIA — 2 exemplaires",
                                        use_container_width=True, key="print_bia_btn"):
             try:
                 from reportlab.lib.pagesizes import A4
@@ -5121,9 +5146,9 @@ elif "Saisie BIA" in page:
                         _img = _RLImg(_io.BytesIO(_b64.b64decode(LOGO_B64)), width=3.5*cm, height=1.5*cm)
                         _img.hAlign = "CENTER"; items.append(_img); items.append(Spacer(1,0.15*cm))
                     except Exception: pass
-                    # En-tête
+                    # En-tête adapté au produit
                     h = Table([[Paragraph("BULLETIN INDIVIDUEL D'ADHÉSION",st_ti)],
-                                [Paragraph("Prévoyance Auto — AFG Assurances Bénin Vie",st_su)],
+                                [Paragraph(f"{prod['nom']} · AFG Assurances Bénin Vie",st_su)],
                                 [Paragraph(f"Exemplaire : {label}",st_su)]],
                                colWidths=[17*cm])
                     h.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,-1),C_N),
@@ -5132,9 +5157,12 @@ elif "Saisie BIA" in page:
                     items.append(h); items.append(Spacer(1,0.25*cm))
                     # Données
                     _n = f"{st.session_state.get('f_c_tit','')} {st.session_state.get('f_c_nom','').upper()} {st.session_state.get('f_c_prn','')}".strip()
+                    _appo_lbl = (st.session_state.get("f_courtier_nom")
+                                 or st.session_state.get("f_nom_appo") or "—")
                     rows = [
-                        ["N° BIA", st.session_state.get("_last_bia_num","—"), "Date saisie", _dt.now().strftime("%d/%m/%Y")],
-                        ["Courtier", st.session_state.get("f_courtier_nom","—") or "—", "Produit", "Prévoyance Auto"],
+                        ["N° BIA", st.session_state.get("_last_bia_num","—"),
+                         "Date de saisie", _dt.now().strftime("%d/%m/%Y")],
+                        ["Apporteur", _appo_lbl, "Produit", prod["nom"]],
                         ["Souscripteur", _n, "Téléphone", st.session_state.get("f_c_tel","—")],
                         ["Prime annuelle", f"{int(st.session_state.get('f_coti',0)):,} FCFA", "Capital garanti", f"{int(st.session_state.get('f_cap',0)):,} FCFA"],
                         ["Date effet", ds(st.session_state.get("f_deff","")), "Date terme", str(st.session_state.get("f_terme_auto","—"))],
@@ -5188,7 +5216,7 @@ elif "Saisie BIA" in page:
                 alert(f"Erreur impression BIA : {_ep_bia}","danger")
 
         # ── Bouton PDF universel (tous produits) ────────────────────────────────
-        if not _is_crt_step:
+        if False:
             if st.button("🖨️ Télécharger le BIA (PDF — 2 exemplaires)",
                          use_container_width=True, key="dl_bia_btn_all"):
                 try:
@@ -5292,7 +5320,7 @@ elif "Saisie BIA" in page:
                     st.session_state["_bia_print_ready"] = True
 
             # ── Bouton impression PDF (pour courtier PA0) ─────────────────
-            if _is_crt_step and st.session_state.get("_bia_print_ready"):
+            if st.session_state.get("_bia_print_ready"):
                 st.markdown("---")
                 if st.button("🖨️ Imprimer le BIA (2 exemplaires)", type="primary",
                              use_container_width=True, key="print_bia_pa0"):
@@ -5620,7 +5648,8 @@ elif "Rapport PDF" in page:
                     from reportlab.lib.units import cm
                     from reportlab.lib import colors as rl_colors
                     from reportlab.platypus import (SimpleDocTemplate, Paragraph,
-                        Spacer, Table, TableStyle, HRFlowable)
+                        Spacer, Table, TableStyle, HRFlowable,
+                        Image as _RLImage, PageBreak)
                     from reportlab.lib.enums import TA_CENTER, TA_RIGHT
                     from reportlab.graphics.shapes import Drawing, String, Rect
                     from reportlab.graphics.charts.barcharts import (
@@ -5668,6 +5697,149 @@ elif "Rapport PDF" in page:
                         d.add(String(6, h - 10, titre, fontName="Helvetica-Bold",
                                      fontSize=8.5, fillColor=C_N))
                         return d
+
+                    # ══════════════════════════════════════════════════════════
+                    #  Graphiques du rapport : rendus en PNG haute definition
+                    #  par matplotlib puis inseres comme images. Le rendu est
+                    #  nettement plus lisible que les graphiques vectoriels
+                    #  natifs de ReportLab, et ne depend d'aucun navigateur.
+                    # ══════════════════════════════════════════════════════════
+                    import matplotlib
+                    matplotlib.use("Agg")
+                    import matplotlib.pyplot as _plt
+                    from matplotlib.ticker import FuncFormatter as _FF
+
+                    _MPL = ["#1A7F6E","#0D1F3C","#C0392B","#CA6F1E",
+                            "#2E86C1","#7D3C98","#16A085","#616A6B"]
+
+                    def _espace(v, _p=None):
+                        """Sépare les milliers par une espace insécable fine."""
+                        return f"{v:,.0f}".replace(",", " ")
+
+                    def _mpl_img(fig, larg=17*cm):
+                        """Convertit une figure matplotlib en image ReportLab."""
+                        _b = _io.BytesIO()
+                        fig.savefig(_b, format="png", dpi=170,
+                                    bbox_inches="tight", facecolor="white")
+                        _plt.close(fig)
+                        _b.seek(0)
+                        from PIL import Image as _PILImg
+                        _w, _h = _PILImg.open(_b).size
+                        _b.seek(0)
+                        _img = _RLImage(_b, width=larg, height=larg * _h / _w)
+                        _img.hAlign = "CENTER"
+                        return _img
+
+                    def _mpl_barh(labels, values, titre, coul="#1A7F6E", haut=4.2):
+                        """Barres horizontales, valeurs annotées en bout."""
+                        _n  = max(len(labels), 1)
+                        fig, ax = _plt.subplots(figsize=(10, max(haut, 0.42*_n + 1.1)))
+                        _y  = range(len(labels))
+                        ax.barh(list(_y), values, color=coul, height=.64,
+                                edgecolor="white", linewidth=.6)
+                        ax.set_yticks(list(_y))
+                        ax.set_yticklabels([str(l)[:34] for l in labels], fontsize=9)
+                        ax.invert_yaxis()
+                        _mx = max(values) if len(values) and max(values) else 1
+                        for _i, _v in enumerate(values):
+                            ax.text(_v + _mx*.012, _i, _espace(_v),
+                                    va="center", fontsize=8.2, color="#2C3E50")
+                        ax.set_xlim(0, _mx*1.18)
+                        ax.xaxis.set_major_formatter(_FF(_espace))
+                        ax.tick_params(axis="x", labelsize=8, colors="#667")
+                        ax.set_title(titre, fontsize=11, fontweight="bold",
+                                     color="#0D1F3C", loc="left", pad=11)
+                        ax.grid(axis="x", color="#E8ECF3", linewidth=.7)
+                        ax.set_axisbelow(True)
+                        for _s in ("top","right","left"): ax.spines[_s].set_visible(False)
+                        ax.spines["bottom"].set_color("#D5DBE5")
+                        return _mpl_img(fig)
+
+                    def _mpl_barv(labels, series, noms, titre, haut=4.4):
+                        """Barres verticales groupées, une à trois séries."""
+                        fig, ax = _plt.subplots(figsize=(10, haut))
+                        _n   = len(series)
+                        _x   = np.arange(len(labels))
+                        _lgr = .78 / _n
+                        for _i, (_s, _nm) in enumerate(zip(series, noms)):
+                            ax.bar(_x + _i*_lgr - .39 + _lgr/2, _s, _lgr*.92,
+                                   label=str(_nm), color=_MPL[_i % len(_MPL)],
+                                   edgecolor="white", linewidth=.5)
+                        ax.set_xticks(_x)
+                        ax.set_xticklabels([str(l)[:14] for l in labels],
+                                           fontsize=8.5, rotation=0)
+                        ax.yaxis.set_major_formatter(_FF(_espace))
+                        ax.tick_params(axis="y", labelsize=8, colors="#667")
+                        ax.set_title(titre, fontsize=11, fontweight="bold",
+                                     color="#0D1F3C", loc="left", pad=11)
+                        if _n > 1:
+                            ax.legend(fontsize=8.5, frameon=False, ncol=_n,
+                                      loc="upper center", bbox_to_anchor=(.5, -.09))
+                        ax.grid(axis="y", color="#E8ECF3", linewidth=.7)
+                        ax.set_axisbelow(True)
+                        for _s2 in ("top","right"): ax.spines[_s2].set_visible(False)
+                        for _s2 in ("left","bottom"): ax.spines[_s2].set_color("#D5DBE5")
+                        return _mpl_img(fig)
+
+                    def _mpl_pie(labels, values, titre, haut=4.4):
+                        """Anneau avec légende latérale et pourcentages."""
+                        fig, ax = _plt.subplots(figsize=(10, haut))
+                        _tot = float(sum(values)) or 1.0
+                        _w, _t, _a = ax.pie(
+                            values, startangle=90, counterclock=False,
+                            colors=[_MPL[_i % len(_MPL)] for _i in range(len(values))],
+                            wedgeprops=dict(width=.42, edgecolor="white", linewidth=1.6),
+                            autopct=lambda p: f"{p:.1f} %" if p >= 4 else "",
+                            pctdistance=.79, textprops=dict(fontsize=8.6, color="white",
+                                                            fontweight="bold"))
+                        ax.legend(_w, [f"{_l}  ·  {_espace(_v)}"
+                                       for _l, _v in zip(labels, values)],
+                                  loc="center left", bbox_to_anchor=(1.02, .5),
+                                  fontsize=9, frameon=False)
+                        ax.set_title(titre, fontsize=11, fontweight="bold",
+                                     color="#0D1F3C", loc="left", pad=11)
+                        ax.axis("equal")
+                        return _mpl_img(fig)
+
+                    def _mpl_treemap(labels, values, titre, haut=4.6):
+                        """Carte proportionnelle par pavage récursif."""
+                        fig, ax = _plt.subplots(figsize=(10, haut))
+                        _tot = float(sum(values)) or 1.0
+                        _x, _y, _lw, _lh = 0., 0., 1., 1.
+                        _rest = float(_tot)
+                        _hz   = True
+                        for _i, (_lb, _vl) in enumerate(zip(labels, values)):
+                            _p = float(_vl) / _rest if _rest else 0
+                            if _i == len(labels) - 1: _p = 1.0
+                            if _hz:
+                                _cw, _cht = _lw*_p, _lh
+                            else:
+                                _cw, _cht = _lw, _lh*_p
+                            ax.add_patch(_plt.Rectangle(
+                                (_x, _y), _cw, _cht,
+                                facecolor=_MPL[_i % len(_MPL)],
+                                edgecolor="white", linewidth=2.2))
+                            if _cw > .11 and _cht > .13:
+                                ax.text(_x + _cw/2, _y + _cht/2 + .045,
+                                        str(_lb)[:22], ha="center", va="center",
+                                        fontsize=9, fontweight="bold", color="white")
+                                ax.text(_x + _cw/2, _y + _cht/2 - .035,
+                                        f"{float(_vl)/_tot*100:.1f} %",
+                                        ha="center", va="center",
+                                        fontsize=8.2, color="white")
+                                ax.text(_x + _cw/2, _y + _cht/2 - .105,
+                                        _espace(_vl), ha="center", va="center",
+                                        fontsize=7.4, color="#FFFFFFCC")
+                            if _hz:
+                                _x += _cw; _lw -= _cw
+                            else:
+                                _y += _cht; _lh -= _cht
+                            _rest -= float(_vl)
+                            _hz = not _hz
+                        ax.set_xlim(0,1); ax.set_ylim(0,1); ax.axis("off")
+                        ax.set_title(titre, fontsize=11, fontweight="bold",
+                                     color="#0D1F3C", loc="left", pad=11)
+                        return _mpl_img(fig)
 
                     def _g_carte(labels, values, titre, w=17*cm, h=7.2*cm):
                         """Carte proportionnelle : chaque nature occupe une
@@ -5958,11 +6130,11 @@ elif "Rapport PDF" in page:
                         _pair  = [(l,v) for l,v in zip(_lab_e,_val_e) if v > 0]
                         if _pair:
                             story.append(Spacer(1,0.15*cm))
-                            story.append(_g_pie([p[0] for p in _pair],
+                            story.append(_mpl_pie([p[0] for p in _pair],
                                                 [p[1] for p in _pair],
                                                 f"Structure du portefeuille · {period_lbl}"))
                             story.append(Spacer(1,0.18*cm))
-                            story.append(_g_carte([p[0] for p in _pair],
+                            story.append(_mpl_treemap([p[0] for p in _pair],
                                                   [p[1] for p in _pair],
                                                   "Poids relatif de chaque état"))
 
@@ -5980,11 +6152,11 @@ elif "Rapport PDF" in page:
                                                  f"{_v/_nb*100:.1f} %"])
                                 story.append(_tbl_style(_tpr,[9.5*cm,3.5*cm,4*cm]))
                                 story.append(Spacer(1,0.15*cm))
-                                story.append(_g_barh(
+                                story.append(_mpl_barh(
                                     _tp.index.astype(str).tolist(),
                                     _tp.values.tolist(),
                                     f"Nombre de polices par produit · {period_lbl}",
-                                    h=6.5*cm))
+                                    haut=4.2))
                         # Commentaire analytique
                         _cm_cima = ("conforme aux exigences du Code CIMA (seuil ≤ 25 %)"
                                     if _txr <= 25 else
@@ -6030,7 +6202,7 @@ elif "Rapport PDF" in page:
                                 for _,r in _cp.iterrows()]
                             story.append(_tbl_style(pd_,[9*cm,4.5*cm,3.5*cm]))
                             story.append(Spacer(1,0.15*cm))
-                            story.append(_g_barh(
+                            story.append(_mpl_barh(
                                 _cp["LIBECATE"].astype(str).tolist(),
                                 _cp["CHIFAFFA"].tolist(),
                                 f"Chiffre d'affaires par produit · {period_lbl}"))
@@ -6061,7 +6233,7 @@ elif "Rapport PDF" in page:
                                 if len(_evg) >= 2:
                                     _evg = _evg.tail(12)
                                     story.append(Spacer(1,0.2*cm))
-                                    story.append(_g_barv(
+                                    story.append(_mpl_barv(
                                         _evg["_ML"].tolist(),
                                         [_evg["CHIFAFFA"].tolist()],
                                         ["Chiffre d'affaires"],
@@ -6126,7 +6298,7 @@ elif "Rapport PDF" in page:
                                     fmt_full(r["Comm"],""), f"{r['Part']:.1f}%"])
                             story.append(_tbl_style(comD,[7*cm,3.5*cm,2.2*cm,2.5*cm,1.8*cm]))
                             story.append(Spacer(1,0.15*cm))
-                            story.append(_g_barh(
+                            story.append(_mpl_barh(
                                 _g[_agk].astype(str).tolist(), _g["CA"].tolist(),
                                 f"Top 10 apporteurs par chiffre d'affaires · {period_lbl}"))
                             _t1n = str(_g.iloc[0][_agk])[:30]
@@ -6194,11 +6366,11 @@ elif "Rapport PDF" in page:
                                 story.append(Spacer(1,0.25*cm))
                                 story.append(Paragraph(
                                     f"Production mensuelle comparée · {_aN} face à {_aN1} :", st_h2))
-                                story.append(_g_barv(
+                                story.append(_mpl_barv(
                                     _MFR, [_mN1.tolist(), _mN.tolist()],
                                     [str(_aN1), str(_aN)],
                                     f"Chiffre d'affaires mensuel · {_aN} face à {_aN1}",
-                                    h=7*cm))
+                                    haut=4.4))
 
                                 _tN_r, _tN1_r = float(_mN.sum()), float(_mN1.sum())
                                 _vr = ((_tN_r-_tN1_r)/_tN1_r*100) if _tN1_r else 0
@@ -6263,9 +6435,9 @@ elif "Rapport PDF" in page:
                         _val_s = [_st, _ss, _sh]
                         if sum(_val_s) > 0:
                             story.append(Spacer(1,0.15*cm))
-                            story.append(_g_barv(_lab_s, [_val_s], ["Montant"],
+                            story.append(_mpl_barv(_lab_s, [_val_s], ["Montant"],
                                 f"Décomposition de la charge sinistres · {period_lbl}",
-                                h=6*cm))
+                                haut=4.0))
 
                         # Structure de la charge par nature de sinistre
                         # Les variantes de deces sont regroupees sous un libelle unique
@@ -6308,7 +6480,7 @@ elif "Rapport PDF" in page:
                                 # Carte proportionnelle : poids visuel de chaque nature
                                 _g6 = _gnat.head(6)
                                 story.append(Spacer(1,0.18*cm))
-                                story.append(_g_carte(
+                                story.append(_mpl_treemap(
                                     _g6[_c_nat_r].astype(str).tolist(),
                                     _g6["Charge"].tolist(),
                                     f"Répartition de la charge par nature · {period_lbl}"))
@@ -6316,11 +6488,11 @@ elif "Rapport PDF" in page:
                                 # Barres : montants comparés
                                 _g8 = _gnat.head(8)
                                 story.append(Spacer(1,0.18*cm))
-                                story.append(_g_barh(
+                                story.append(_mpl_barh(
                                     _g8[_c_nat_r].astype(str).tolist(),
                                     _g8["Charge"].tolist(),
                                     f"Charge par nature de sinistre · {period_lbl}",
-                                    h=6.5*cm, coul=C_R))
+                                    coul="#C0392B"))
 
                                 # Note de lecture sur la concentration
                                 _n1  = _gnat.iloc[0]
@@ -6435,19 +6607,19 @@ elif "Rapport PDF" in page:
 
                         # Graphique : indicateurs vs seuils
                         story.append(Spacer(1,0.15*cm))
-                        story.append(_g_barv(
+                        story.append(_mpl_barv(
                             ["Tx activité","Tx résiliation","Ratio S/P","Part inactifs"],
                             [[_ta2, _tr2, _sp2, _in2], [50, 25, 80, 5]],
                             ["Valeur constatée","Seuil CIMA"],
                             f"Indicateurs CIMA face aux seuils réglementaires · {period_lbl}",
-                            h=7*cm))
+                            haut=4.4))
 
                         # Carte : ecart de chaque indicateur a son seuil
                         _ec_lab = ["Tx activité","Tx résiliation","Ratio S/P","Part inactifs"]
                         _ec_val = [abs(_ta2-50), abs(_tr2-25), abs(_sp2-80), abs(_in2-5)]
                         if sum(_ec_val) > 0:
                             story.append(Spacer(1,0.18*cm))
-                            story.append(_g_carte(_ec_lab, _ec_val,
+                            story.append(_mpl_treemap(_ec_lab, _ec_val,
                                 "Amplitude de l'écart au seuil réglementaire"))
 
                         _nb_ok  = sum(1 for _r in cm_d[1:] if _r[3] == "CONFORME")
