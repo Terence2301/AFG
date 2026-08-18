@@ -4251,6 +4251,10 @@ elif "Saisie BIA" in page:
         st.session_state["bia_prod"] = code
         st.session_state["bia_step"] = 2
 
+    def _reset_prod():
+        st.session_state.pop("bia_prod", None)
+        st.session_state.pop("bia_step", None)
+
     # ── Étape 1 : Sélection du produit ─────────────────────────────────────────
     _is_crt_step = is_courtier(user)
     GC = {"Groupe 1": RED, "Groupe 2": GREEN}   # défini AVANT tout usage
@@ -4333,9 +4337,27 @@ elif "Saisie BIA" in page:
 
     else:
         # ── NON-COURTIER : sélection normale des produits ────────────────────
-        section("Étape 1 — Sélection du produit","AFG ASSURANCES BÉNIN VIE")
+        # Les cartes produit ne sont affichées que tant qu'aucun produit n'est
+        # retenu. Les laisser visibles ensuite oblige React à démonter puis
+        # remonter tout l'arbre des expanders, ce qui déclenche le
+        # NotFoundError (removeChild) observé sur Streamlit Cloud.
+        _prod_choisi = st.session_state.get("bia_prod")
 
-        with st.expander("🛡️ Groupe 1 — Décès & Vie", expanded=True):
+        if not _prod_choisi:
+            section("Étape 1 — Sélection du produit","AFG ASSURANCES BÉNIN VIE")
+        else:
+            _pn = next((p["nom"] for p in PRODUITS if p["code"] == _prod_choisi),
+                       _prod_choisi)
+            _cs1, _cs2 = st.columns([4,1])
+            _cs1.markdown(
+                f"<div style='font-size:12px;color:#667;padding-top:6px'>"
+                f"Produit retenu : <b style='color:{NAVY}'>{_pn}</b></div>",
+                unsafe_allow_html=True)
+            _cs2.button("Changer", key="chg_prod", use_container_width=True,
+                        on_click=_reset_prod)
+
+        if not _prod_choisi:
+          with st.expander("🛡️ Groupe 1 — Décès & Vie", expanded=True):
             col_a, col_b = st.columns(2)
             with col_a:
                 st.markdown(f"""<div style="border:2px solid {RED}44;border-radius:10px;
@@ -4369,7 +4391,8 @@ elif "Saisie BIA" in page:
                           on_click=_pick_prod, args=("220",))
 
         # Prévoyance Auto (PA0) — visible pour PDG et ACTUAIRE
-        with st.expander("🚗 Prévoyance Auto (PA0)", expanded=False):
+        if not _prod_choisi:
+          with st.expander("🚗 Prévoyance Auto (PA0)", expanded=False):
             st.markdown(f"""<div style="border:2px solid {RED}44;border-radius:10px;
               padding:12px 14px;margin-bottom:6px">
               <span style="background:{RED};color:white;font-size:9px;font-weight:700;
@@ -4386,7 +4409,8 @@ elif "Saisie BIA" in page:
                       use_container_width=True,
                       on_click=_pick_prod, args=("PA0",))
 
-        with st.expander("💰 Groupe 2 — Épargne & Capitalisation", expanded=True):
+        if not _prod_choisi:
+          with st.expander("💰 Groupe 2 — Épargne & Capitalisation", expanded=True):
             st.markdown(f"""<div style="border:2px solid {GREEN}44;border-radius:10px;
               padding:12px 14px;margin-bottom:6px">
               <span style="background:{GREEN};color:white;font-size:9px;font-weight:700;
@@ -5598,7 +5622,7 @@ elif "Rapport PDF" in page:
                     from reportlab.platypus import (SimpleDocTemplate, Paragraph,
                         Spacer, Table, TableStyle, HRFlowable)
                     from reportlab.lib.enums import TA_CENTER, TA_RIGHT
-                    from reportlab.graphics.shapes import Drawing, String
+                    from reportlab.graphics.shapes import Drawing, String, Rect
                     from reportlab.graphics.charts.barcharts import (
                         VerticalBarChart, HorizontalBarChart)
                     from reportlab.graphics.charts.piecharts import Pie
@@ -5638,11 +5662,47 @@ elif "Rapport PDF" in page:
                         lg.deltay         = 10
                         lg.colorNamePairs = [
                             (_PAL[k % len(_PAL)],
-                             f"{str(labels[k])[:26]} — {int(values[k]):,}".replace(",", " "))
+                             f"{str(labels[k])[:26]} · {int(values[k]):,}".replace(",", " "))
                             for k in range(len(labels))]
                         d.add(lg)
                         d.add(String(6, h - 10, titre, fontName="Helvetica-Bold",
                                      fontSize=8.5, fillColor=C_N))
+                        return d
+
+                    def _g_carte(labels, values, titre, w=17*cm, h=7.2*cm):
+                        """Carte proportionnelle : chaque nature occupe une
+                        surface proportionnelle a son poids dans la charge.
+                        Equivalent statique du treemap de l'application."""
+                        d = Drawing(w, h)
+                        d.add(String(4, h-11, titre, fontName="Helvetica-Bold",
+                                     fontSize=9, fillColor=C_N))
+                        _tot = float(sum(values)) or 1.0
+                        _y0, _hh = 6, h - 30
+                        _x = 2.0
+                        _wd = w - 4.0
+                        # Pavage en bandes verticales de largeur proportionnelle
+                        for _i, (_lb, _vl) in enumerate(zip(labels, values)):
+                            _part = float(_vl) / _tot
+                            _lw   = max(_wd * _part, 14)
+                            _col  = _PAL[_i % len(_PAL)]
+                            d.add(Rect(_x, _y0, _lw, _hh,
+                                       fillColor=_col, strokeColor=rl_colors.white,
+                                       strokeWidth=1.2))
+                            # Libelle : seulement si la bande est assez large
+                            if _lw > 46:
+                                _txt = str(_lb)[:int(_lw/5.2)]
+                                d.add(String(_x + 5, _y0 + _hh - 14, _txt,
+                                             fontName="Helvetica-Bold", fontSize=7.5,
+                                             fillColor=rl_colors.white))
+                                d.add(String(_x + 5, _y0 + _hh - 25,
+                                             f"{_part*100:.1f} %",
+                                             fontName="Helvetica", fontSize=7,
+                                             fillColor=rl_colors.white))
+                                d.add(String(_x + 5, _y0 + 6,
+                                             f"{float(_vl):,.0f}".replace(",", " "),
+                                             fontName="Helvetica", fontSize=6.5,
+                                             fillColor=rl_colors.white))
+                            _x += _lw
                         return d
 
                     def _g_barh(labels, values, titre, w=17*cm, h=7.5*cm, coul=None):
@@ -5796,7 +5856,7 @@ elif "Rapport PDF" in page:
                     except Exception:
                         pass
                     hdr_t = Table([[Paragraph("AFG ASSURANCES BÉNIN VIE", st_ti)],
-                        [Paragraph("RAPPORT DE GESTION — DIRECTION GÉNÉRALE", st_su)],
+                        [Paragraph("RAPPORT DE GESTION", st_su)],
                         [Paragraph(f"Période d'analyse : {period_lbl}  ·  Édité le {_dt.now().strftime('%d %B %Y')}", st_su)]],
                         colWidths=[17*cm])
                     hdr_t.setStyle(TableStyle([
@@ -5810,7 +5870,7 @@ elif "Rapport PDF" in page:
                     info_t = Table([
                         ["Destinataire :", dest],
                         ["Rédigé par :", auteur],
-                        ["Classification :", "CONFIDENTIEL — Usage interne"],
+                        ["Classification :", "Confidentiel · Usage interne"],
                         ["Référence :", f"AFG-RPT-{_dt.now().strftime('%Y%m%d')}"],
                     ], colWidths=[5*cm,12*cm])
                     info_t.setStyle(TableStyle([
@@ -5900,7 +5960,31 @@ elif "Rapport PDF" in page:
                             story.append(Spacer(1,0.15*cm))
                             story.append(_g_pie([p[0] for p in _pair],
                                                 [p[1] for p in _pair],
-                                                f"Structure du portefeuille — {period_lbl}"))
+                                                f"Structure du portefeuille · {period_lbl}"))
+                            story.append(Spacer(1,0.18*cm))
+                            story.append(_g_carte([p[0] for p in _pair],
+                                                  [p[1] for p in _pair],
+                                                  "Poids relatif de chaque état"))
+
+                        # Top produits du portefeuille
+                        if "LIBECATE" in _pf_r.columns:
+                            _tp = (_pf_r["LIBECATE"].astype(str).str.strip()
+                                     .value_counts().head(8))
+                            if not _tp.empty:
+                                story.append(Spacer(1,0.2*cm))
+                                story.append(Paragraph(
+                                    "Composition du portefeuille par produit :", st_h2))
+                                _tpr = [["Produit","Polices","Part"]]
+                                for _n, _v in _tp.items():
+                                    _tpr.append([str(_n)[:42], nb_full(int(_v)),
+                                                 f"{_v/_nb*100:.1f} %"])
+                                story.append(_tbl_style(_tpr,[9.5*cm,3.5*cm,4*cm]))
+                                story.append(Spacer(1,0.15*cm))
+                                story.append(_g_barh(
+                                    _tp.index.astype(str).tolist(),
+                                    _tp.values.tolist(),
+                                    f"Nombre de polices par produit · {period_lbl}",
+                                    h=6.5*cm))
                         # Commentaire analytique
                         _cm_cima = ("conforme aux exigences du Code CIMA (seuil ≤ 25 %)"
                                     if _txr <= 25 else
@@ -5949,7 +6033,7 @@ elif "Rapport PDF" in page:
                             story.append(_g_barh(
                                 _cp["LIBECATE"].astype(str).tolist(),
                                 _cp["CHIFAFFA"].tolist(),
-                                f"Chiffre d'affaires par produit — {period_lbl}"))
+                                f"Chiffre d'affaires par produit · {period_lbl}"))
                             _p1n = str(_cp.iloc[0]["LIBECATE"])[:34]
                             _p1p = float(_cp.iloc[0]["Part"])
                             _c3  = float(_cp.head(3)["CHIFAFFA"].sum())/_cat*100 if _cat else 0
@@ -5981,7 +6065,7 @@ elif "Rapport PDF" in page:
                                         _evg["_ML"].tolist(),
                                         [_evg["CHIFAFFA"].tolist()],
                                         ["Chiffre d'affaires"],
-                                        f"Évolution mensuelle du chiffre d'affaires — {period_lbl}"))
+                                        f"Évolution mensuelle du chiffre d'affaires · {period_lbl}"))
                                     _mx = _evg.loc[_evg["CHIFAFFA"].idxmax()]
                                     _mn = _evg.loc[_evg["CHIFAFFA"].idxmin()]
                                     _moy = float(_evg["CHIFAFFA"].mean())
@@ -6044,7 +6128,7 @@ elif "Rapport PDF" in page:
                             story.append(Spacer(1,0.15*cm))
                             story.append(_g_barh(
                                 _g[_agk].astype(str).tolist(), _g["CA"].tolist(),
-                                f"Top 10 apporteurs par chiffre d'affaires — {period_lbl}"))
+                                f"Top 10 apporteurs par chiffre d'affaires · {period_lbl}"))
                             _t1n = str(_g.iloc[0][_agk])[:30]
                             _t1p = float(_g.iloc[0]["Part"])
                             _t5p = float(_g.head(5)["Part"].sum())
@@ -6053,7 +6137,7 @@ elif "Rapport PDF" in page:
                                 f"<b>Lecture.</b> Le réseau de distribution est mené par "
                                 f"<b>{_t1n}</b>, qui réalise <b>{_t1p:.1f} %</b> du chiffre "
                                 f"d'affaires de la période. Les cinq premiers apporteurs "
-                                f"cumulent <b>{_t5p:.1f} %</b> du CA — "
+                                f"cumulent <b>{_t5p:.1f} %</b> du CA, "
                                 f"{'une concentration élevée qui expose la compagnie au départ d un partenaire majeur' if _t5p >= 80 else 'une répartition qui limite le risque de dépendance commerciale'}.",
                                 st_bd))
                             story.append(Spacer(1,0.2*cm))
@@ -6109,11 +6193,11 @@ elif "Rapport PDF" in page:
                                         "Juil","Août","Sep","Oct","Nov","Déc"]
                                 story.append(Spacer(1,0.25*cm))
                                 story.append(Paragraph(
-                                    f"Production mensuelle comparée — {_aN} / {_aN1} :", st_h2))
+                                    f"Production mensuelle comparée · {_aN} face à {_aN1} :", st_h2))
                                 story.append(_g_barv(
                                     _MFR, [_mN1.tolist(), _mN.tolist()],
                                     [str(_aN1), str(_aN)],
-                                    f"Chiffre d'affaires mensuel — {_aN} vs {_aN1}",
+                                    f"Chiffre d'affaires mensuel · {_aN} face à {_aN1}",
                                     h=7*cm))
 
                                 _tN_r, _tN1_r = float(_mN.sum()), float(_mN1.sum())
@@ -6180,7 +6264,7 @@ elif "Rapport PDF" in page:
                         if sum(_val_s) > 0:
                             story.append(Spacer(1,0.15*cm))
                             story.append(_g_barv(_lab_s, [_val_s], ["Montant"],
-                                f"Décomposition de la charge sinistres — {period_lbl}",
+                                f"Décomposition de la charge sinistres · {period_lbl}",
                                 h=6*cm))
 
                         # Structure de la charge par nature de sinistre
@@ -6221,13 +6305,21 @@ elif "Rapport PDF" in page:
                                 story.append(_tbl_style(_nt,
                                     [4.3*cm,2*cm,2.9*cm,2.6*cm,2.9*cm,1.8*cm]))
 
-                                # Graphique en barres : charge par nature
+                                # Carte proportionnelle : poids visuel de chaque nature
+                                _g6 = _gnat.head(6)
+                                story.append(Spacer(1,0.18*cm))
+                                story.append(_g_carte(
+                                    _g6[_c_nat_r].astype(str).tolist(),
+                                    _g6["Charge"].tolist(),
+                                    f"Répartition de la charge par nature · {period_lbl}"))
+
+                                # Barres : montants comparés
                                 _g8 = _gnat.head(8)
-                                story.append(Spacer(1,0.15*cm))
+                                story.append(Spacer(1,0.18*cm))
                                 story.append(_g_barh(
                                     _g8[_c_nat_r].astype(str).tolist(),
                                     _g8["Charge"].tolist(),
-                                    f"Charge par nature de sinistre — {period_lbl}",
+                                    f"Charge par nature de sinistre · {period_lbl}",
                                     h=6.5*cm, coul=C_R))
 
                                 # Note de lecture sur la concentration
@@ -6347,8 +6439,16 @@ elif "Rapport PDF" in page:
                             ["Tx activité","Tx résiliation","Ratio S/P","Part inactifs"],
                             [[_ta2, _tr2, _sp2, _in2], [50, 25, 80, 5]],
                             ["Valeur constatée","Seuil CIMA"],
-                            f"Indicateurs CIMA vs seuils réglementaires — {period_lbl}",
+                            f"Indicateurs CIMA face aux seuils réglementaires · {period_lbl}",
                             h=7*cm))
+
+                        # Carte : ecart de chaque indicateur a son seuil
+                        _ec_lab = ["Tx activité","Tx résiliation","Ratio S/P","Part inactifs"]
+                        _ec_val = [abs(_ta2-50), abs(_tr2-25), abs(_sp2-80), abs(_in2-5)]
+                        if sum(_ec_val) > 0:
+                            story.append(Spacer(1,0.18*cm))
+                            story.append(_g_carte(_ec_lab, _ec_val,
+                                "Amplitude de l'écart au seuil réglementaire"))
 
                         _nb_ok  = sum(1 for _r in cm_d[1:] if _r[3] == "CONFORME")
                         _tot_ic = len(cm_d) - 1
@@ -6382,7 +6482,7 @@ elif "Rapport PDF" in page:
                         f"dans la zone UEMOA. Les montants sont exprimés en francs CFA.",st_bd))
                     story.append(Spacer(1,0.2*cm))
                     story.append(Paragraph(
-                        f"<i>Document confidentiel — AFG Assurances Bénin Vie · "
+                        f"<i>Document confidentiel · AFG Assurances Bénin Vie · "
                         f"Groupe AFG Holding · Conforme CIMA · "
                         f"Établi le {_dt.now().strftime('%d/%m/%Y')}</i>",st_sm))
                     story.append(Spacer(1,0.5*cm))
