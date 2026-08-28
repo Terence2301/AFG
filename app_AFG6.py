@@ -524,6 +524,35 @@ USERS = {
 # ─────────────────────────────────────────────
 #  CSS EXPERT
 # ─────────────────────────────────────────────
+# Feuille de style d'impression : masque la navigation et les commandes,
+# force le fond blanc et evite les coupures au milieu des tableaux.
+st.markdown("""<style>
+@media print {
+    [data-testid="stSidebar"],
+    [data-testid="stToolbar"],
+    [data-testid="stDecoration"],
+    [data-testid="stStatusWidget"],
+    header, footer,
+    .stButton, .stDownloadButton,
+    div[data-testid="stFileUploader"],
+    div[data-baseweb="select"],
+    div[data-testid="stExpander"] > details > summary { display: none !important; }
+
+    [data-testid="stAppViewContainer"] { margin-left: 0 !important; }
+    .main .block-container {
+        max-width: 100% !important;
+        padding: 0.6cm 1cm !important;
+    }
+    body, .stApp, .main { background: #FFFFFF !important; }
+
+    table, .stDataFrame, .js-plotly-plot,
+    div[data-testid="stMetric"] { page-break-inside: avoid !important; }
+    h1, h2, h3 { page-break-after: avoid !important; }
+    a[href]:after { content: "" !important; }
+    @page { size: A4 portrait; margin: 12mm 10mm; }
+}
+</style>""", unsafe_allow_html=True)
+
 st.markdown(f"""<style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700;800&family=DM+Mono:wght@400;500&display=swap');
 html,body,[class*="css"]{{font-family:'DM Sans',sans-serif!important;background:{LGRAY};}}
@@ -631,16 +660,51 @@ def dl_xlsx(df):
     with pd.ExcelWriter(buf, engine="openpyxl") as w: df.to_excel(w, index=False)
     return buf.getvalue()
 
+# Definitions affichees au survol des indicateurs techniques
+_AIDE_KPI = {
+    "burning cost":  "Charge sinistres rapportée à 1 000 polices actives. "
+                     "Mesure le coût du risque indépendamment de la taille du portefeuille.",
+    "ratio s/p":     "Sinistres rapportés aux primes acquises. "
+                     "Le Code CIMA fixe le seuil d'alerte à 80 %.",
+    "sap":           "Sinistres À Payer : provision constituée pour les dossiers "
+                     "survenus mais non encore réglés à la clôture.",
+    "charge ultime": "Somme des règlements effectués, des provisions SAP "
+                     "et des honoraires. Coût final estimé du risque.",
+    "ticket moyen":  "Chiffre d'affaires divisé par le nombre de quittances émises.",
+    "taux activité": "Polices actives rapportées au portefeuille hors inactives.",
+    "taux résiliation": "Polices résiliées rapportées au portefeuille hors inactives. "
+                     "Seuil CIMA : 25 %.",
+    "coût moy":      "Charge moyenne par dossier clos sur la période.",
+    "part inactifs": "Polices sans mouvement rapportées au portefeuille total. "
+                     "Seuil CIMA : 5 %.",
+}
+
+def _aide(label: str) -> str:
+    """Retourne la definition correspondant au libelle d'un indicateur."""
+    _l = str(label).lower()
+    for _k, _v in _AIDE_KPI.items():
+        if _k in _l:
+            return _v
+    return ""
+
 def kpi(col, label, value, sub="", color="", icon=""):
-    col.markdown(f"""<div class="kc {color}">
-      <div class="kl">{icon} {label}</div>
+    _h = _aide(label)
+    _t = f' title="{_h}"' if _h else ""
+    _m = ('<span style="opacity:.45;font-size:9px;margin-left:3px">?</span>'
+          if _h else "")
+    col.markdown(f"""<div class="kc {color}"{_t}>
+      <div class="kl">{icon} {label}{_m}</div>
       <div class="kv">{value}</div>
       <div class="ks">{sub}</div>
     </div>""", unsafe_allow_html=True)
 
-def section(title, tag=""):
+def section(title, tag="", espace=True):
+    """Titre de section. `espace` ajoute une respiration au-dessus."""
     tg = f'<span class="stg">{tag}</span>' if tag else ""
-    st.markdown(f'<div class="stt">{title} {tg}</div>', unsafe_allow_html=True)
+    _mt = "18px" if espace else "4px"
+    st.markdown(
+        f'<div class="stt" style="margin-top:{_mt}">{title} {tg}</div>',
+        unsafe_allow_html=True)
 
 def alert(msg, typ="info"):
     cls = {"info":"info","good":"good","warn":"warn","danger":"danger"}[typ]
@@ -1433,10 +1497,53 @@ if not st.session_state.bases_loaded_from_db:
 #  SIDEBAR
 # ─────────────────────────────────────────────
 # ── Définition de toutes les pages disponibles ────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+#  GARDE-FOU D'AFFICHAGE
+#  Toute exception non rattrapee dans un onglet devient un message sobre.
+#  Le detail technique reste consultable, replie, pour le support.
+# ══════════════════════════════════════════════════════════════════════════════
+import traceback as _tb
+
+def _erreur_onglet(exc: Exception, onglet: str = "") -> None:
+    """Affiche une erreur d'onglet sans exposer de trace brute a l'ecran."""
+    if isinstance(exc, KeyError):
+        _det = (f"Une colonne attendue est absente du fichier chargé : {exc}. "
+                "Vérifiez que la base correspond au format attendu.")
+    elif isinstance(exc, ZeroDivisionError):
+        _det = "Aucune donnée sur la période retenue : le calcul est impossible."
+    elif isinstance(exc, (ValueError, TypeError)):
+        _det = ("Les données de cette période ne permettent pas ce calcul. "
+                "Élargissez la période ou vérifiez le fichier source.")
+    else:
+        _det = "Le traitement de cet onglet n'a pas abouti."
+    st.markdown(
+        f"""<div style="background:#FEF3F2;border-left:4px solid #C0392B;
+             border-radius:8px;padding:14px 18px;margin:14px 0">
+          <div style="font-size:13px;font-weight:700;color:#8B1A0E">
+            Cet onglet n'a pas pu être affiché</div>
+          <div style="font-size:12px;color:#5C2B24;margin-top:5px;line-height:1.6">
+            {_det}</div>
+        </div>""", unsafe_allow_html=True)
+    with st.expander("Détail technique"):
+        st.code(_tb.format_exc(), language="text")
+
+
+def bloc_vide(message: str, icone: str = "◦") -> None:
+    """Remplace un graphique impossible a tracer par une zone explicative."""
+    st.markdown(
+        f"""<div style="border:1px dashed #C8D2E0;border-radius:10px;
+             padding:26px 18px;margin:8px 0;text-align:center;background:#FAFBFD">
+          <div style="font-size:22px;color:#AEB9C9">{icone}</div>
+          <div style="font-size:12px;color:#667;margin-top:6px">{message}</div>
+        </div>""", unsafe_allow_html=True)
+
+
 ALL_PAGES = [
+    # Vue d'ensemble
     "🏠  Accueil & KPIs",
-    "📊  Analyse CA",
     "📋  Portefeuille",
+    "📊  Analyse CA",
+    # Analyses par axe
     "🛒  Produits",
     "👥  Commerciaux",
     "🏦  Partenaires Financiers",
@@ -1444,6 +1551,7 @@ ALL_PAGES = [
     "⚠️  Sinistres & Prestations",
     "📐  Actuariat Avancé",
     "🔮  Prévisions & Tendances",
+    # Outils de gestion
     "📝  Saisie BIA",
     "🗂️  Base BIA",
     "📄  Rapport PDF",
@@ -1550,6 +1658,26 @@ with st.sidebar:
              padding:8px 10px;margin:6px 4px 4px;font-size:10px;color:rgba(255,255,255,.7);line-height:1.5">
           ✅ <b style="color:{MINT}">{_nb_bases}/3 base(s)</b> chargée(s) — tableau de bord complet disponible.
         </div>""", unsafe_allow_html=True)
+
+    # ── Fraicheur des donnees ────────────────────────────────────────────────
+    try:
+        _mmaj = get_bases_meta() or {}
+    except Exception:
+        _mmaj = {}
+    _lmaj = []
+    for _bt, _lb in [("pf","Portefeuille"), ("ca","Base CA"), ("sin","Prestations")]:
+        _inf = _mmaj.get(_bt)
+        if isinstance(_inf, dict):
+            _d = _inf.get("date_maj") or _inf.get("updated_at") or _inf.get("date") or ""
+            if _d:
+                _lmaj.append(f"{_lb} : {str(_d)[:16].replace('T',' ')}")
+    if _lmaj:
+        st.markdown(
+            "<div style='background:rgba(255,255,255,.06);border-radius:8px;"
+            "padding:7px 10px;margin:4px 4px 8px;font-size:9.5px;"
+            "color:rgba(255,255,255,.62);line-height:1.8'>"
+            "<b style='color:rgba(255,255,255,.85)'>Données arrêtées au</b><br>"
+            + "<br>".join(_lmaj) + "</div>", unsafe_allow_html=True)
 
     st.markdown("<hr>", unsafe_allow_html=True)
 
@@ -2174,4533 +2302,4713 @@ st.markdown(f"""
 # PAGE — ACCUEIL & KPIs
 # ═══════════════════════════════════════════════════════════════════════════════
 if "Accueil" in page:
-    if pf is None and ca is None and sin is None:
-        st.markdown(f"""
-        <div style="background:linear-gradient(135deg,{NAVY},{GREEN2});border-radius:16px;
-             padding:3rem;text-align:center;margin:2rem 0">
-          <div style="font-size:46px;margin-bottom:1rem">🛡️</div>
-          <h2 style="color:white;font-weight:800;margin-bottom:.5rem">Bienvenue — Dashboard AFG Expert v3.0</h2>
-          <p style="color:rgba(255,255,255,.65);font-size:13px;max-width:480px;margin:0 auto">
-            Chargez vos bases dans la barre latérale.<br>
-            Portefeuille (306K polices) · CA multi-exercices · Prestations (26K dossiers)
-          </p>
-        </div>""", unsafe_allow_html=True)
-        st.stop()
-
-    df_pf  = pf_f()
-    df_ca  = ca_f()
-    df_sin = sin_f()
-
-    # Compteurs filtrés pour contexte
-    # Badge filtre actif
-    _yr_badge = f" · <b>Année {SEL_YEAR}</b>" if SEL_YEAR else ""
-    section(f"📊 Indicateurs clés — {period_lbl}{_yr_badge}",
-            f"CIMA · PORTEFEUILLE · {'TOUTES PÉRIODES' if not SEL_YEAR else f'EXERCICE {SEL_YEAR}'}")
-    nb  = len(df_pf)
-    eok = "ETAT_POLICE" in df_pf.columns if nb else False
-    actifs = int((df_pf["ETAT_POLICE"].str.strip().isin(["ACTIF"])).sum()) if eok and nb else 0
-    resil  = int((df_pf["ETAT_POLICE"].str.strip()=="RESILIE").sum()) if eok and nb else 0
-    echu   = int((df_pf["ETAT_POLICE"].str.strip().isin(["ECHU","ASSURE ECHU"])).sum()) if eok and nb else 0
-    inact  = int((df_pf["ETAT_POLICE"].str.strip()=="INACTIF").sum()) if eok and nb else 0
-    tx_act = actifs/max(nb,1)*100
-    tx_res = resil/max(nb-inact,1)*100
-    monten = float(df_pf["MONTENCA"].fillna(0).sum()) if nb and "MONTENCA" in df_pf.columns else 0
-
-    c1,c2,c3,c4,c5,c6 = st.columns(6)
-    kpi(c1,"Polices",f"{nb:,}",period_lbl,"",icon="📋")
-    kpi(c2,"Actives",f"{actifs:,}",pct(tx_act),"",icon="✅")
-    kpi(c3,"Résiliées",f"{resil:,}",f"Tx CIMA {pct(tx_res)}","red" if tx_res>25 else "",icon="📉")
-    kpi(c4,"Échues",f"{echu:,}",pct(echu/max(nb,1)*100),"amber",icon="⌛")
-    kpi(c5,"Encaissements",fmt(monten),"MONTENCA","teal",icon="💰")
-    kpi(c6,"NOM_APP uniques",str(df_pf["NOM_APP"].nunique()) if nb and "NOM_APP" in df_pf.columns else "—","Apporteurs","blue",icon="👥")
-
-    if ca is not None and not df_ca.empty:
-        st.markdown("")
-        section("💰 CA — Chiffre d'Affaires","CA · "+period_lbl)
-        chifaffa = float(df_ca["CHIFAFFA"].fillna(0).sum()) if "CHIFAFFA" in df_ca.columns else 0
-        commappo = float(df_ca["COMMAPPO"].fillna(0).sum()) if "COMMAPPO" in df_ca.columns else 0
-        primnett = float(df_ca["PRIMNETT"].fillna(0).sum()) if "PRIMNETT" in df_ca.columns else 0
-        tx_comm  = commappo/max(chifaffa,1)*100
-        nb_q     = len(df_ca)
-        annul    = float(df_ca.loc[df_ca.get("TYPEMOUV","")=="ANNULATIONS","CHIFAFFA"].fillna(0).sum()) if "TYPEMOUV" in df_ca.columns else 0
-        ca_net   = chifaffa - abs(annul)
-        d1,d2,d3,d4,d5 = st.columns(5)
-        kpi(d1,"CA brut",fmt(chifaffa),"CHIFAFFA","",icon="💵")
-        kpi(d2,"CA net",fmt(ca_net),"Hors annulations","teal",icon="✅")
-        kpi(d3,"Prime nette",fmt(primnett),"PRIMNETT","",icon="📄")
-        kpi(d4,"Commissions",fmt(commappo),f"Taux {pct(tx_comm)}","amber",icon="💼")
-        kpi(d5,"Nb quittances",f"{nb_q:,}","Émissions","",icon="🧾")
-    elif ca is not None:
-        alert(f"Aucune quittance CA pour {period_lbl}. Essayez mode Mois ou Année.","info")
-
-    if sin is not None and not df_sin.empty:
-        st.markdown("")
-        _sin_yr_lbl = f"Exercice {SEL_YEAR}" if SEL_YEAR else "Toutes périodes"
-        section(f"🏥 Sinistres & Prestations — {_sin_yr_lbl}",
-                "RÉGLEMENTS · SAP · RATIO S/P · DONNÉES FILTRÉES")
-        # Résolution dynamique des colonnes
-        _c_r_a = next((c for c in df_sin.columns if "glement" in c.lower() and "otal" in c.lower()), None)
-        _c_s_a = next((c for c in df_sin.columns if c.upper().startswith("SAP")), None)
-        _c_srt = next((c for c in df_sin.columns if "ort" in c.lower() and "ini" in c.lower()), None)
-        tot_sin = float(df_sin[_c_r_a].fillna(0).sum()) if _c_r_a else 0
-        tot_sap = float(df_sin[_c_s_a].fillna(0).sum()) if _c_s_a else 0
-        nb_sin  = len(df_sin)
-        nb_ouv  = int((df_sin[_c_srt]=="Ouvert").sum()) if _c_srt else 0
-        nb_clos = int((df_sin[_c_srt]=="Cloturé").sum()) if _c_srt else 0
-        ca_all  = float(ca["CHIFAFFA"].fillna(0).sum()) if ca is not None and "CHIFAFFA" in ca.columns else 0
-        sp = tot_sin/max(ca_all,1)*100
-        actifs_tot = int((pf["ETAT_POLICE"].str.strip().isin(["ACTIF"])).sum()) if pf is not None and "ETAT_POLICE" in pf.columns else 1
-        burning = (tot_sin+tot_sap)/max(actifs_tot,1)*1000
-        e1,e2,e3,e4,e5 = st.columns(5)
-        kpi(e1,"Total réglé",fmt(tot_sin),"Toutes périodes","red",icon="💊")
-        kpi(e2,"SAP (provisions)",fmt(tot_sap),"Au 31/12/2025","amber",icon="📌")
-        kpi(e3,"Charge ultime",fmt(tot_sin+tot_sap),"Réglé+SAP","red",icon="⚖️")
-        kpi(e4,"Ratio S/P",pct(sp),"vs CA","red" if sp>80 else "amber",icon="📐")
-        kpi(e5,"Burning Cost",fmt(burning),"Charge/1 000 actifs","red",icon="🔥")
-
-    # Jointure inter-bases — résumé
-    st.markdown("")
-    section("🔗 Jointures inter-bases","POLICE_KEY · MATCHING")
-    j1,j2,j3 = st.columns(3)
-    if pf is not None and ca is not None and "POLICE_KEY" in pf.columns and "POLICE_KEY" in ca.columns:
-        mc = ca["POLICE_KEY"].isin(pf["POLICE_KEY"]).sum()
-        kpi(j1,"CA ↔ PF",f"{mc:,}",f"{mc/max(len(ca),1)*100:.1f}% des quittances","teal",icon="🔗")
-    if pf is not None and sin is not None and "POLICE_KEY" in pf.columns and "POLICE_KEY" in sin.columns:
-        ms = sin["POLICE_KEY"].isin(pf["POLICE_KEY"]).sum()
-        kpi(j2,"SIN ↔ PF",f"{ms:,}",f"{ms/max(len(sin),1)*100:.1f}% des sinistres","teal",icon="🔗")
-    if ca is not None and sin is not None and "POLICE_KEY" in ca.columns and "POLICE_KEY" in sin.columns:
-        mcs = sin["POLICE_KEY"].isin(ca["POLICE_KEY"]).sum()
-        kpi(j3,"SIN ↔ CA",f"{mcs:,}",f"{mcs/max(len(sin),1)*100:.1f}% des sinistres","blue",icon="🔗")
-
-    # Scorecard CIMA
-    if pf is not None:
-        st.markdown("")
-        section("🏛️ Scorecard CIMA","CONFORMITÉ RÉGLEMENTAIRE")
-        sp2 = sp if sin is not None else 0
-        indics=[
-            (tx_act,"Taux d'activité net",50,">=",GREEN),
-            (tx_res,"Taux résiliation CIMA",25,"<=",RED),
-            (sp2,"Ratio S/P",80,"<=",AMBER),
-            (inact/max(nb,1)*100,"Part inactifs",5,"<=",AMBER),
-        ]
-        score = sum(1 for v,_,s,op,_ in indics if (v>=s if op==">=" else v<=s))
-        sc_c  = GREEN if score>=3 else AMBER if score==2 else RED
-        ci1,ci2 = st.columns([1.4,1])
-        with ci1:
-            for v,lbl,seuil,op,col in indics:
-                ok = v>=seuil if op==">=" else v<=seuil
-                c_ = GREEN if ok else RED
-                st.markdown(f"""<div style="display:flex;align-items:center;justify-content:space-between;
-                     padding:9px 13px;border-left:4px solid {c_};background:{c_}0D;
-                     border-radius:0 9px 9px 0;margin-bottom:7px">
-                  <div><div style="font-size:12px;font-weight:600;color:{NAVY}">{lbl}</div>
-                  <div style="font-size:9.5px;color:#8899AA">Seuil CIMA : {op}{seuil}%</div></div>
-                  <div style="font-size:15px;font-weight:900;color:{c_}">{pct(v)} {'✅' if ok else '⚠️'}</div>
-                </div>""", unsafe_allow_html=True)
-        with ci2:
-            st.markdown(f"""<div style="background:{sc_c}12;border:2.5px solid {sc_c};border-radius:14px;
-                 padding:1.5rem;text-align:center">
-              <div style="font-size:52px;font-weight:900;color:{sc_c}">{score}/{len(indics)}</div>
-              <div style="font-size:12px;color:#555">indicateurs conformes</div>
-              <div style="height:6px;background:{MGRAY};border-radius:3px;margin:10px 0;overflow:hidden">
-                <div style="height:100%;width:{score/len(indics)*100:.0f}%;background:{sc_c};border-radius:3px"></div>
-              </div>
-              <div style="font-size:13px;font-weight:700;color:{sc_c}">
-                {'✅ Conforme CIMA' if score==4 else '⚠️ Surveillance' if score>=2 else '🔴 Intervention requise'}
-              </div></div>""", unsafe_allow_html=True)
-        if tx_res>25: alert(f"Taux résiliation {pct(tx_res)} > 25% (seuil CIMA). Action corrective recommandée.","warn")
-        if sp2>80: alert(f"Ratio S/P {pct(sp2)} > 80%. Révision tarifaire urgente.","danger")
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# PAGE — ANALYSE CA
-# ═══════════════════════════════════════════════════════════════════════════════
-elif "Analyse CA" in page:
-        if ca is None: alert("Chargez la Base CA dans la barre latérale.","warn"); st.stop()
-        df = ca_f()
-        all_ca = ca  # total toutes périodes pour comparaison
-
-        section(f"📊 Analyse CA — {period_lbl}","CHIFAFFA · COMMISSIONS · PARETO")
-
-        # ── Controle de coherence de la lecture de la base par exercice ───────
-        _yr_sel = st.session_state.get("filtre_annee", "Toutes les années")
-        if _yr_sel != "Toutes les années":
-            _n_tot = len(ca); _n_sel = len(df)
-            _ca_s  = float(df["CHIFAFFA"].fillna(0).sum()) if ("CHIFAFFA" in df.columns and not df.empty) else 0
-            _yr_av = []
-            for _c in ["ANNEE","DATECOMP","DATEEFFE"]:
-                if _c in ca.columns:
-                    _yy = as_year(ca[_c]).dropna().unique().tolist()
-                    if _yy: _yr_av = sorted(int(y) for y in _yy); break
-            if _n_sel == 0:
-                alert(f"Aucune quittance lue pour l'exercice <b>{_yr_sel}</b>. "
-                      f"Exercices présents dans la base CA : "
-                      f"{', '.join(str(y) for y in _yr_av) if _yr_av else 'indéterminés'}.",
-                      "danger")
-            else:
-                st.markdown(
-                    f"<div style='font-size:11px;color:#667;margin:-6px 0 10px;'>"
-                    f"Lecture base CA · exercice <b>{_yr_sel}</b> : "
-                    f"<b>{nb_full(_n_sel)}</b> quittances sur {nb_full(_n_tot)} "
-                    f"({_n_sel/max(_n_tot,1)*100:.1f} %) — CA <b>{fmt_full(_ca_s)}</b>"
-                    f"</div>", unsafe_allow_html=True)
-
-        chifaffa = float(df["CHIFAFFA"].fillna(0).sum()) if "CHIFAFFA" in df.columns and not df.empty else 0
-        commappo = float(df["COMMAPPO"].fillna(0).sum()) if "COMMAPPO" in df.columns and not df.empty else 0
-        primnett = float(df["PRIMNETT"].fillna(0).sum()) if "PRIMNETT" in df.columns and not df.empty else 0
-        tx_comm  = commappo/max(chifaffa,1)*100
-        nb_q     = len(df)
-        ca_total = float(all_ca["CHIFAFFA"].fillna(0).sum()) if "CHIFAFFA" in all_ca.columns else 0
-        part     = chifaffa/max(ca_total,1)*100
-
-        if df.empty:
-            alert(f"Aucune donnée CA pour {period_lbl}. Le filtre 'Jour' cherche des quittances à la date exacte. Essayez 'Mois' ou 'Année'.", "warn")
-            # Afficher résumé global
-            section("📊 CA global (toutes périodes)","APERÇU")
-            c1,c2,c3 = st.columns(3)
-            kpi(c1,"CA total",fmt(ca_total),"Toutes quittances","",icon="💵")
-            kpi(c2,"Nb quittances",f"{len(all_ca):,}","Total","",icon="🧾")
-            kpi(c3,"Ticket moyen",fmt(ca_total/max(len(all_ca),1)),"CA/quittance","teal",icon="🎫")
-        else:
-            c1,c2,c3,c4,c5,c6 = st.columns(6)
-            kpi(c1,"CA brut",fmt(chifaffa),"CHIFAFFA","",icon="💵")
-            kpi(c2,"Prime nette",fmt(primnett),"PRIMNETT","",icon="📄")
-            kpi(c3,"Commissions",fmt(commappo),f"Taux {pct(tx_comm)}","amber",icon="💼")
-            kpi(c4,"Nb quittances",f"{nb_q:,}","Émissions","",icon="🧾")
-            kpi(c5,"Ticket moyen",fmt(chifaffa/max(nb_q,1)),"CA/quittance","teal",icon="🎫")
-            kpi(c6,"Part du CA total",pct(part),"vs toutes périodes","blue",icon="📊")
-
-            st.markdown("")
-            t_evo, t_cmp, t_prod, t_int, t_raw = st.tabs(
-                ["📈 Évolution","⚖️ Comparaison périodes","🛒 Par produit",
-                 "🤝 Par intermédiaire","🔍 Données brutes"])
-
-            # ══════════════════════════════════════════════════════════════
-            #  COMPARAISON DE DEUX PÉRIODES — CA et nombre de contrats
-            # ══════════════════════════════════════════════════════════════
-            with t_cmp:
-                section("⚖️ Comparaison de deux périodes",
-                        "CHIFFRE D'AFFAIRES · CONTRATS · VARIATION")
-                _dc_c = "DATECOMP" if "DATECOMP" in ca.columns else None
-                if _dc_c is None:
-                    alert("Colonne DATECOMP absente — comparaison impossible.","warn")
-                else:
-                    _cb = ca.copy()
-                    _cb["_DT"] = pd.to_datetime(_cb[_dc_c], errors="coerce")
-                    _cb = _cb.dropna(subset=["_DT"])
-                    if _cb.empty:
-                        alert("Aucune date de comptabilisation exploitable.","warn")
-                    else:
-                        _cak = "CHIFAFFA" if "CHIFAFFA" in _cb.columns else "MONTENCA"
-                        _gr  = st.radio("Granularité",
-                                ["Année","Semestre","Trimestre","Mois","Semaine"],
-                                horizontal=True, key="cmp_gran")
-
-                        def _plab(s, g):
-                            if g == "Année":     return s.dt.year.astype(str)
-                            if g == "Semestre":  return (s.dt.year.astype(str) + "-S"
-                                                   + ((s.dt.month-1)//6 + 1).astype(str))
-                            if g == "Trimestre": return (s.dt.year.astype(str) + "-T"
-                                                   + s.dt.quarter.astype(str))
-                            if g == "Mois":      return s.dt.strftime("%Y-%m")
-                            _ic = s.dt.isocalendar()
-                            return (_ic.year.astype(str) + "-S"
-                                    + _ic.week.astype(str).str.zfill(2))
-
-                        _cb["_PER"] = _plab(_cb["_DT"], _gr)
-                        _pers = sorted(_cb["_PER"].unique().tolist(), reverse=True)
-                        if len(_pers) < 2:
-                            alert(f"Une seule période en granularité « {_gr} ». "
-                                  "Choisissez une granularité plus fine.","info")
-                        else:
-                            k1,k2 = st.columns(2)
-                            _pA = k1.selectbox("Période A", _pers, index=0, key="cmp_pa")
-                            # La periode B ne peut pas etre identique a la periode A :
-                            # elle est retiree de la liste proposee.
-                            _pers_b = [p for p in _pers if p != _pA]
-                            _prevb  = st.session_state.get("cmp_pb")
-                            _ixb    = _pers_b.index(_prevb) if _prevb in _pers_b else 0
-                            _pB = k2.selectbox("Période B  (≠ A)", _pers_b,
-                                               index=_ixb, key="cmp_pb")
-                            _dA = _cb[_cb["_PER"] == _pA]
-                            _dB = _cb[_cb["_PER"] == _pB]
-                            _caA = float(_dA[_cak].fillna(0).sum())
-                            _caB = float(_dB[_cak].fillna(0).sum())
-                            _nA, _nB = len(_dA), len(_dB)
-                            _kk = "POLICE_KEY"
-                            _tA = _dA[_kk].nunique() if _kk in _dA.columns else _nA
-                            _tB = _dB[_kk].nunique() if _kk in _dB.columns else _nB
-                            _mA, _mB = _caA/max(_nA,1), _caB/max(_nB,1)
-                            _v = lambda a,b: ((a-b)/abs(b)*100) if b else 0.0
-                            _vC,_vN,_vT,_vM = _v(_caA,_caB), _v(_nA,_nB), _v(_tA,_tB), _v(_mA,_mB)
-
-                            st.markdown(f"""
-                            <div style="background:{NAVY};border-radius:10px;padding:10px 16px;
-                                 margin:10px 0;color:white;font-size:12px;text-align:center">
-                              <b>{_pA}</b> comparé à <b>{_pB}</b> · granularité : {_gr}
-                            </div>""", unsafe_allow_html=True)
-
-                            q1,q2,q3,q4 = st.columns(4)
-                            _ar = lambda x: "▲" if x >= 0 else "▼"
-                            _co = lambda x: "teal" if x >= 0 else "red"
-                            kpi(q1,"Chiffre d'affaires", fmt_full(_caA),
-                                f"{_ar(_vC)} {abs(_vC):.1f}% vs {_pB}", _co(_vC), icon="💰")
-                            kpi(q2,"Nb quittances", nb_full(_nA),
-                                f"{_ar(_vN)} {abs(_vN):.1f}% vs {_pB}", _co(_vN), icon="🧾")
-                            kpi(q3,"Nb contrats", nb_full(_tA),
-                                f"{_ar(_vT)} {abs(_vT):.1f}% vs {_pB}", _co(_vT), icon="📄")
-                            kpi(q4,"Ticket moyen", fmt_full(_mA),
-                                f"{_ar(_vM)} {abs(_vM):.1f}% vs {_pB}", "blue", icon="🎫")
-
-                            st.markdown("---")
-                            _tc = pd.DataFrame({
-                                "Indicateur": ["Chiffre d'affaires (FCFA)","Nb quittances",
-                                               "Nb contrats distincts","Ticket moyen (FCFA)"],
-                                str(_pA): [fmt_full(_caA,""), nb_full(_nA),
-                                           nb_full(_tA), fmt_full(_mA,"")],
-                                str(_pB): [fmt_full(_caB,""), nb_full(_nB),
-                                           nb_full(_tB), fmt_full(_mB,"")],
-                                "Écart":  [fmt_full(_caA-_caB,""), f"{_nA-_nB:+,}".replace(",", " "),
-                                           f"{_tA-_tB:+,}".replace(",", " "), fmt_full(_mA-_mB,"")],
-                                "Variation": [f"{_vC:+.1f}%", f"{_vN:+.1f}%",
-                                              f"{_vT:+.1f}%", f"{_vM:+.1f}%"]})
-                            st.dataframe(_tc, use_container_width=True, hide_index=True)
-
-                            w1,w2 = st.columns(2)
-                            with w1:
-                                f1 = go.Figure(go.Bar(x=[_pA,_pB], y=[_caA,_caB],
-                                    marker_color=[GREEN,NAVY],
-                                    text=[fmt_full(_caA,""), fmt_full(_caB,"")],
-                                    textposition="outside", textfont=dict(size=10)))
-                                fig_style(f1, 320, "💰 Chiffre d'affaires")
-                                st.plotly_chart(f1, use_container_width=True)
-                            with w2:
-                                f2 = go.Figure()
-                                f2.add_bar(x=[_pA,_pB], y=[_nA,_nB], name="Quittances",
-                                    marker_color=AMBER, text=[nb_full(_nA), nb_full(_nB)],
-                                    textposition="outside", textfont=dict(size=10))
-                                f2.add_bar(x=[_pA,_pB], y=[_tA,_tB], name="Contrats",
-                                    marker_color=BLUE, text=[nb_full(_tA), nb_full(_tB)],
-                                    textposition="outside", textfont=dict(size=10))
-                                f2.update_layout(barmode="group")
-                                fig_style(f2, 320, "🧾 Volumes")
-                                st.plotly_chart(f2, use_container_width=True)
-
-                            _pc = next((c for c in ["LIBECATE","NOMPRODUIT"]
-                                        if c in _cb.columns), None)
-                            if _pc:
-                                st.markdown("---")
-                                section("Comparaison par produit","CA ET VOLUMES")
-                                _ga = _dA.groupby(_pc)[_cak].agg(["sum","count"])
-                                _gb = _dB.groupby(_pc)[_cak].agg(["sum","count"])
-                                _mm = _ga.join(_gb, how="outer",
-                                               lsuffix="_A", rsuffix="_B").fillna(0)
-                                _mm["Var %"] = _mm.apply(
-                                    lambda r: ((r["sum_A"]-r["sum_B"])/abs(r["sum_B"])*100)
-                                              if r["sum_B"] else 0.0, axis=1)
-                                _mm = _mm.sort_values("sum_A", ascending=False).head(12).reset_index()
-                                f3 = go.Figure()
-                                f3.add_bar(y=_mm[_pc].astype(str).str[:24], x=_mm["sum_A"],
-                                    name=str(_pA), orientation="h", marker_color=GREEN)
-                                f3.add_bar(y=_mm[_pc].astype(str).str[:24], x=_mm["sum_B"],
-                                    name=str(_pB), orientation="h", marker_color=NAVY)
-                                f3.update_layout(barmode="group",
-                                    yaxis=dict(autorange="reversed"),
-                                    legend=dict(orientation="h", y=-0.15))
-                                fig_style(f3, 420, f"🛒 CA par produit — {_pA} vs {_pB}")
-                                st.plotly_chart(f3, use_container_width=True)
-                                _dd = _mm.copy()
-                                _dd.columns = [_pc, f"CA {_pA}", f"Nb {_pA}",
-                                               f"CA {_pB}", f"Nb {_pB}", "Var %"]
-                                for _c in [f"CA {_pA}", f"CA {_pB}"]:
-                                    _dd[_c] = _dd[_c].apply(lambda x: fmt_full(x,""))
-                                for _c in [f"Nb {_pA}", f"Nb {_pB}"]:
-                                    _dd[_c] = _dd[_c].apply(nb_full)
-                                _dd["Var %"] = _dd["Var %"].apply(lambda x: f"{x:+.1f}%")
-                                st.dataframe(_dd, use_container_width=True, hide_index=True)
-                                st.download_button("📥 Export comparaison (CSV)",
-                                    dl_csv(_mm), f"comparaison_{_pA}_vs_{_pB}.csv",
-                                    "text/csv", use_container_width=True, key="dl_cmp")
-
-            with t_evo:
-                if "DATECOMP" in df.columns:
-                    c1,c2 = st.columns(2)
-                    with c1:
-                        evo = all_ca.groupby(all_ca["DATECOMP"].dt.to_period("M").astype(str))["CHIFAFFA"].sum().reset_index()
-                        evo.columns = ["Période","CA"]; evo["Cumul"] = evo["CA"].cumsum()
-                        fig = make_subplots(specs=[[{"secondary_y":True}]])
-                        fig.add_bar(x=evo["Période"],y=evo["CA"],name="CA mensuel",marker_color=GREEN,opacity=.88)
-                        fig.add_scatter(x=evo["Période"],y=evo["Cumul"],name="Cumul",line=dict(color=BLUE,width=2.5),secondary_y=True)
-                        fig_style(fig,380,"📅 CA mensuel + cumul — tous exercices")
-                        st.plotly_chart(fig,use_container_width=True)
-                        a,_ = st.columns(2)
-                        a.download_button("📥 CSV",dl_csv(evo),"ca_mensuel.csv","text/csv",use_container_width=True,key="dl_evo_m")
-                    with c2:
-                        # Saisonnalité
-                        saison = all_ca.groupby("MOIS")["CHIFAFFA"].mean().reset_index() if "MOIS" in all_ca.columns else pd.DataFrame()
-                        if not saison.empty:
-                            saison.columns=["Mois","CA moyen"]
-                            saison["Label"]=saison["Mois"].apply(lambda m:MOIS_FR[int(m)-1] if pd.notna(m) else "")
-                            moy_g = saison["CA moyen"].mean()
-                            _mc = [GREEN if v >= moy_g else "rgba(26,127,110,0.35)" for v in saison["CA moyen"]]
-                            fig2=go.Figure(go.Bar(
-                                x=saison["Label"], y=saison["CA moyen"],
-                                marker_color=_mc,
-                                text=[fmt(v) for v in saison["CA moyen"]],
-                                textposition="outside", textfont=dict(size=9)))
-                            fig2.add_hline(y=moy_g,line_dash="dash",line_color=RED,
-                                annotation_text=f"Moy. {fmt(moy_g)}",annotation_font_size=9)
-                            fig_style(fig2,380,"📅 Saisonnalité — CA moyen par mois")
-                            st.plotly_chart(fig2,use_container_width=True)
-                    # Multi-exercices
-                    if "ANNEE" in all_ca.columns:
-                        evo_a=all_ca.groupby("ANNEE")["CHIFAFFA"].sum().reset_index()
-                        evo_a=evo_a[evo_a["ANNEE"].between(2000,2030)].sort_values("ANNEE")
-                        if len(evo_a)>1:
-                            section("📈 Évolution annuelle","MULTI-EXERCICES")
-                            fig3=go.Figure(go.Bar(x=evo_a["ANNEE"].astype(str),y=evo_a["CHIFAFFA"],
-                                marker=dict(color=evo_a["CHIFAFFA"],colorscale=[[0,MINT],[1,GREEN2]],showscale=False),
-                                text=[fmt(v) for v in evo_a["CHIFAFFA"]],textposition="outside"))
-                            fig_style(fig3,340,"📈 CA annuel")
-                            st.plotly_chart(fig3,use_container_width=True)
-                            a,_=st.columns(2)
-                            a.download_button("📥 CSV",dl_csv(evo_a),"ca_annuel.csv","text/csv",use_container_width=True,key="dl_ann")
-
-            with t_prod:
-                if "LIBECATE" in df.columns:
-                    cp=df.groupby("LIBECATE").agg(CA=("CHIFAFFA","sum"),NbQ=("CHIFAFFA","count"),
-                        Comm=("COMMAPPO","sum"),Prime=("PRIMNETT","sum")).reset_index().sort_values("CA",ascending=False)
-                    cp["Tx comm"]=cp["Comm"]/cp["CA"].replace(0,np.nan)*100
-                    cp["Part CA"]=cp["CA"]/cp["CA"].sum()*100
-                    c1,c2=st.columns(2)
-                    with c1:
-                        fig=go.Figure(go.Bar(x=cp["CA"],y=cp["LIBECATE"].str[:26],orientation="h",
-                            marker=dict(color=cp["Tx comm"],colorscale=[[0,MINT],[.5,GREEN],[1,GREEN2]],showscale=True,
-                                colorbar=dict(title="Tx comm%",len=.6,thickness=12)),
-                            text=[fmt(v) for v in cp["CA"]],textposition="outside", textfont=dict(size=10)))
-                        fig.update_layout(yaxis=dict(autorange="reversed"))
-                        fig_style(fig,400,f"💰 CA + taux commission · {period_lbl}")
-                        st.plotly_chart(fig,use_container_width=True)
-                    with c2:
-                        fig2=px.sunburst(cp,path=["LIBECATE"],values="CA",color="Part CA",
-                            color_continuous_scale=[[0,MINT],[.5,GREEN],[1,GREEN2]])
-                        fig2.update_layout(height=400,margin=dict(l=5,r=5,t=20,b=5))
-                        st.plotly_chart(fig2,use_container_width=True)
-                    cp_d=cp.copy()
-                    for c_ in ["CA","Comm","Prime"]: cp_d[c_]=cp_d[c_].apply(fmt)
-                    cp_d["Tx comm"]=cp_d["Tx comm"].apply(lambda x:f"{x:.2f}%")
-                    cp_d["Part CA"]=cp_d["Part CA"].apply(lambda x:f"{x:.2f}%")
-                    cp_d.columns=["Produit","CA","Nb quittances","Commissions","Prime nette","Tx comm","Part CA"]
-                    st.dataframe(cp_d,use_container_width=True,hide_index=True)
-                    a,b=st.columns(2)
-                    a.download_button("📥 CSV",dl_csv(cp),"ca_produits.csv","text/csv",use_container_width=True,key="dl_cprod")
-                    b.download_button("📥 Excel",dl_xlsx(cp),"ca_produits.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_cprod_xl")
-
-            with t_int:
-                # Regle metier : le code apporteur vient de la base CA (CODEAPPO),
-                # son nom est recupere dans le Portefeuille (NOM_APP).
-                # Fiable quelle que soit l'annee, contrairement a NOM_INTERMEDIAIRE
-                # qui peut etre vide sur certains exercices.
-                df_i = df.copy()
-                _cca = next((c for c in ["CODEAPPO","CODE_APPO","CODEAPP"]
-                             if c in df_i.columns), None)
-                ag_k = None
-                if _cca is not None:
-                    _cpf = next((c for c in ["CODEAPPO","CODE_APPO","CODEAPP"]
-                                 if pf is not None and c in pf.columns), None)
-                    _npf = next((c for c in ["NOM_APP","NOM_APPORT","NOM_APPO"]
-                                 if pf is not None and c in pf.columns), None)
-                    df_i["_CK"] = df_i[_cca].astype(str).str.strip()
-                    # Dictionnaire code -> nom sur bases completes
-                    _mn = {}
-                    if _cpf and _npf:
-                        _t = pf[[_cpf,_npf]].dropna()
-                        _t = _t[_t[_npf].astype(str).str.strip() != ""]
-                        for _c,_n in zip(_t[_cpf].astype(str).str.strip(),
-                                         _t[_npf].astype(str).str.strip()):
-                            _mn.setdefault(_c,_n)
-                    _nca = next((c for c in ["NOM_APPORT","NOM_APPO","NOM_INTERMEDIAIRE","NOM_APP"]
-                                 if c in ca.columns), None)
-                    if _nca:
-                        _t2 = ca[[_cca,_nca]].dropna()
-                        _t2 = _t2[_t2[_nca].astype(str).str.strip() != ""]
-                        for _c,_n in zip(_t2[_cca].astype(str).str.strip(),
-                                         _t2[_nca].astype(str).str.strip()):
-                            _mn.setdefault(_c,_n)
-                    df_i["_NR"] = df_i["_CK"].map(_mn)
-                    df_i["_APP"] = [
-                        (f"{n} ({c})" if pd.notna(n) and str(n).strip() else f"Code {c}")
-                        for n, c in zip(df_i["_NR"], df_i["_CK"])]
-                    ag_k = "_APP"
-                else:
-                    ag_k = next((c for c in ["NOM_APPORT","NOM_APPO","NOM_INTERMEDIAIRE","NOM_APP"]
-                                 if c in df_i.columns), None)
-
-                if ag_k is not None and ag_k in df_i.columns:
-                    _agg_i = {"CA":("CHIFAFFA","sum"), "NbQ":("CHIFAFFA","count")}
-                    if "COMMAPPO" in df_i.columns: _agg_i["Comm"] = ("COMMAPPO","sum")
-                    ci = (df_i.groupby(ag_k, dropna=False).agg(**_agg_i)
-                              .reset_index().sort_values("CA",ascending=False))
-                    if "Comm" not in ci.columns: ci["Comm"] = 0
-                    tot_ci=ci["CA"].sum()
-                    ci["Part %"]=(ci["CA"]/tot_ci*100).round(2)
-                    ci["Part cum %"]=ci["Part %"].cumsum().round(1)
-                    # Pareto
-                    top20=ci.head(20)
-                    fig=make_subplots(specs=[[{"secondary_y":True}]])
-                    _lbl20 = top20[ag_k].astype(str).str[:26]
-                    fig.add_bar(x=_lbl20, y=top20["CA"], name="CA",
-                        marker_color=GREEN, opacity=.85,
-                        customdata=top20["CA"],
-                        hovertemplate="%{x}<br>CA : %{customdata:,.0f} FCFA<extra></extra>")
-                    fig.add_scatter(x=_lbl20, y=top20["Part cum %"], name="Cumul %",
-                        line=dict(color=RED,width=2.5), secondary_y=True,
-                        hovertemplate="%{x}<br>Cumul : %{y:.1f}%<extra></extra>")
-                    fig.update_xaxes(tickangle=-35)
-                    fig_style(fig,420,f"📊 Pareto CA — Top 20 · {period_lbl}")
-                    st.plotly_chart(fig,use_container_width=True)
-                    # Partenaires financiers
-                    _cstr = "CODEAPPO_STR" if "CODEAPPO_STR" in df_i.columns else (
-                            "_CK" if "_CK" in df_i.columns else None)
-                    if _cstr:
-                        def is_pf(x):
-                            s=str(x).strip()
-                            return s.isdigit() and len(s)==3 and s!="100"
-                        pm=df_i[_cstr].apply(is_pf)
-                        if pm.sum()>0:
-                            ca_pf=float(df_i.loc[pm,"CHIFAFFA"].sum()); ca_ri=float(df_i.loc[~pm,"CHIFAFFA"].sum())
-                            section("🏦 Partenaires financiers vs Réseau interne","CODEAPPO")
-                            pp1,pp2,pp3=st.columns(3)
-                            kpi(pp1,"CA Réseau interne",fmt(ca_ri),pct(ca_ri/max(chifaffa,1)*100),"teal",icon="🏢")
-                            kpi(pp2,"CA Partenaires",fmt(ca_pf),pct(ca_pf/max(chifaffa,1)*100),"blue",icon="🏦")
-                            kpi(pp3,"Nb partenaires",nb_full(df_i.loc[pm,_cstr].nunique()),"Codes 3 chiffres ≠100","",icon="🤝")
-                    ci_d=ci.head(50).copy()
-                    ci_d = ci_d.rename(columns={ag_k:"Apporteur"})
-                    for c_ in ["CA","Comm"]: ci_d[c_]=ci_d[c_].apply(lambda x: fmt_full(x,""))
-                    ci_d["NbQ"]=ci_d["NbQ"].apply(nb_full)
-                    ci_d["Part %"]=ci_d["Part %"].apply(lambda x:f"{x:.2f}%")
-                    ci_d["Part cum %"]=ci_d["Part cum %"].apply(lambda x:f"{x:.1f}%")
-                    st.dataframe(ci_d,use_container_width=True,hide_index=True,height=360)
-                    a,b=st.columns(2)
-                    a.download_button("📥 CSV",dl_csv(ci),"intermediaires.csv","text/csv",use_container_width=True,key="dl_int")
-                    b.download_button("📥 Excel",dl_xlsx(ci.head(50000)),"intermediaires.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_int_xl")
-
-            with t_raw:
-                show_c=[c for c in ["DATECOMP","LIBECATE","NOM_INTERMEDIAIRE","NUMEPOLI","CODEAPPO_STR","CHIFAFFA","PRIMNETT","COMMAPPO","TYPEMOUV","POLICE_KEY"] if c in df.columns]
-                srch=st.text_input("🔍 Rechercher",placeholder="Produit, intermédiaire, N° police…",label_visibility="collapsed",key="srch_ca")
-                di=df[show_c].copy()
-                if "DATECOMP" in di.columns: di["DATECOMP"]=di["DATECOMP"].apply(ds)
-                for nc in ["CHIFAFFA","PRIMNETT","COMMAPPO"]:
-                    if nc in di.columns: di[nc]=di[nc].apply(lambda x:fmt(x,""))
-                if srch: di=di[di.apply(lambda r:srch.lower() in str(r).lower(),axis=1)]
-                st.dataframe(di.head(500),use_container_width=True,hide_index=True,height=400)
-                st.caption(f"Affichage 500 / {len(di):,} lignes")
-                a,b=st.columns(2)
-                a.download_button("📥 CSV complet",dl_csv(df),f"ca_{period_lbl}.csv","text/csv",use_container_width=True,key="dl_ca_raw")
-                b.download_button("📥 Excel",dl_xlsx(df[show_c].head(50000)),f"ca_{period_lbl}.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_ca_raw_xl")
-
-
-    # ═══════════════════════════════════════════════════════════════════════════════
-    # 
-# PAGE — PORTEFEUILLE
-# ═══════════════════════════════════════════════════════════════════════════════
-elif "Portefeuille" in page:
-    if pf is None: alert("Chargez le Portefeuille dans la barre latérale.","warn"); st.stop()
-    df_all = pf  # portefeuille complet (reference pour les totaux)
-    # ── Perimetre analyse : annee de saisie (DATESOUS) puis periode ──────────
-    # Priorite : filtre annee de la sidebar > filtre periode > tout
-    if SEL_YEAR:
-        df = pf[year_mask(pf, ["DATESOUS","ANNEESOUS","ANNEE","DATEEFFE"], SEL_YEAR)].copy()
-        _pf_scope = f"Année de saisie {SEL_YEAR}"
-    else:
-        df = pf_f()
-        _pf_scope = period_lbl
-    if df is None or df.empty:
-        alert(f"Aucune police saisie sur <b>{_pf_scope}</b>. "
-              f"Affichage du portefeuille complet.", "warn")
-        df, _pf_scope = df_all, "Toutes périodes"
-
-    # Titre dynamique selon filtre année
-    section(f"📋 Portefeuille — {_pf_scope}",
-            "PÉRIMÈTRE : DATE DE SAISIE · FILTRES · EXPORT")
-
-    # Listes de choix construites depuis df (déjà filtré par année si SEL_YEAR)
-    _base_opts = df  # base pour les options = données de l'année choisie
-
-    f0,f1,f2,f3,f4 = st.columns([1.2,1.2,1.2,1.2,1.2])
-
-    # 0. Filtre état ETAT_POLICE
-    etat_opts = ["Tous"] + sorted(
-        _base_opts["ETAT_POLICE"].str.strip().dropna().unique().tolist()
-    ) if "ETAT_POLICE" in _base_opts.columns else ["Tous"]
-    etat_sel  = f0.selectbox("🔘 État police", etat_opts, key="pf_etat")
-
-    # 1. Filtre produit / catégorie
-    prod_opts = ["Tous"] + sorted(
-        _base_opts["LIBECATE"].dropna().unique().tolist()
-    ) if "LIBECATE" in _base_opts.columns else ["Tous"]
-    prod_sel  = f1.selectbox("📦 Produit", prod_opts, key="pf_prod")
-
-    # 2. Filtre périodicité
-    peri_opts = ["Toutes"] + sorted(
-        _base_opts["PERIODICITE"].dropna().unique().tolist()
-    ) if "PERIODICITE" in _base_opts.columns else ["Toutes"]
-    peri_sel  = f2.selectbox("🔄 Périodicité", peri_opts, key="pf_peri")
-
-    # 3. Filtre ville
-    villes_opts = ["Toutes"] + sorted(
-        _base_opts["LIBEVILL"].dropna().unique().tolist()[:80]
-    ) if "LIBEVILL" in _base_opts.columns else ["Toutes"]
-    ville_sel   = f3.selectbox("📍 Ville", villes_opts, key="pf_ville")
-
-    # 4. Recherche texte libre
-    srch_pf = f4.text_input("🔍 Recherche", placeholder="Nom, ville, apporteur…", key="pf_srch")
-
-    # Appliquer les filtres
-    fi = df.copy()
-    if etat_sel  != "Tous"    and "ETAT_POLICE"  in fi.columns:
-        fi = fi[fi["ETAT_POLICE"].str.strip() == etat_sel]
-    if prod_sel  != "Tous"    and "LIBECATE"      in fi.columns:
-        fi = fi[fi["LIBECATE"] == prod_sel]
-    if peri_sel  != "Toutes"  and "PERIODICITE"   in fi.columns:
-        fi = fi[fi["PERIODICITE"] == peri_sel]
-    if ville_sel != "Toutes"  and "LIBEVILL"      in fi.columns:
-        fi = fi[fi["LIBEVILL"] == ville_sel]
-    if srch_pf.strip():
-        _cols_s = [c for c in ["NOM_ASSU","LIBEVILL","NOM_APP","LIBECATE"] if c in fi.columns]
-        _mask   = pd.Series(False, index=fi.index)
-        for c_ in _cols_s:
-            _mask |= fi[c_].astype(str).str.lower().str.contains(srch_pf.lower(), na=False)
-        fi = fi[_mask]
-
-    # Badge filtres actifs
-    _filters_active = [x for x in [
-        f"Année {SEL_YEAR}" if SEL_YEAR else None,
-        f"État : {etat_sel}" if etat_sel != "Tous" else None,
-        f"Produit : {prod_sel}" if prod_sel != "Tous" else None,
-        f"Périodicité : {peri_sel}" if peri_sel != "Toutes" else None,
-        f"Ville : {ville_sel}" if ville_sel != "Toutes" else None,
-        f"Recherche : {srch_pf}" if srch_pf.strip() else None,
-    ] if x]
-    if _filters_active:
-        st.markdown(
-            " &nbsp;".join([f'<span style="background:{NAVY}20;border:1px solid {NAVY}40;'
-                            f'border-radius:12px;padding:2px 10px;font-size:11px;'
-                            f'font-weight:600">🔍 {f}</span>'
-                            for f in _filters_active]),
-            unsafe_allow_html=True)
-    st.markdown(f"<div style='font-size:11px;color:#888;margin:4px 0'>"
-                f"<b>{len(fi):,}</b> police(s) sur {len(df):,}</div>",
-                unsafe_allow_html=True)
-
-    nb=len(fi)
-    actifs=int((fi["ETAT_POLICE"].str.strip()=="ACTIF").sum()) if "ETAT_POLICE" in fi.columns and nb else 0
-    resil =int((fi["ETAT_POLICE"].str.strip()=="RESILIE").sum()) if "ETAT_POLICE" in fi.columns and nb else 0
-    monten=float(fi["MONTENCA"].fillna(0).sum()) if "MONTENCA" in fi.columns and nb else 0
-    coti_p=float(fi["COTI_PERIODIQUE"].fillna(0).sum()) if "COTI_PERIODIQUE" in fi.columns and nb else 0
-
-    c1,c2,c3,c4,c5 = st.columns(5)
-    kpi(c1,"Polices",nb_full(nb),f"{_pf_scope} · {len(df_all):,} au total".replace(","," "),"",icon="📋")
-    kpi(c2,"Actives",f"{actifs:,}",pct(actifs/max(nb,1)*100),"",icon="✅")
-    kpi(c3,"Résiliées",f"{resil:,}",pct(resil/max(nb,1)*100),"red",icon="📉")
-    kpi(c4,"Encaissements",fmt(monten),"MONTENCA","teal",icon="💰")
-    kpi(c5,"Cotisation périodique",fmt(coti_p),"COTI_PERIODIQUE","blue",icon="💳")
-
-    st.markdown("")
-    t1,t2,t3,t4,t5 = st.tabs(["📋 Tableau","📊 Statistiques","📈 Évolution souscriptions","🔗 Jointure CA","👤 Tous les clients"])
-
-    with t1:
-        COLS_SHOW=[c for c in ["POLICE_KEY","NUMEPOLI_P","LIBECATE","ETAT_POLICE","NOM_ASSU","LIBEVILL","NOM_APP","DATESOUS","DATEEFFE","DATEECHE","COTI_PERIODIQUE","MONTENCA","SEXERISQ","CODEPERI","NBRE_PRIME"] if c in fi.columns]
-        di=fi[COLS_SHOW].copy()
-        for dc in ["DATESOUS","DATEEFFE","DATEECHE"]:
-            if dc in di.columns: di[dc]=di[dc].apply(ds)
-        for nc in ["COTI_PERIODIQUE","MONTENCA"]:
-            if nc in di.columns: di[nc]=di[nc].apply(lambda x:fmt(x,""))
-        st.dataframe(di.head(500),use_container_width=True,hide_index=True,height=400)
-        st.caption(f"Affichage 500 / {nb:,} polices")
-        a,b=st.columns(2)
-        a.download_button("📥 CSV",dl_csv(fi),f"pf_{period_lbl}.csv","text/csv",use_container_width=True,key="dl_pf_csv")
-        b.download_button("📥 Excel",dl_xlsx(fi[COLS_SHOW].head(50000)),f"pf_{period_lbl}.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_pf_xl")
-
-    with t2:
-        try:
-            sc1,sc2=st.columns(2)
-            with sc1:
-                if "LIBECATE" in fi.columns and not fi.empty:
-                    _pc_agg = {"Nb":("LIBECATE","count")}
-                    if "MONTENCA" in fi.columns: _pc_agg["CA"] = ("MONTENCA","sum")
-                    pc_=fi.groupby("LIBECATE").agg(**_pc_agg).reset_index().sort_values("Nb",ascending=False)
-                    if "CA" not in pc_.columns: pc_["CA"] = 0
-                    fig=go.Figure(go.Bar(x=pc_["Nb"],y=pc_["LIBECATE"].astype(str).str[:24],
-                        orientation="h",
-                        marker=dict(color=pc_["Nb"],colorscale=[[0,MINT],[1,GREEN2]],showscale=False),
-                        text=pc_["Nb"].astype(str),textposition="outside", textfont=dict(size=10)))
-                    fig.update_layout(yaxis=dict(autorange="reversed"))
-                    fig_style(fig,380,"Polices par produit / catégorie")
-                    st.plotly_chart(fig,use_container_width=True)
-            with sc2:
-                if "ETAT_POLICE" in fi.columns and not fi.empty:
-                    etat_c_={"ACTIF":GREEN,"RESILIE":RED,"INACTIF":AMBER,
-                             "ECHU":"#5A6478","ASSURE ECHU":"#2C3E50","SUSPENDU":BLUE}
-                    ec=fi["ETAT_POLICE"].str.strip().value_counts().reset_index()
-                    ec.columns=["État","Nb"]
-                    fig2=go.Figure(go.Pie(labels=ec["État"],values=ec["Nb"],hole=.44,
-                        marker_colors=[etat_c_.get(e,"#888") for e in ec["État"]],
-                        textinfo="percent+label", textfont=dict(size=11)))
-                    fig_style(fig2,380,"États du portefeuille")
-                    st.plotly_chart(fig2,use_container_width=True)
-            sc3,sc4=st.columns(2)
-            with sc3:
-                if "CODEPERI" in fi.columns and not fi.empty:
-                    per=fi["CODEPERI"].map(CODEPERI_MAP).fillna("Autre").value_counts().reset_index()
-                    per.columns=["Périodicité","Nb"]
-                    fig3=go.Figure(go.Pie(labels=per["Périodicité"],values=per["Nb"],
-                        hole=.44,marker_colors=PAL,textinfo="percent+label", textfont=dict(size=11)))
-                    fig_style(fig3,320,"Périodicité des cotisations")
-                    st.plotly_chart(fig3,use_container_width=True)
-            with sc4:
-                if "LIBEVILL" in fi.columns and not fi.empty:
-                    vl=fi["LIBEVILL"].value_counts().head(10).reset_index()
-                    vl.columns=["Ville","Nb"]
-                    fig4=go.Figure(go.Bar(x=vl["Nb"],y=vl["Ville"].astype(str).str[:18],
-                        orientation="h",marker_color=PAL[:len(vl)],
-                        text=vl["Nb"].astype(str),textposition="outside", textfont=dict(size=10)))
-                    fig4.update_layout(yaxis=dict(autorange="reversed"))
-                    fig_style(fig4,320,"Top 10 villes d'implantation")
-                    st.plotly_chart(fig4,use_container_width=True)
-            _pc_stat = pc_ if "pc_" in dir() else fi
-            a,b=st.columns(2)
-            a.download_button("📥 CSV stats",dl_csv(_pc_stat),"stats_pf.csv",
-                "text/csv",use_container_width=True,key="dl_stats_pf")
-        except Exception as _e_t2:
-            alert(f"Erreur Statistiques portefeuille : {_e_t2}","danger")
-
-    with t3:
-        if "DATESOUS" in df_all.columns:
-            es=df_all.groupby(df_all["DATESOUS"].dt.year).agg(Souscriptions=("DATESOUS","count"),CA=("MONTENCA","sum")).reset_index()
-            es.columns=["Année","Souscriptions","CA"]; es=es[es["Année"].between(1995,2026)].sort_values("Année")
-            fig=make_subplots(specs=[[{"secondary_y":True}]])
-            fig.add_bar(x=es["Année"].astype(str),y=es["Souscriptions"],name="Souscriptions",
-                marker=dict(color=es["Souscriptions"],colorscale=[[0,MINT],[.4,GREEN],[1,GREEN2]],showscale=False))
-            fig.add_scatter(x=es["Année"].astype(str),y=es["CA"],name="CA MONTENCA",
-                line=dict(color=RED,width=2.5),mode="lines+markers",secondary_y=True)
-            fig.update_yaxes(title_text="Nb souscriptions",secondary_y=False)
-            fig.update_yaxes(title_text="CA MONTENCA",secondary_y=True,showgrid=False)
-            fig_style(fig,420,"📈 Évolution souscriptions & CA 1995–2025")
-            st.plotly_chart(fig,use_container_width=True)
-            a,b=st.columns(2)
-            a.download_button("📥 CSV",dl_csv(es),"evo_sous.csv","text/csv",use_container_width=True,key="dl_evo_pf")
-            b.download_button("📥 Excel",dl_xlsx(es),"evo_sous.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_evo_pf_xl")
-
-    with t4:
-        if ca is not None and "POLICE_KEY" in fi.columns and "POLICE_KEY" in ca.columns:
-            section(f"🔗 Polices avec CA — {period_lbl}","JOINTURE PF × CA")
-            _ca_tmp = ca_f(); _ca_join = _ca_tmp if _ca_tmp is not None and not _ca_tmp.empty else ca
-            # Merge avec suffixes : colonnes PF ont suffixe _PF si conflit
-            _fi_join = fi[["POLICE_KEY","LIBECATE","ETAT_POLICE","NOM_ASSU","LIBEVILL","NOM_APP"]].drop_duplicates("POLICE_KEY")
-            ca_pf = _ca_join.merge(_fi_join, on="POLICE_KEY", how="inner", suffixes=("","_PF"))
-            # Résolution dynamique des noms de colonnes après merge
-            _libe = "LIBECATE_PF" if "LIBECATE_PF" in ca_pf.columns else "LIBECATE"
-            _etat = "ETAT_POLICE_PF" if "ETAT_POLICE_PF" in ca_pf.columns else "ETAT_POLICE"
-            _nom  = "NOM_ASSU_PF"  if "NOM_ASSU_PF"  in ca_pf.columns else "NOM_ASSU"
-            _app  = "NOM_APP_PF"   if "NOM_APP_PF"   in ca_pf.columns else "NOM_APP"
-            _grp_cols = [c for c in ["POLICE_KEY",_libe,_etat,_nom,_app] if c in ca_pf.columns]
-            tp = (ca_pf.groupby(_grp_cols)
-                       .agg(CA=("CHIFAFFA","sum"), NbQ=("CHIFAFFA","count"))
-                       .reset_index()
-                       .sort_values("CA", ascending=False)
-                       .head(25))
-            tp.columns = [c.replace("_PF","") for c in tp.columns]
-            tp_d = tp.copy(); tp_d["CA"] = tp_d["CA"].apply(fmt)
-            st.dataframe(tp_d, use_container_width=True, hide_index=True)
-            a,b=st.columns(2)
-            a.download_button("📥 CSV jointure",dl_csv(tp),"jointure_pf_ca.csv","text/csv",use_container_width=True,key="dl_join_pf")
-        else: alert("Chargez la Base CA pour voir la jointure PF × CA.","info")
-
-    with t5:
-        section("👤 Liste complète des clients","NOM_ASSU · TOUTES POLICES")
-        if pf is None:
-            alert("Chargez le Portefeuille.","warn")
-        else:
-            # Filtres clients
-            fc1,fc2,fc3 = st.columns(3)
-            srch_cli = fc1.text_input("🔍 Rechercher un assuré",
-                placeholder="Nom, prénom…", label_visibility="collapsed",
-                key="srch_cli")
-            etat_cli_opts = ["Tous"] + sorted(
-                pf["ETAT_POLICE"].dropna().unique().tolist()) if "ETAT_POLICE" in pf.columns else ["Tous"]
-            etat_cli = fc2.selectbox("État police", etat_cli_opts,
-                label_visibility="collapsed", key="etat_cli")
-            ville_cli_opts = ["Toutes"] + sorted(
-                pf["LIBEVILL"].dropna().unique().tolist()) if "LIBEVILL" in pf.columns else ["Toutes"]
-            ville_cli = fc3.selectbox("Ville", ville_cli_opts,
-                label_visibility="collapsed", key="ville_cli")
-
-            df_cli = pf.copy()
-            if etat_cli != "Tous" and "ETAT_POLICE" in df_cli.columns:
-                df_cli = df_cli[df_cli["ETAT_POLICE"] == etat_cli]
-            if ville_cli != "Toutes" and "LIBEVILL" in df_cli.columns:
-                df_cli = df_cli[df_cli["LIBEVILL"] == ville_cli]
-            if srch_cli:
-                _mask = pd.Series(False, index=df_cli.index)
-                for _c in ["NOM_ASSU","LIBEVILL","NOM_APP"]:
-                    if _c in df_cli.columns:
-                        _mask |= df_cli[_c].astype(str).str.lower().str.contains(
-                            srch_cli.lower(), na=False)
-                df_cli = df_cli[_mask]
-
-            # Colonnes à afficher
-            _cli_cols = [c for c in [
-                "NOM_ASSU","LIBECATE","ETAT_POLICE","LIBEVILL","NOM_APP",
-                "DATESOUS","COTI_PERIODIQUE","MONTENCA","CODEPERI","POLICE_KEY"
-            ] if c in df_cli.columns]
-            df_cli_disp = df_cli[_cli_cols].copy()
-            if "DATESOUS" in df_cli_disp.columns:
-                df_cli_disp["DATESOUS"] = df_cli_disp["DATESOUS"].apply(ds)
-            for _nc in ["COTI_PERIODIQUE","MONTENCA"]:
-                if _nc in df_cli_disp.columns:
-                    df_cli_disp[_nc] = df_cli_disp[_nc].apply(lambda x: fmt(x,""))
-
-            st.caption(f"**{len(df_cli):,} clients** affichés sur {len(pf):,} polices totales")
-
-            # Afficher avec pagination (1000 lignes max)
-            page_size = 1000
-            total_pages = max(1, (len(df_cli) + page_size - 1) // page_size)
-            if total_pages > 1:
-                page_num = st.number_input(
-                    f"Page (1–{total_pages})", min_value=1,
-                    max_value=total_pages, value=1, key="cli_page")
-                start = (page_num - 1) * page_size
-                df_show = df_cli_disp.iloc[start:start+page_size]
-            else:
-                df_show = df_cli_disp
-
-            st.dataframe(df_show, use_container_width=True,
-                        hide_index=True, height=500)
-            ac1, ac2 = st.columns(2)
-            ac1.download_button("📥 CSV clients filtrés",
-                dl_csv(df_cli[_cli_cols]),
-                f"clients_{etat_cli}_{ville_cli}.csv",
-                "text/csv", use_container_width=True, key="dl_cli_csv")
-            ac2.download_button("📥 Excel clients",
-                dl_xlsx(df_cli[_cli_cols].head(50000)),
-                "clients.xlsx",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True, key="dl_cli_xl")
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# PAGE — PRODUITS
-# ═══════════════════════════════════════════════════════════════════════════════
-elif "Produits" in page:
-        section(f"🛒 Analyse Produits — {period_lbl}","CA · ÉTATS · STRUCTURE")
-        t_cap,t_pfp=st.tabs(["💰 CA par produit","📋 Portefeuille par produit"])
-        with t_cap:
-            if ca is None: alert("Chargez la Base CA.","warn")
-            else:
-                df=ca_f()
-                if df.empty: alert(f"Aucune donnée CA pour {period_lbl}. Essayez 'Année'.","warn")
-                else:
-                    cp=df.groupby("LIBECATE").agg(CA=("CHIFAFFA","sum"),NbQ=("CHIFAFFA","count"),Comm=("COMMAPPO","sum"),Prime=("PRIMNETT","sum")).reset_index().sort_values("CA",ascending=False)
-                    cp["Tx comm"]=cp["Comm"]/cp["CA"].replace(0,np.nan)*100; cp["Part CA"]=cp["CA"]/cp["CA"].sum()*100
-                    c1,c2=st.columns(2)
-                    with c1:
-                        fig=go.Figure(go.Bar(x=cp["CA"],y=cp["LIBECATE"].str[:26],orientation="h",
-                            marker=dict(color=cp["Tx comm"],colorscale=[[0,MINT],[.5,GREEN],[1,GREEN2]],showscale=True),
-                            text=[fmt(v) for v in cp["CA"]],textposition="outside", textfont=dict(size=10)))
-                        fig.update_layout(yaxis=dict(autorange="reversed"))
-                        fig_style(fig,400,"💰 CA + taux commission")
-                        st.plotly_chart(fig,use_container_width=True)
-                    with c2:
-                        fig2=px.sunburst(cp,path=["LIBECATE"],values="CA",color="Part CA",color_continuous_scale=[[0,MINT],[.5,GREEN],[1,GREEN2]])
-                        fig2.update_layout(height=400,margin=dict(l=5,r=5,t=20,b=5))
-                        st.plotly_chart(fig2,use_container_width=True)
-                    cp_d=cp.copy()
-                    for c_ in ["CA","Comm","Prime"]: cp_d[c_]=cp_d[c_].apply(fmt)
-                    cp_d["Tx comm"]=cp_d["Tx comm"].apply(lambda x:f"{x:.2f}%"); cp_d["Part CA"]=cp_d["Part CA"].apply(lambda x:f"{x:.2f}%")
-                    cp_d.columns=["Produit","CA","Nb quittances","Commissions","Prime nette","Tx comm","Part CA"]
-                    st.dataframe(cp_d,use_container_width=True,hide_index=True)
-                    a,b=st.columns(2)
-                    a.download_button("📥 CSV",dl_csv(cp),"prod_ca.csv","text/csv",use_container_width=True,key="dl_prod_ca")
-                    b.download_button("📥 Excel",dl_xlsx(cp),"prod_ca.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_prod_ca_xl")
-        with t_pfp:
-            if pf is None: alert("Chargez le Portefeuille.","warn")
-            else:
-                df_p=pf_f() if not pf_f().empty else pf
-                pp=df_p.groupby("LIBECATE").agg(Nb=("LIBECATE","count"),
-                    Actifs=("ETAT_POLICE",lambda x:(x.str.strip()=="ACTIF").sum()),
-                    Resil=("ETAT_POLICE",lambda x:(x.str.strip()=="RESILIE").sum()),
-                    Echus=("ETAT_POLICE",lambda x:(x.str.strip().isin(["ECHU","ASSURE ECHU"])).sum()),
-                    CA=("MONTENCA","sum")).reset_index()
-                pp["Tx actif"]=(pp["Actifs"]/pp["Nb"].replace(0,np.nan)*100).round(1)
-                pp["Tx resil"]=(pp["Resil"]/pp["Nb"].replace(0,np.nan)*100).round(1); pp=pp.sort_values("Nb",ascending=False)
-                fig=go.Figure()
-                fig.add_bar(name="✅ Actifs",y=pp["LIBECATE"].str[:22],x=pp["Actifs"],orientation="h",marker_color=GREEN)
-                fig.add_bar(name="📉 Résiliés",y=pp["LIBECATE"].str[:22],x=pp["Resil"],orientation="h",marker_color=RED)
-                fig.add_bar(name="⌛ Échus",y=pp["LIBECATE"].str[:22],x=pp["Echus"],orientation="h",marker_color=AMBER)
-                fig.update_layout(barmode="stack",yaxis=dict(autorange="reversed"))
-                fig_style(fig,440,"📊 États polices par produit")
-                st.plotly_chart(fig,use_container_width=True)
-                pp_d=pp.copy(); pp_d["CA"]=pp_d["CA"].apply(fmt)
-                pp_d["Tx actif"]=pp_d["Tx actif"].apply(lambda x:f"{x:.1f}%"); pp_d["Tx resil"]=pp_d["Tx resil"].apply(lambda x:f"{x:.1f}%")
-                st.dataframe(pp_d,use_container_width=True,hide_index=True)
-                a,b=st.columns(2)
-                a.download_button("📥 CSV",dl_csv(pp),"pf_produits.csv","text/csv",use_container_width=True,key="dl_prod_pf")
-                b.download_button("📥 Excel",dl_xlsx(pp),"pf_produits.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_prod_pf_xl")
-
-    # ═══════════════════════════════════════════════════════════════════════════════
-    # 
-# PAGE — COMMERCIAUX
-# ═══════════════════════════════════════════════════════════════════════════════
-elif "Commerciaux" in page and "Partenaires" not in page:
-    if ca is None: alert("Chargez la Base CA.","warn"); st.stop()
-    df_com = ca_f()
-    if df_com.empty: df_com = ca  # fallback toutes périodes
-
-    section(f"👥 Performance Commerciale — {period_lbl}","CA · CLIENTS · COMMISSIONS · CLASSEMENT")
-
-    # ── Identification des commerciaux ────────────────────────────────────────
-    # Regle metier : le CODE APPORTEUR vient de la base CA (CODEAPPO),
-    # le NOM correspondant est recupere dans la base Portefeuille (NOM_APP).
-    _code_ca = next((c for c in ["CODEAPPO","CODE_APPO","CODEAPP"]
-                     if c in df_com.columns), None)
-
-    if _code_ca is not None and pf is not None:
-        _code_pf = next((c for c in ["CODEAPPO","CODE_APPO","CODEAPP"]
-                         if c in pf.columns), None)
-        _nom_pf  = next((c for c in ["NOM_APP","NOM_APPORT","NOM_APPO"]
-                         if c in pf.columns), None)
-        if _code_pf and _nom_pf:
-            # Dictionnaire code -> nom construit sur les bases COMPLETES
-            # (Portefeuille puis CA tous exercices), afin qu'un exercice ou le
-            # nom est absent de la base CA reste correctement libelle.
-            _map_nom = {}
-            _t = pf[[_code_pf, _nom_pf]].dropna()
-            _t = _t[_t[_nom_pf].astype(str).str.strip() != ""]
-            for _c, _n in zip(_t[_code_pf].astype(str).str.strip(),
-                              _t[_nom_pf].astype(str).str.strip()):
-                _map_nom.setdefault(_c, _n)
-            _nca = next((c for c in ["NOM_APPORT","NOM_APPO","NOM_INTERMEDIAIRE","NOM_APP"]
-                         if c in ca.columns), None)
-            if _nca:
-                _t2 = ca[[_code_ca, _nca]].dropna()
-                _t2 = _t2[_t2[_nca].astype(str).str.strip() != ""]
-                for _c, _n in zip(_t2[_code_ca].astype(str).str.strip(),
-                                  _t2[_nca].astype(str).str.strip()):
-                    _map_nom.setdefault(_c, _n)
-            df_com = df_com.copy()
-            df_com["_CODE_K"]  = df_com[_code_ca].astype(str).str.strip()
-            df_com["_NOM_REF"] = df_com["_CODE_K"].map(_map_nom)
-            # Libelle final : "NOM (CODE)" ou "CODE" si le nom est absent
-            df_com["_APPORTEUR"] = df_com.apply(
-                lambda r: (f"{r['_NOM_REF']} ({r['_CODE_K']})"
-                           if pd.notna(r.get("_NOM_REF")) and str(r.get("_NOM_REF")).strip()
-                           else f"Code {r['_CODE_K']}"), axis=1)
-            ag_k = "_APPORTEUR"
-        else:
-            df_com = df_com.copy()
-            df_com["_APPORTEUR"] = "Code " + df_com[_code_ca].astype(str).str.strip()
-            ag_k = "_APPORTEUR"
-    else:
-        # Repli : colonnes nom presentes directement dans le CA
-        ag_k = next((c for c in ["NOM_APPORT","NOM_APPO","NOM_INTERMEDIAIRE","NOM_APP"]
-                     if c in df_com.columns), None)
-        if ag_k is None:
-            alert("Impossible d'identifier les commerciaux : "
-                  "ni CODEAPPO dans la base CA, ni colonne nom apporteur.","danger")
+    try:
+        if pf is None and ca is None and sin is None:
+            st.markdown(f"""
+            <div style="background:linear-gradient(135deg,{NAVY},{GREEN2});border-radius:16px;
+                 padding:3rem;text-align:center;margin:2rem 0">
+              <div style="font-size:46px;margin-bottom:1rem">🛡️</div>
+              <h2 style="color:white;font-weight:800;margin-bottom:.5rem">Bienvenue — Dashboard AFG Expert v3.0</h2>
+              <p style="color:rgba(255,255,255,.65);font-size:13px;max-width:480px;margin:0 auto">
+                Chargez vos bases dans la barre latérale.<br>
+                Portefeuille (306K polices) · CA multi-exercices · Prestations (26K dossiers)
+              </p>
+            </div>""", unsafe_allow_html=True)
             st.stop()
 
-    # Agrégation commerciale complète
-    _agg_com = {"CA":("CHIFAFFA","sum"), "NbQ":("CHIFAFFA","count")}
-    if "COMMAPPO" in df_com.columns:  _agg_com["Comm"]     = ("COMMAPPO","sum")
-    else:                             _agg_com["Comm"]     = ("CHIFAFFA","count")
-    if "POLICE_KEY" in df_com.columns: _agg_com["NbPolices"] = ("POLICE_KEY","nunique")
-    else:                              _agg_com["NbPolices"] = ("CHIFAFFA","count")
-    grp = (df_com.groupby(ag_k, dropna=False).agg(**_agg_com)
-                 .reset_index().sort_values("CA",ascending=False).reset_index(drop=True))
-    grp[ag_k] = grp[ag_k].fillna("Non renseigné").astype(str)
-    grp.index += 1
-    tot = grp["CA"].sum()
-    grp["Part %"]    = (grp["CA"]/max(tot,1)*100).round(2)
-    grp["Part cum %"]= grp["Part %"].cumsum().round(1)
-    grp["Tx comm %"] = (grp["Comm"]/grp["CA"].replace(0,np.nan)*100).round(2)
-    grp["Ticket moy"]= grp["CA"]/grp["NbQ"].replace(0,np.nan)
+        df_pf  = pf_f()
+        df_ca  = ca_f()
+        df_sin = sin_f()
 
-    # KPIs synthèse
-    k1,k2,k3,k4 = st.columns(4)
-    kpi(k1,"Nb commerciaux",f"{len(grp):,}","Intermédiaires actifs","teal",icon="👥")
-    kpi(k2,"CA total",fmt(tot),"Période filtrée","",icon="💰")
-    kpi(k3,"Ticket moyen",fmt(grp["CA"].mean()),"CA moyen/commercial","blue",icon="🎫")
-    kpi(k4,"Commission moyenne",pct(grp["Tx comm %"].mean()),"Taux moyen","amber",icon="💼")
+        # Compteurs filtrés pour contexte
+        # Badge filtre actif
+        _yr_badge = f" · <b>Année {SEL_YEAR}</b>" if SEL_YEAR else ""
+        section(f"📊 Indicateurs clés — {period_lbl}{_yr_badge}",
+                f"CIMA · PORTEFEUILLE · {'TOUTES PÉRIODES' if not SEL_YEAR else f'EXERCICE {SEL_YEAR}'}")
+        nb  = len(df_pf)
+        eok = "ETAT_POLICE" in df_pf.columns if nb else False
+        actifs = int((df_pf["ETAT_POLICE"].str.strip().isin(["ACTIF"])).sum()) if eok and nb else 0
+        resil  = int((df_pf["ETAT_POLICE"].str.strip()=="RESILIE").sum()) if eok and nb else 0
+        echu   = int((df_pf["ETAT_POLICE"].str.strip().isin(["ECHU","ASSURE ECHU"])).sum()) if eok and nb else 0
+        inact  = int((df_pf["ETAT_POLICE"].str.strip()=="INACTIF").sum()) if eok and nb else 0
+        tx_act = actifs/max(nb,1)*100
+        tx_res = resil/max(nb-inact,1)*100
+        monten = float(df_pf["MONTENCA"].fillna(0).sum()) if nb and "MONTENCA" in df_pf.columns else 0
 
-    st.markdown("")
+        c1,c2,c3,c4,c5,c6 = st.columns(6)
+        kpi(c1,"Polices",f"{nb:,}",period_lbl,"",icon="📋")
+        kpi(c2,"Actives",f"{actifs:,}",pct(tx_act),"",icon="✅")
+        kpi(c3,"Résiliées",f"{resil:,}",f"Tx CIMA {pct(tx_res)}","red" if tx_res>25 else "",icon="📉")
+        kpi(c4,"Échues",f"{echu:,}",pct(echu/max(nb,1)*100),"amber",icon="⌛")
+        kpi(c5,"Encaissements",fmt(monten),"MONTENCA","teal",icon="💰")
+        kpi(c6,"NOM_APP uniques",str(df_pf["NOM_APP"].nunique()) if nb and "NOM_APP" in df_pf.columns else "—","Apporteurs","blue",icon="👥")
 
-    # Podium Top 3
-    medals=["🥇","🥈","🥉"]; mc_c=[GREEN,TEAL,BLUE]
-    cols3 = st.columns(3)
-    for col,(med,mc),(idx,row) in zip(cols3,zip(medals,mc_c),grp.head(3).iterrows()):
-        col.markdown(f"""
-        <div style="background:linear-gradient(135deg,{mc}18,white);border:2px solid {mc};
-             border-radius:14px;padding:1rem;text-align:center">
-          <div style="font-size:28px">{med}</div>
-          <div style="font-size:12px;font-weight:700;margin:5px 0;overflow:hidden;
-               text-overflow:ellipsis;white-space:nowrap" title="{row[ag_k]}">{str(row[ag_k])[:26]}</div>
-          <div style="font-size:10px;color:#666">{row['NbQ']:,} quittances · {row['NbPolices']:,} polices</div>
-          <div style="font-size:17px;font-weight:800;color:{mc};margin-top:5px">{fmt(row['CA'])}</div>
-          <div style="font-size:10px;color:#888">{pct(row['Part %'])} du CA · Comm. {fmt(row['Comm'])}</div>
-        </div>""", unsafe_allow_html=True)
+        if ca is not None and not df_ca.empty:
+            st.markdown("")
+            section("💰 CA — Chiffre d'Affaires","CA · "+period_lbl)
+            chifaffa = float(df_ca["CHIFAFFA"].fillna(0).sum()) if "CHIFAFFA" in df_ca.columns else 0
+            commappo = float(df_ca["COMMAPPO"].fillna(0).sum()) if "COMMAPPO" in df_ca.columns else 0
+            primnett = float(df_ca["PRIMNETT"].fillna(0).sum()) if "PRIMNETT" in df_ca.columns else 0
+            tx_comm  = commappo/max(chifaffa,1)*100
+            nb_q     = len(df_ca)
+            annul    = float(df_ca.loc[df_ca.get("TYPEMOUV","")=="ANNULATIONS","CHIFAFFA"].fillna(0).sum()) if "TYPEMOUV" in df_ca.columns else 0
+            ca_net   = chifaffa - abs(annul)
+            d1,d2,d3,d4,d5 = st.columns(5)
+            kpi(d1,"CA brut",fmt(chifaffa),"CHIFAFFA","",icon="💵")
+            kpi(d2,"CA net",fmt(ca_net),"Hors annulations","teal",icon="✅")
+            kpi(d3,"Prime nette",fmt(primnett),"PRIMNETT","",icon="📄")
+            kpi(d4,"Commissions",fmt(commappo),f"Taux {pct(tx_comm)}","amber",icon="💼")
+            kpi(d5,"Nb quittances",f"{nb_q:,}","Émissions","",icon="🧾")
+        elif ca is not None:
+            alert(f"Aucune quittance CA pour {period_lbl}. Essayez mode Mois ou Année.","info")
 
-    st.markdown("")
-    t_cl,t_par,t_stat,t_dt = st.tabs([
-        "🏆 Classement complet","📊 Pareto CA","📈 Statistiques détaillées","🔍 Données par date"])
+        if sin is not None and not df_sin.empty:
+            st.markdown("")
+            _sin_yr_lbl = f"Exercice {SEL_YEAR}" if SEL_YEAR else "Toutes périodes"
+            section(f"🏥 Sinistres & Prestations — {_sin_yr_lbl}",
+                    "RÉGLEMENTS · SAP · RATIO S/P · DONNÉES FILTRÉES")
+            # Résolution dynamique des colonnes
+            _c_r_a = next((c for c in df_sin.columns if "glement" in c.lower() and "otal" in c.lower()), None)
+            _c_s_a = next((c for c in df_sin.columns if c.upper().startswith("SAP")), None)
+            _c_srt = next((c for c in df_sin.columns if "ort" in c.lower() and "ini" in c.lower()), None)
+            tot_sin = float(df_sin[_c_r_a].fillna(0).sum()) if _c_r_a else 0
+            tot_sap = float(df_sin[_c_s_a].fillna(0).sum()) if _c_s_a else 0
+            nb_sin  = len(df_sin)
+            nb_ouv  = int((df_sin[_c_srt]=="Ouvert").sum()) if _c_srt else 0
+            nb_clos = int((df_sin[_c_srt]=="Cloturé").sum()) if _c_srt else 0
+            ca_all  = float(ca["CHIFAFFA"].fillna(0).sum()) if ca is not None and "CHIFAFFA" in ca.columns else 0
+            sp = tot_sin/max(ca_all,1)*100
+            actifs_tot = int((pf["ETAT_POLICE"].str.strip().isin(["ACTIF"])).sum()) if pf is not None and "ETAT_POLICE" in pf.columns else 1
+            burning = (tot_sin+tot_sap)/max(actifs_tot,1)*1000
+            e1,e2,e3,e4,e5 = st.columns(5)
+            kpi(e1,"Total réglé",fmt(tot_sin),"Toutes périodes","red",icon="💊")
+            kpi(e2,"SAP (provisions)",fmt(tot_sap),"Au 31/12/2025","amber",icon="📌")
+            kpi(e3,"Charge ultime",fmt(tot_sin+tot_sap),"Réglé+SAP","red",icon="⚖️")
+            kpi(e4,"Ratio S/P",pct(sp),"vs CA","red" if sp>80 else "amber",icon="📐")
+            kpi(e5,"Burning Cost",fmt(burning),"Charge/1 000 actifs","red",icon="🔥")
 
-    with t_cl:
-        # Recherche
-        srch_com = st.text_input("🔍 Rechercher un commercial",
-            label_visibility="collapsed", placeholder="Nom…", key="srch_com")
-        df_show = grp.copy()
-        if srch_com:
-            df_show = df_show[df_show[ag_k].str.lower().str.contains(srch_com.lower(),na=False)]
-        df_disp = df_show.copy()
-        df_disp["CA"]        = df_disp["CA"].apply(fmt)
-        df_disp["Comm"]      = df_disp["Comm"].apply(fmt)
-        df_disp["Ticket moy"]= df_disp["Ticket moy"].apply(fmt)
-        df_disp["Part %"]    = df_disp["Part %"].apply(lambda x:f"{x:.2f}%")
-        df_disp["Part cum %"]= df_disp["Part cum %"].apply(lambda x:f"{x:.1f}%")
-        df_disp["Tx comm %"] = df_disp["Tx comm %"].apply(lambda x:f"{x:.2f}%")
-        df_disp.columns = [ag_k,"CA","Nb quittances","Commissions","Nb polices uniques",
-                           "Part CA","Part cumulée","Tx commission","Ticket moyen"]
-        st.dataframe(df_disp, use_container_width=True, height=480)
-        a,b = st.columns(2)
-        a.download_button("📥 CSV",dl_csv(grp),"commerciaux.csv","text/csv",use_container_width=True,key="dl_com_csv")
-        b.download_button("📥 Excel",dl_xlsx(grp),"commerciaux.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_com_xl")
+        # Jointure inter-bases — résumé
+        st.markdown("")
+        section("🔗 Jointures inter-bases","POLICE_KEY · MATCHING")
+        j1,j2,j3 = st.columns(3)
+        if pf is not None and ca is not None and "POLICE_KEY" in pf.columns and "POLICE_KEY" in ca.columns:
+            mc = ca["POLICE_KEY"].isin(pf["POLICE_KEY"]).sum()
+            kpi(j1,"CA ↔ PF",f"{mc:,}",f"{mc/max(len(ca),1)*100:.1f}% des quittances","teal",icon="🔗")
+        if pf is not None and sin is not None and "POLICE_KEY" in pf.columns and "POLICE_KEY" in sin.columns:
+            ms = sin["POLICE_KEY"].isin(pf["POLICE_KEY"]).sum()
+            kpi(j2,"SIN ↔ PF",f"{ms:,}",f"{ms/max(len(sin),1)*100:.1f}% des sinistres","teal",icon="🔗")
+        if ca is not None and sin is not None and "POLICE_KEY" in ca.columns and "POLICE_KEY" in sin.columns:
+            mcs = sin["POLICE_KEY"].isin(ca["POLICE_KEY"]).sum()
+            kpi(j3,"SIN ↔ CA",f"{mcs:,}",f"{mcs/max(len(sin),1)*100:.1f}% des sinistres","blue",icon="🔗")
 
-    with t_par:
-        c1,c2 = st.columns(2)
-        with c1:
-            t30 = grp.head(30)
-            fig = make_subplots(specs=[[{"secondary_y":True}]])
-            fig.add_bar(x=t30["CA"],y=t30[ag_k].str[:22],name="CA",marker_color=GREEN,orientation="h")
-            fig.add_scatter(x=t30["Part cum %"],y=t30[ag_k].str[:22],name="Cumul %",
-                line=dict(color=RED,width=2.5),secondary_y=True,orientation="h")
-            fig.update_layout(yaxis=dict(autorange="reversed"))
-            fig_style(fig,520,f"📊 Pareto CA — Top 30 commerciaux · {period_lbl}")
-            st.plotly_chart(fig,use_container_width=True)
-        with c2:
-            # Distribution des CA
-            fig2 = go.Figure(go.Histogram(x=grp["CA"],nbinsx=30,
-                marker_color=GREEN,opacity=.85))
-            fig_style(fig2,520,"📊 Distribution CA par commercial")
-            st.plotly_chart(fig2,use_container_width=True)
-
-    with t_stat:
-        c1,c2 = st.columns(2)
-        with c1:
-            # CA par produit × commercial (heatmap)
-            if "LIBECATE" in df_com.columns:
-                heat = df_com.groupby([ag_k,"LIBECATE"])["CHIFAFFA"].sum().reset_index()
-                heat_piv = heat.pivot_table(index=ag_k,columns="LIBECATE",
-                    values="CHIFAFFA",aggfunc="sum",fill_value=0)
-                top10_com = grp.head(10)[ag_k].tolist()
-                heat_piv  = heat_piv.loc[heat_piv.index.isin(top10_com)]
-                fig3 = go.Figure(go.Heatmap(
-                    z=heat_piv.values.tolist(),
-                    x=[str(c)[:20] for c in heat_piv.columns],
-                    y=[str(i)[:22] for i in heat_piv.index],
-                    colorscale=[[0,MINT],[.5,GREEN],[1,GREEN2]],
-                    text=[[fmt(v) for v in row] for row in heat_piv.values],
-                    texttemplate="%{text}", textfont=dict(size=9)))
-                fig3.update_layout(height=420,margin=dict(l=140,r=20,t=40,b=80))
-                fig3.update_layout(title=dict(text="CA par commercial × produit (Top 10)",
-                    font=dict(size=12,color=NAVY),x=.01))
-                st.plotly_chart(fig3,use_container_width=True)
-        with c2:
-            # Évolution mensuelle des top 5
-            if "DATECOMP" in df_com.columns:
-                top5 = grp.head(5)[ag_k].tolist()
-                df_ev = df_com[df_com[ag_k].isin(top5)].copy()
-                df_ev["Mois"] = df_ev["DATECOMP"].dt.to_period("M").astype(str)
-                ev_grp = df_ev.groupby(["Mois",ag_k])["CHIFAFFA"].sum().reset_index()
-                fig4 = px.line(ev_grp, x="Mois", y="CHIFAFFA",color=ag_k,
-                    color_discrete_sequence=PAL,
-                    labels={"CHIFAFFA":"CA (FCFA)","Mois":"Mois"})
-                fig_style(fig4,420,"📈 Évolution CA — Top 5 commerciaux")
-                st.plotly_chart(fig4,use_container_width=True)
-
-    with t_dt:
-        if "DATECOMP" in df_com.columns and ag_k in df_com.columns:
-            sel_com = st.selectbox("Sélectionner un commercial",
-                ["Tous"]+grp[ag_k].tolist()[:50], key="sel_com_dt")
-            df_dt = df_com if sel_com=="Tous" else df_com[df_com[ag_k]==sel_com]
-            dt_grp = df_dt.groupby(df_dt["DATECOMP"].dt.date).agg(
-                CA=("CHIFAFFA","sum"),NbQ=("CHIFAFFA","count")).reset_index()
-            dt_grp.columns = ["Date","CA","Nb quittances"]
-            fig5 = make_subplots(specs=[[{"secondary_y":True}]])
-            fig5.add_bar(x=dt_grp["Date"].astype(str),y=dt_grp["CA"],
-                name="CA",marker_color=GREEN,opacity=.85)
-            fig5.add_scatter(x=dt_grp["Date"].astype(str),y=dt_grp["Nb quittances"],
-                name="Nb quittances",line=dict(color=BLUE,width=2),secondary_y=True)
-            fig_style(fig5,420,f"📅 CA journalier — {sel_com}")
-            st.plotly_chart(fig5,use_container_width=True)
-            dt_d = dt_grp.copy(); dt_d["CA"] = dt_d["CA"].apply(fmt)
-            st.dataframe(dt_d, use_container_width=True, hide_index=True, height=300)
-            a,b = st.columns(2)
-            a.download_button("📥 CSV",dl_csv(dt_grp),"ca_journalier.csv","text/csv",use_container_width=True,key="dl_dt_csv")
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# PAGE — PARTENAIRES FINANCIERS
-# ═══════════════════════════════════════════════════════════════════════════════
-elif "Partenaires" in page:
-    if ca is None: alert("Chargez la Base CA.","warn"); st.stop()
-    df_part_all = ca_f()
-    if df_part_all is None or df_part_all.empty: df_part_all = ca
-
-    section(f"🏦 Partenaires Financiers — {period_lbl}",
-            "CODE INTERMÉDIAIRE 3 CHIFFRES · HORS CODE 100")
-
-    # Identifier la colonne code intermédiaire : CODEINTE (priorité)
-    _col_code = next((c for c in ["CODEINTE","CODE_INTER","CODEINTER","CODEAPPO"]
-                      if c in df_part_all.columns), None)
-    if _col_code is None:
-        alert("Colonne code intermédiaire introuvable (CODE_INTER / CODEAPPO).","warn")
-        st.stop()
-
-    df_part_all = df_part_all.copy()
-    df_part_all["_CODE_STR"] = (df_part_all[_col_code]
-                                .astype(str).str.strip().str.zfill(3))
-
-    # ── Résolution du nom : le code vient du CA, le nom du Portefeuille ───────
-    # La colonne nom du CA est vide sur certains exercices (ex. 2025) ; on la
-    # complète systématiquement par une table de correspondance code -> nom
-    # construite sur l'INTÉGRALITÉ du Portefeuille et de la base CA.
-    _ref_nom = {}
-
-    # 1) Depuis le Portefeuille (source de référence)
-    if pf is not None:
-        _cpf = next((c for c in ["CODEINTE_P","CODEINTE","CODEAPPO","CODE_APPO"]
-                     if c in pf.columns), None)
-        _npf = next((c for c in ["NOM_APP","NOM_APPORT","NOM_APPO","NOM_INTERMEDIAIRE"]
-                     if c in pf.columns), None)
-        if _cpf and _npf:
-            _t = pf[[_cpf,_npf]].dropna()
-            _t = _t[_t[_npf].astype(str).str.strip() != ""]
-            for _c, _n in zip(_t[_cpf].astype(str).str.strip().str.zfill(3),
-                              _t[_npf].astype(str).str.strip()):
-                _ref_nom.setdefault(_c, _n)
-
-    # 2) Complété par la base CA complète (tous exercices confondus)
-    _nca_all = next((c for c in ["NOM_APPORT","NOM_APPO","NOM_INTERMEDIAIRE","NOM_APP"]
-                     if c in ca.columns), None)
-    if _nca_all:
-        _t2 = ca[[_col_code,_nca_all]].dropna()
-        _t2 = _t2[_t2[_nca_all].astype(str).str.strip() != ""]
-        for _c, _n in zip(_t2[_col_code].astype(str).str.strip().str.zfill(3),
-                          _t2[_nca_all].astype(str).str.strip()):
-            _ref_nom.setdefault(_c, _n)
-
-    # Libellé final : jamais vide
-    df_part_all["_NOM_PART"] = df_part_all["_CODE_STR"].map(_ref_nom)
-    df_part_all["_NOM_PART"] = df_part_all["_NOM_PART"].fillna(
-        "Code " + df_part_all["_CODE_STR"].astype(str))
-    _col_nom = "_NOM_PART"
-
-    # Partenaires financiers = code 3 chiffres numériques, hors 100
-    def _is_pf(x):
-        s = str(x).strip().lstrip("0") or "0"
-        return str(x).strip().isdigit() and len(str(x).strip()) <= 3 and str(x).strip() != "100"
-
-    _mask_pf  = df_part_all["_CODE_STR"].apply(
-        lambda x: x.isdigit() and len(x) <= 3 and x not in ("100","000"))
-    df_pf     = df_part_all[_mask_pf].copy()
-    df_ri     = df_part_all[~_mask_pf].copy()
-
-    ca_pf_tot = float(df_pf["CHIFAFFA"].sum()) if "CHIFAFFA" in df_pf.columns else 0
-    ca_ri_tot = float(df_ri["CHIFAFFA"].sum()) if "CHIFAFFA" in df_ri.columns else 0
-    ca_total  = ca_pf_tot + ca_ri_tot
-
-    p1,p2,p3,p4 = st.columns(4)
-    kpi(p1,"CA partenaires",fmt(ca_pf_tot),f"{pct(ca_pf_tot/max(ca_total,1)*100)}","blue",icon="🏦")
-    kpi(p2,"CA réseau interne",fmt(ca_ri_tot),f"{pct(ca_ri_tot/max(ca_total,1)*100)}","teal",icon="🏢")
-    kpi(p3,"Nb partenaires",nb_full(df_pf["_CODE_STR"].nunique()),"Codes distincts","",icon="🤝")
-    _nq_pf = int(df_pf["CHIFAFFA"].count()) if "CHIFAFFA" in df_pf.columns else 1
-    kpi(p4,"Ticket moyen",fmt(ca_pf_tot/max(_nq_pf,1)),"CA / quittance","amber",icon="🎫")
-
-    st.markdown("")
-    tp1,tp2,tpE,tp3 = st.tabs(["📊 Par partenaire","🥧 Réseau vs Partenaires",
-                               "📈 Évolution & comparaison N/N-1","🔍 Données brutes"])
-
-    # ══════════════════════════════════════════════════════════════════════════
-    #  EVOLUTION MENSUELLE PAR PARTENAIRE + COMPARAISON N vs N-1
-    #  Le perimetre est volontairement la base CA complete : une comparaison
-    #  annuelle exige de disposer des deux exercices simultanement.
-    # ══════════════════════════════════════════════════════════════════════════
-    with tpE:
-        _ev_base = ca.copy()
-        _ev_base["_CODE_STR"] = (_ev_base[_col_code].astype(str)
-                                 .str.strip().str.zfill(3))
-        _ev_base["_NOM_PART"] = _ev_base["_CODE_STR"].map(_ref_nom)
-        _ev_base["_NOM_PART"] = _ev_base["_NOM_PART"].fillna(
-            "Code " + _ev_base["_CODE_STR"].astype(str))
-        _ev_base["_LBL"] = (_ev_base["_NOM_PART"].astype(str).str[:26]
-                            + " (" + _ev_base["_CODE_STR"] + ")")
-        # Restreindre aux partenaires financiers : code 3 chiffres, hors 100
-        _mp = (_ev_base["_CODE_STR"].str.fullmatch(r"\d{3}", na=False)
-               & (_ev_base["_CODE_STR"] != "100"))
-        _ev_base = _ev_base[_mp]
-
-        _cdt_e = next((c for c in ["DATECOMP","DATEEFFE","DATESOUS"]
-                       if c in _ev_base.columns), None)
-        if _cdt_e is None or _ev_base.empty:
-            alert("Aucune date exploitable pour construire l'évolution mensuelle.","warn")
-        else:
-            _ev_base["_DT"] = pd.to_datetime(_ev_base[_cdt_e], errors="coerce")
-            _ev_base = _ev_base.dropna(subset=["_DT"])
-            _ev_base["_AN"]   = _ev_base["_DT"].dt.year
-            _ev_base["_MOIS"] = _ev_base["_DT"].dt.month
-            _cak = "CHIFAFFA" if "CHIFAFFA" in _ev_base.columns else "MONTENCA"
-
-            # ── Selecteurs ────────────────────────────────────────────────────
-            _tous  = ["Tous les partenaires"] + sorted(
-                        _ev_base.groupby("_LBL")[_cak].sum()
-                                .sort_values(ascending=False).index.tolist())
-            _annees_e = sorted(_ev_base["_AN"].dropna().astype(int).unique().tolist(),
-                               reverse=True)
-            e1,e2 = st.columns([2,1])
-            _part_sel = e1.selectbox("Partenaire", _tous, key="part_evo_sel")
-            _an_n     = e2.selectbox("Exercice N", _annees_e,
-                                     index=0, key="part_evo_an")
-            _an_n1    = _an_n - 1
-
-            _dfe = _ev_base if _part_sel == "Tous les partenaires" else \
-                   _ev_base[_ev_base["_LBL"] == _part_sel]
-
-            _MOIS_FR = ["Jan","Fév","Mar","Avr","Mai","Juin",
-                        "Juil","Août","Sep","Oct","Nov","Déc"]
-
-            # ── 1. Evolution mensuelle : N et N-1 superposes ──────────────────
-            _sN  = (_dfe[_dfe["_AN"] == _an_n ].groupby("_MOIS")[_cak].sum()
-                        .reindex(range(1,13), fill_value=0))
-            _sN1 = (_dfe[_dfe["_AN"] == _an_n1].groupby("_MOIS")[_cak].sum()
-                        .reindex(range(1,13), fill_value=0))
-
-            figE = go.Figure()
-            if _sN1.sum() > 0:
-                figE.add_bar(x=_MOIS_FR, y=_sN1.values, name=f"{_an_n1}",
-                    marker_color=NAVY, opacity=.55,
-                    hovertemplate="%{x} "+str(_an_n1)+"<br>%{y:,.0f} FCFA<extra></extra>")
-            figE.add_bar(x=_MOIS_FR, y=_sN.values, name=f"{_an_n}",
-                marker_color=GREEN,
-                hovertemplate="%{x} "+str(_an_n)+"<br>%{y:,.0f} FCFA<extra></extra>")
-            figE.add_scatter(x=_MOIS_FR, y=_sN.values, mode="lines+markers",
-                name=f"Tendance {_an_n}", line=dict(color=RED, width=2))
-            figE.update_layout(barmode="group",
-                               yaxis=dict(title="CA (FCFA)"),
-                               legend=dict(orientation="h", y=-0.16))
-            fig_style(figE, 400,
-                      f"Évolution mensuelle — {_part_sel} · {_an_n} vs {_an_n1}")
-            st.plotly_chart(figE, use_container_width=True)
-
-            # ── 2. Comparaison mois par mois N / N-1 ──────────────────────────
-            _cmp = pd.DataFrame({
-                "Mois":  _MOIS_FR,
-                f"{_an_n1}": _sN1.values,
-                f"{_an_n}":  _sN.values,
-            })
-            _cmp["Écart"] = _cmp[f"{_an_n}"] - _cmp[f"{_an_n1}"]
-            _cmp["Var %"] = np.where(_cmp[f"{_an_n1}"] > 0,
-                                     _cmp["Écart"] / _cmp[f"{_an_n1}"] * 100,
-                                     np.nan)
-
-            figV = go.Figure(go.Bar(
-                x=_MOIS_FR, y=_cmp["Var %"],
-                marker_color=[GREEN if (pd.notna(v) and v >= 0) else RED
-                              for v in _cmp["Var %"]],
-                text=[("—" if pd.isna(v) else f"{v:+.0f}%") for v in _cmp["Var %"]],
-                textposition="outside", textfont=dict(size=9),
-                hovertemplate="%{x}<br>Variation : %{y:+.1f}%<extra></extra>"))
-            figV.add_hline(y=0, line_color="#888", line_width=1)
-            figV.update_layout(yaxis=dict(title="Variation (%)"))
-            fig_style(figV, 300, f"Variation mensuelle {_an_n} / {_an_n1}")
-            st.plotly_chart(figV, use_container_width=True)
-
-            # ── 3. Indicateurs de synthese ────────────────────────────────────
-            _tN, _tN1 = float(_sN.sum()), float(_sN1.sum())
-            _vG  = ((_tN - _tN1)/_tN1*100) if _tN1 else 0
-            _mMx = _cmp.loc[_cmp[f"{_an_n}"].idxmax()]
-            _nbM = int((_cmp[f"{_an_n}"] > 0).sum())
-            g1,g2,g3,g4 = st.columns(4)
-            kpi(g1, f"CA {_an_n}",  fmt_full(_tN),  f"{_nbM} mois actifs", "teal", icon="💰")
-            kpi(g2, f"CA {_an_n1}", fmt_full(_tN1), "Exercice précédent",  "",     icon="📅")
-            kpi(g3, "Variation",    f"{_vG:+.1f} %", f"{_an_n} vs {_an_n1}",
-                "teal" if _vG >= 0 else "red", icon="📈" if _vG >= 0 else "📉")
-            kpi(g4, "Meilleur mois", str(_mMx["Mois"]), fmt_full(_mMx[f"{_an_n}"]),
-                "blue", icon="🏆")
-
-            # ── 4. Tableau detaille ───────────────────────────────────────────
-            _cmp_d = _cmp.copy()
-            for _c in [f"{_an_n1}", f"{_an_n}", "Écart"]:
-                _cmp_d[_c] = _cmp_d[_c].apply(lambda x: fmt_full(x, ""))
-            _cmp_d["Var %"] = _cmp["Var %"].apply(
-                lambda x: "—" if pd.isna(x) else f"{x:+.1f} %")
-            st.dataframe(_cmp_d, use_container_width=True, hide_index=True)
-            st.download_button("📥 Export comparaison mensuelle",
-                dl_csv(_cmp), f"evolution_{_an_n}_vs_{_an_n1}.csv", "text/csv",
-                use_container_width=True, key="dl_evo_part")
+        # Scorecard CIMA
+        if pf is not None:
+            st.markdown("")
+            section("🏛️ Scorecard CIMA","CONFORMITÉ RÉGLEMENTAIRE")
+            sp2 = sp if sin is not None else 0
+            indics=[
+                (tx_act,"Taux d'activité net",50,">=",GREEN),
+                (tx_res,"Taux résiliation CIMA",25,"<=",RED),
+                (sp2,"Ratio S/P",80,"<=",AMBER),
+                (inact/max(nb,1)*100,"Part inactifs",5,"<=",AMBER),
+            ]
+            score = sum(1 for v,_,s,op,_ in indics if (v>=s if op==">=" else v<=s))
+            sc_c  = GREEN if score>=3 else AMBER if score==2 else RED
+            ci1,ci2 = st.columns([1.4,1])
+            with ci1:
+                for v,lbl,seuil,op,col in indics:
+                    ok = v>=seuil if op==">=" else v<=seuil
+                    c_ = GREEN if ok else RED
+                    st.markdown(f"""<div style="display:flex;align-items:center;justify-content:space-between;
+                         padding:9px 13px;border-left:4px solid {c_};background:{c_}0D;
+                         border-radius:0 9px 9px 0;margin-bottom:7px">
+                      <div><div style="font-size:12px;font-weight:600;color:{NAVY}">{lbl}</div>
+                      <div style="font-size:9.5px;color:#8899AA">Seuil CIMA : {op}{seuil}%</div></div>
+                      <div style="font-size:15px;font-weight:900;color:{c_}">{pct(v)} {'✅' if ok else '⚠️'}</div>
+                    </div>""", unsafe_allow_html=True)
+            with ci2:
+                st.markdown(f"""<div style="background:{sc_c}12;border:2.5px solid {sc_c};border-radius:14px;
+                     padding:1.5rem;text-align:center">
+                  <div style="font-size:52px;font-weight:900;color:{sc_c}">{score}/{len(indics)}</div>
+                  <div style="font-size:12px;color:#555">indicateurs conformes</div>
+                  <div style="height:6px;background:{MGRAY};border-radius:3px;margin:10px 0;overflow:hidden">
+                    <div style="height:100%;width:{score/len(indics)*100:.0f}%;background:{sc_c};border-radius:3px"></div>
+                  </div>
+                  <div style="font-size:13px;font-weight:700;color:{sc_c}">
+                    {'✅ Conforme CIMA' if score==4 else '⚠️ Surveillance' if score>=2 else '🔴 Intervention requise'}
+                  </div></div>""", unsafe_allow_html=True)
+            if tx_res>25: alert(f"Taux résiliation {pct(tx_res)} > 25% (seuil CIMA). Action corrective recommandée.","warn")
+            if sp2>80: alert(f"Ratio S/P {pct(sp2)} > 80%. Révision tarifaire urgente.","danger")
 
 
-    with tp1:
-        if not df_pf.empty:
-            _grp_cols = ["_CODE_STR"]
-            if _col_nom and _col_nom in df_pf.columns:
-                _grp_cols.append(_col_nom)
-            _agg_p = {"CA":("CHIFAFFA","sum"), "NbQ":("CHIFAFFA","count")}
-            if "COMMAPPO" in df_pf.columns: _agg_p["Commission"] = ("COMMAPPO","sum")
-            dp = df_pf.groupby(_grp_cols, dropna=False).agg(**_agg_p).reset_index()
-            dp = dp.sort_values("CA",ascending=False)
-            dp["Part %"] = (dp["CA"]/max(ca_pf_tot,1)*100).round(2)
-            dp.index = range(1, len(dp)+1)
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # PAGE — ANALYSE CA
+    # ═══════════════════════════════════════════════════════════════════════════════
+    except Exception as _e_page:
+        _erreur_onglet(_e_page, "Accueil")
 
-            c1p,c2p = st.columns(2)
-            with c1p:
-                # Libellé "NOM (CODE)" — jamais vide, jamais un index numérique
-                if _col_nom in dp.columns:
-                    dp["_LBL"] = (dp[_col_nom].fillna("").astype(str).str.strip()
-                                    .str[:24] + " (" + dp["_CODE_STR"].astype(str) + ")")
-                    dp["_LBL"] = dp["_LBL"].str.replace(r"^\s*\(", "Code (", regex=True)
+elif "Analyse CA" in page:
+    try:
+            if ca is None: alert("Chargez la Base CA dans la barre latérale.","warn"); st.stop()
+            df = ca_f()
+            all_ca = ca  # total toutes périodes pour comparaison
+
+            section(f"📊 Analyse CA — {period_lbl}","CHIFAFFA · COMMISSIONS · PARETO")
+
+            # ── Controle de coherence de la lecture de la base par exercice ───────
+            _yr_sel = st.session_state.get("filtre_annee", "Toutes les années")
+            if _yr_sel != "Toutes les années":
+                _n_tot = len(ca); _n_sel = len(df)
+                _ca_s  = float(df["CHIFAFFA"].fillna(0).sum()) if ("CHIFAFFA" in df.columns and not df.empty) else 0
+                _yr_av = []
+                for _c in ["ANNEE","DATECOMP","DATEEFFE"]:
+                    if _c in ca.columns:
+                        _yy = as_year(ca[_c]).dropna().unique().tolist()
+                        if _yy: _yr_av = sorted(int(y) for y in _yy); break
+                if _n_sel == 0:
+                    alert(f"Aucune quittance lue pour l'exercice <b>{_yr_sel}</b>. "
+                          f"Exercices présents dans la base CA : "
+                          f"{', '.join(str(y) for y in _yr_av) if _yr_av else 'indéterminés'}.",
+                          "danger")
                 else:
-                    dp["_LBL"] = "Code " + dp["_CODE_STR"].astype(str)
-                _par_lbl_col = "_LBL"
-                _d15         = dp.head(15)
-                _par_lbl15   = _d15["_LBL"]
-                _par_val15   = _d15["CA"]
+                    st.markdown(
+                        f"<div style='font-size:11px;color:#667;margin:-6px 0 10px;'>"
+                        f"Lecture base CA · exercice <b>{_yr_sel}</b> : "
+                        f"<b>{nb_full(_n_sel)}</b> quittances sur {nb_full(_n_tot)} "
+                        f"({_n_sel/max(_n_tot,1)*100:.1f} %) — CA <b>{fmt_full(_ca_s)}</b>"
+                        f"</div>", unsafe_allow_html=True)
 
-                fig = go.Figure(go.Bar(
-                    x=_par_val15, y=_par_lbl15,
-                    orientation="h", marker_color=BLUE,
-                    text=[fmt_full(v,"") for v in _par_val15],
-                    textposition="outside", textfont=dict(size=9),
-                    customdata=_par_val15,
-                    hovertemplate="%{y}<br>CA : %{customdata:,.0f} FCFA<extra></extra>"))
-                fig.update_layout(yaxis=dict(autorange="reversed"))
-                _yr_lbl_p = f" · {SEL_YEAR}" if SEL_YEAR else f" · {period_lbl}"
-                fig_style(fig, 420, f"CA par partenaire{_yr_lbl_p}")
-                st.plotly_chart(fig, use_container_width=True)
-            with c2p:
-                dp_top = dp.head(10)
-                fig2 = go.Figure(go.Pie(
-                    labels=dp_top["_LBL"].astype(str).str[:26],
-                    values=dp_top["CA"], hole=.4,
-                    textinfo="percent", textfont=dict(size=10),
-                    hovertemplate="%{label}<br>CA : %{value:,.0f} FCFA<br>"
-                                  "Part : %{percent}<extra></extra>"))
-                fig2.update_layout(legend=dict(font=dict(size=9)))
-                fig_style(fig2, 420, "Part de marché — Top 10")
-                st.plotly_chart(fig2, use_container_width=True)
+            chifaffa = float(df["CHIFAFFA"].fillna(0).sum()) if "CHIFAFFA" in df.columns and not df.empty else 0
+            commappo = float(df["COMMAPPO"].fillna(0).sum()) if "COMMAPPO" in df.columns and not df.empty else 0
+            primnett = float(df["PRIMNETT"].fillna(0).sum()) if "PRIMNETT" in df.columns and not df.empty else 0
+            tx_comm  = commappo/max(chifaffa,1)*100
+            nb_q     = len(df)
+            ca_total = float(all_ca["CHIFAFFA"].fillna(0).sum()) if "CHIFAFFA" in all_ca.columns else 0
+            part     = chifaffa/max(ca_total,1)*100
 
-            # Tableau — renommer proprement sans réindexer colonnes
-            dp_d = dp.drop(columns=["_LBL"], errors="ignore").copy()
-            if _col_nom in dp_d.columns:
-                dp_d[_col_nom] = (dp_d[_col_nom].fillna("").astype(str).str.strip()
-                                    .replace("", "—"))
-            if "CA" in dp_d.columns:
-                dp_d["CA"] = dp_d["CA"].apply(lambda x: fmt_full(x,""))
-            if "NbQ" in dp_d.columns:
-                dp_d["NbQ"] = dp_d["NbQ"].apply(nb_full)
-            if "Commission" in dp_d.columns:
-                dp_d["Commission"] = dp_d["Commission"].apply(lambda x: fmt_full(x,""))
-            if "Part %" in dp_d.columns:
-                dp_d["Part %"] = dp_d["Part %"].apply(lambda x: f"{x:.2f}%")
-            # Renommer les colonnes de façon lisible
-            _rename_dp = {"_CODE_STR": "Code", "CA": "CA (FCFA)", "NbQ": "Nb affaires",
-                          "Commission": "Commission (FCFA)", "Part %": "Part %"}
-            if _col_nom and _col_nom in dp_d.columns:
-                _rename_dp[_col_nom] = "Partenaire"
-            dp_d = dp_d.rename(columns=_rename_dp)
-            st.dataframe(dp_d, use_container_width=True, height=380, hide_index=True)
-            # Export
-            _dl1, _dl2 = st.columns(2)
-            _dl1.download_button("📥 CSV partenaires", dl_csv(dp),
-                "partenaires.csv", "text/csv",
-                use_container_width=True, key="dl_part_csv")
-            _dl2.download_button("📥 Excel partenaires", dl_xlsx(dp),
-                "partenaires.xlsx",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True, key="dl_part_xl")
-            a,b = st.columns(2)
-            a.download_button("📥 CSV",dl_csv(dp),"partenaires.csv","text/csv",
-                use_container_width=True,key="dl_pf_csv_b")
-            b.download_button("📥 Excel",dl_xlsx(dp),"partenaires.xlsx",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,key="dl_pf_xl_b")
+            if df.empty:
+                alert(f"Aucune donnée CA pour {period_lbl}. Le filtre 'Jour' cherche des quittances à la date exacte. Essayez 'Mois' ou 'Année'.", "warn")
+                # Afficher résumé global
+                section("📊 CA global (toutes périodes)","APERÇU")
+                c1,c2,c3 = st.columns(3)
+                kpi(c1,"CA total",fmt(ca_total),"Toutes quittances","",icon="💵")
+                kpi(c2,"Nb quittances",f"{len(all_ca):,}","Total","",icon="🧾")
+                kpi(c3,"Ticket moyen",fmt(ca_total/max(len(all_ca),1)),"CA/quittance","teal",icon="🎫")
+            else:
+                c1,c2,c3,c4,c5,c6 = st.columns(6)
+                kpi(c1,"CA brut",fmt(chifaffa),"CHIFAFFA","",icon="💵")
+                kpi(c2,"Prime nette",fmt(primnett),"PRIMNETT","",icon="📄")
+                kpi(c3,"Commissions",fmt(commappo),f"Taux {pct(tx_comm)}","amber",icon="💼")
+                kpi(c4,"Nb quittances",f"{nb_q:,}","Émissions","",icon="🧾")
+                kpi(c5,"Ticket moyen",fmt(chifaffa/max(nb_q,1)),"CA/quittance","teal",icon="🎫")
+                kpi(c6,"Part du CA total",pct(part),"vs toutes périodes","blue",icon="📊")
+
+                st.markdown("")
+                t_evo, t_cmp, t_prod, t_int, t_raw = st.tabs(
+                    ["📈 Évolution","⚖️ Comparaison périodes","🛒 Par produit",
+                     "🤝 Par intermédiaire","🔍 Données brutes"])
+
+                # ══════════════════════════════════════════════════════════════
+                #  COMPARAISON DE DEUX PÉRIODES — CA et nombre de contrats
+                # ══════════════════════════════════════════════════════════════
+                with t_cmp:
+                    section("⚖️ Comparaison de deux périodes",
+                            "CHIFFRE D'AFFAIRES · CONTRATS · VARIATION")
+                    _dc_c = "DATECOMP" if "DATECOMP" in ca.columns else None
+                    if _dc_c is None:
+                        alert("Colonne DATECOMP absente — comparaison impossible.","warn")
+                    else:
+                        _cb = ca.copy()
+                        _cb["_DT"] = pd.to_datetime(_cb[_dc_c], errors="coerce")
+                        _cb = _cb.dropna(subset=["_DT"])
+                        if _cb.empty:
+                            alert("Aucune date de comptabilisation exploitable.","warn")
+                        else:
+                            _cak = "CHIFAFFA" if "CHIFAFFA" in _cb.columns else "MONTENCA"
+                            _gr  = st.radio("Granularité",
+                                    ["Année","Semestre","Trimestre","Mois","Semaine"],
+                                    horizontal=True, key="cmp_gran")
+
+                            def _plab(s, g):
+                                if g == "Année":     return s.dt.year.astype(str)
+                                if g == "Semestre":  return (s.dt.year.astype(str) + "-S"
+                                                       + ((s.dt.month-1)//6 + 1).astype(str))
+                                if g == "Trimestre": return (s.dt.year.astype(str) + "-T"
+                                                       + s.dt.quarter.astype(str))
+                                if g == "Mois":      return s.dt.strftime("%Y-%m")
+                                _ic = s.dt.isocalendar()
+                                return (_ic.year.astype(str) + "-S"
+                                        + _ic.week.astype(str).str.zfill(2))
+
+                            _cb["_PER"] = _plab(_cb["_DT"], _gr)
+                            _pers = sorted(_cb["_PER"].unique().tolist(), reverse=True)
+                            if len(_pers) < 2:
+                                alert(f"Une seule période en granularité « {_gr} ». "
+                                      "Choisissez une granularité plus fine.","info")
+                            else:
+                                k1,k2 = st.columns(2)
+                                _pA = k1.selectbox("Période A", _pers, index=0, key="cmp_pa")
+                                # La periode B ne peut pas etre identique a la periode A :
+                                # elle est retiree de la liste proposee.
+                                _pers_b = [p for p in _pers if p != _pA]
+                                _prevb  = st.session_state.get("cmp_pb")
+                                _ixb    = _pers_b.index(_prevb) if _prevb in _pers_b else 0
+                                _pB = k2.selectbox("Période B  (≠ A)", _pers_b,
+                                                   index=_ixb, key="cmp_pb")
+                                _dA = _cb[_cb["_PER"] == _pA]
+                                _dB = _cb[_cb["_PER"] == _pB]
+                                _caA = float(_dA[_cak].fillna(0).sum())
+                                _caB = float(_dB[_cak].fillna(0).sum())
+                                _nA, _nB = len(_dA), len(_dB)
+                                _kk = "POLICE_KEY"
+                                _tA = _dA[_kk].nunique() if _kk in _dA.columns else _nA
+                                _tB = _dB[_kk].nunique() if _kk in _dB.columns else _nB
+                                _mA, _mB = _caA/max(_nA,1), _caB/max(_nB,1)
+                                _v = lambda a,b: ((a-b)/abs(b)*100) if b else 0.0
+                                _vC,_vN,_vT,_vM = _v(_caA,_caB), _v(_nA,_nB), _v(_tA,_tB), _v(_mA,_mB)
+
+                                st.markdown(f"""
+                                <div style="background:{NAVY};border-radius:10px;padding:10px 16px;
+                                     margin:10px 0;color:white;font-size:12px;text-align:center">
+                                  <b>{_pA}</b> comparé à <b>{_pB}</b> · granularité : {_gr}
+                                </div>""", unsafe_allow_html=True)
+
+                                q1,q2,q3,q4 = st.columns(4)
+                                _ar = lambda x: "▲" if x >= 0 else "▼"
+                                _co = lambda x: "teal" if x >= 0 else "red"
+                                kpi(q1,"Chiffre d'affaires", fmt_full(_caA),
+                                    f"{_ar(_vC)} {abs(_vC):.1f}% vs {_pB}", _co(_vC), icon="💰")
+                                kpi(q2,"Nb quittances", nb_full(_nA),
+                                    f"{_ar(_vN)} {abs(_vN):.1f}% vs {_pB}", _co(_vN), icon="🧾")
+                                kpi(q3,"Nb contrats", nb_full(_tA),
+                                    f"{_ar(_vT)} {abs(_vT):.1f}% vs {_pB}", _co(_vT), icon="📄")
+                                kpi(q4,"Ticket moyen", fmt_full(_mA),
+                                    f"{_ar(_vM)} {abs(_vM):.1f}% vs {_pB}", "blue", icon="🎫")
+
+                                st.markdown("---")
+                                _tc = pd.DataFrame({
+                                    "Indicateur": ["Chiffre d'affaires (FCFA)","Nb quittances",
+                                                   "Nb contrats distincts","Ticket moyen (FCFA)"],
+                                    str(_pA): [fmt_full(_caA,""), nb_full(_nA),
+                                               nb_full(_tA), fmt_full(_mA,"")],
+                                    str(_pB): [fmt_full(_caB,""), nb_full(_nB),
+                                               nb_full(_tB), fmt_full(_mB,"")],
+                                    "Écart":  [fmt_full(_caA-_caB,""), f"{_nA-_nB:+,}".replace(",", " "),
+                                               f"{_tA-_tB:+,}".replace(",", " "), fmt_full(_mA-_mB,"")],
+                                    "Variation": [f"{_vC:+.1f}%", f"{_vN:+.1f}%",
+                                                  f"{_vT:+.1f}%", f"{_vM:+.1f}%"]})
+                                st.dataframe(_tc, use_container_width=True, hide_index=True)
+
+                                w1,w2 = st.columns(2)
+                                with w1:
+                                    f1 = go.Figure(go.Bar(x=[_pA,_pB], y=[_caA,_caB],
+                                        marker_color=[GREEN,NAVY],
+                                        text=[fmt_full(_caA,""), fmt_full(_caB,"")],
+                                        textposition="outside", textfont=dict(size=10)))
+                                    fig_style(f1, 320, "💰 Chiffre d'affaires")
+                                    st.plotly_chart(f1, use_container_width=True)
+                                with w2:
+                                    f2 = go.Figure()
+                                    f2.add_bar(x=[_pA,_pB], y=[_nA,_nB], name="Quittances",
+                                        marker_color=AMBER, text=[nb_full(_nA), nb_full(_nB)],
+                                        textposition="outside", textfont=dict(size=10))
+                                    f2.add_bar(x=[_pA,_pB], y=[_tA,_tB], name="Contrats",
+                                        marker_color=BLUE, text=[nb_full(_tA), nb_full(_tB)],
+                                        textposition="outside", textfont=dict(size=10))
+                                    f2.update_layout(barmode="group")
+                                    fig_style(f2, 320, "🧾 Volumes")
+                                    st.plotly_chart(f2, use_container_width=True)
+
+                                _pc = next((c for c in ["LIBECATE","NOMPRODUIT"]
+                                            if c in _cb.columns), None)
+                                if _pc:
+                                    st.markdown("---")
+                                    section("Comparaison par produit","CA ET VOLUMES")
+                                    _ga = _dA.groupby(_pc)[_cak].agg(["sum","count"])
+                                    _gb = _dB.groupby(_pc)[_cak].agg(["sum","count"])
+                                    _mm = _ga.join(_gb, how="outer",
+                                                   lsuffix="_A", rsuffix="_B").fillna(0)
+                                    _mm["Var %"] = _mm.apply(
+                                        lambda r: ((r["sum_A"]-r["sum_B"])/abs(r["sum_B"])*100)
+                                                  if r["sum_B"] else 0.0, axis=1)
+                                    _mm = _mm.sort_values("sum_A", ascending=False).head(12).reset_index()
+                                    f3 = go.Figure()
+                                    f3.add_bar(y=_mm[_pc].astype(str).str[:24], x=_mm["sum_A"],
+                                        name=str(_pA), orientation="h", marker_color=GREEN)
+                                    f3.add_bar(y=_mm[_pc].astype(str).str[:24], x=_mm["sum_B"],
+                                        name=str(_pB), orientation="h", marker_color=NAVY)
+                                    f3.update_layout(barmode="group",
+                                        yaxis=dict(autorange="reversed"),
+                                        legend=dict(orientation="h", y=-0.15))
+                                    fig_style(f3, 420, f"🛒 CA par produit — {_pA} vs {_pB}")
+                                    st.plotly_chart(f3, use_container_width=True)
+                                    _dd = _mm.copy()
+                                    _dd.columns = [_pc, f"CA {_pA}", f"Nb {_pA}",
+                                                   f"CA {_pB}", f"Nb {_pB}", "Var %"]
+                                    for _c in [f"CA {_pA}", f"CA {_pB}"]:
+                                        _dd[_c] = _dd[_c].apply(lambda x: fmt_full(x,""))
+                                    for _c in [f"Nb {_pA}", f"Nb {_pB}"]:
+                                        _dd[_c] = _dd[_c].apply(nb_full)
+                                    _dd["Var %"] = _dd["Var %"].apply(lambda x: f"{x:+.1f}%")
+                                    st.dataframe(_dd, use_container_width=True, hide_index=True)
+                                    st.download_button("📥 Export comparaison (CSV)",
+                                        dl_csv(_mm), f"comparaison_{_pA}_vs_{_pB}.csv",
+                                        "text/csv", use_container_width=True, key="dl_cmp")
+
+                with t_evo:
+                    if "DATECOMP" in df.columns:
+                        c1,c2 = st.columns(2)
+                        with c1:
+                            evo = all_ca.groupby(all_ca["DATECOMP"].dt.to_period("M").astype(str))["CHIFAFFA"].sum().reset_index()
+                            evo.columns = ["Période","CA"]; evo["Cumul"] = evo["CA"].cumsum()
+                            fig = make_subplots(specs=[[{"secondary_y":True}]])
+                            fig.add_bar(x=evo["Période"],y=evo["CA"],name="CA mensuel",marker_color=GREEN,opacity=.88)
+                            fig.add_scatter(x=evo["Période"],y=evo["Cumul"],name="Cumul",line=dict(color=BLUE,width=2.5),secondary_y=True)
+                            fig_style(fig,380,"📅 CA mensuel + cumul — tous exercices")
+                            st.plotly_chart(fig,use_container_width=True)
+                            a,_ = st.columns(2)
+                            a.download_button("📥 CSV",dl_csv(evo),"ca_mensuel.csv","text/csv",use_container_width=True,key="dl_evo_m")
+                        with c2:
+                            # Saisonnalité
+                            saison = all_ca.groupby("MOIS")["CHIFAFFA"].mean().reset_index() if "MOIS" in all_ca.columns else pd.DataFrame()
+                            if not saison.empty:
+                                saison.columns=["Mois","CA moyen"]
+                                saison["Label"]=saison["Mois"].apply(lambda m:MOIS_FR[int(m)-1] if pd.notna(m) else "")
+                                moy_g = saison["CA moyen"].mean()
+                                _mc = [GREEN if v >= moy_g else "rgba(26,127,110,0.35)" for v in saison["CA moyen"]]
+                                fig2=go.Figure(go.Bar(
+                                    x=saison["Label"], y=saison["CA moyen"],
+                                    marker_color=_mc,
+                                    text=[fmt(v) for v in saison["CA moyen"]],
+                                    textposition="outside", textfont=dict(size=9)))
+                                fig2.add_hline(y=moy_g,line_dash="dash",line_color=RED,
+                                    annotation_text=f"Moy. {fmt(moy_g)}",annotation_font_size=9)
+                                fig_style(fig2,380,"📅 Saisonnalité — CA moyen par mois")
+                                st.plotly_chart(fig2,use_container_width=True)
+                        # Multi-exercices
+                        if "ANNEE" in all_ca.columns:
+                            evo_a=all_ca.groupby("ANNEE")["CHIFAFFA"].sum().reset_index()
+                            evo_a=evo_a[evo_a["ANNEE"].between(2000,2030)].sort_values("ANNEE")
+                            if len(evo_a)>1:
+                                section("📈 Évolution annuelle","MULTI-EXERCICES")
+                                fig3=go.Figure(go.Bar(x=evo_a["ANNEE"].astype(str),y=evo_a["CHIFAFFA"],
+                                    marker=dict(color=evo_a["CHIFAFFA"],colorscale=[[0,MINT],[1,GREEN2]],showscale=False),
+                                    text=[fmt(v) for v in evo_a["CHIFAFFA"]],textposition="outside"))
+                                fig_style(fig3,340,"📈 CA annuel")
+                                st.plotly_chart(fig3,use_container_width=True)
+                                a,_=st.columns(2)
+                                a.download_button("📥 CSV",dl_csv(evo_a),"ca_annuel.csv","text/csv",use_container_width=True,key="dl_ann")
+
+                with t_prod:
+                    if "LIBECATE" in df.columns:
+                        cp=df.groupby("LIBECATE").agg(CA=("CHIFAFFA","sum"),NbQ=("CHIFAFFA","count"),
+                            Comm=("COMMAPPO","sum"),Prime=("PRIMNETT","sum")).reset_index().sort_values("CA",ascending=False)
+                        cp["Tx comm"]=cp["Comm"]/cp["CA"].replace(0,np.nan)*100
+                        cp["Part CA"]=cp["CA"]/cp["CA"].sum()*100
+                        c1,c2=st.columns(2)
+                        with c1:
+                            fig=go.Figure(go.Bar(x=cp["CA"],y=cp["LIBECATE"].str[:26],orientation="h",
+                                marker=dict(color=cp["Tx comm"],colorscale=[[0,MINT],[.5,GREEN],[1,GREEN2]],showscale=True,
+                                    colorbar=dict(title="Tx comm%",len=.6,thickness=12)),
+                                text=[fmt(v) for v in cp["CA"]],textposition="outside", textfont=dict(size=10)))
+                            fig.update_layout(yaxis=dict(autorange="reversed"))
+                            fig_style(fig,400,f"💰 CA + taux commission · {period_lbl}")
+                            st.plotly_chart(fig,use_container_width=True)
+                        with c2:
+                            fig2=px.sunburst(cp,path=["LIBECATE"],values="CA",color="Part CA",
+                                color_continuous_scale=[[0,MINT],[.5,GREEN],[1,GREEN2]])
+                            fig2.update_layout(height=400,margin=dict(l=5,r=5,t=20,b=5))
+                            st.plotly_chart(fig2,use_container_width=True)
+                        cp_d=cp.copy()
+                        for c_ in ["CA","Comm","Prime"]: cp_d[c_]=cp_d[c_].apply(fmt)
+                        cp_d["Tx comm"]=cp_d["Tx comm"].apply(lambda x:f"{x:.2f}%")
+                        cp_d["Part CA"]=cp_d["Part CA"].apply(lambda x:f"{x:.2f}%")
+                        cp_d.columns=["Produit","CA","Nb quittances","Commissions","Prime nette","Tx comm","Part CA"]
+                        st.dataframe(cp_d,use_container_width=True,hide_index=True)
+                        a,b=st.columns(2)
+                        a.download_button("📥 CSV",dl_csv(cp),"ca_produits.csv","text/csv",use_container_width=True,key="dl_cprod")
+                        b.download_button("📥 Excel",dl_xlsx(cp),"ca_produits.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_cprod_xl")
+
+                with t_int:
+                    # Regle metier : le code apporteur vient de la base CA (CODEAPPO),
+                    # son nom est recupere dans le Portefeuille (NOM_APP).
+                    # Fiable quelle que soit l'annee, contrairement a NOM_INTERMEDIAIRE
+                    # qui peut etre vide sur certains exercices.
+                    df_i = df.copy()
+                    _cca = next((c for c in ["CODEAPPO","CODE_APPO","CODEAPP"]
+                                 if c in df_i.columns), None)
+                    ag_k = None
+                    if _cca is not None:
+                        _cpf = next((c for c in ["CODEAPPO","CODE_APPO","CODEAPP"]
+                                     if pf is not None and c in pf.columns), None)
+                        _npf = next((c for c in ["NOM_APP","NOM_APPORT","NOM_APPO"]
+                                     if pf is not None and c in pf.columns), None)
+                        df_i["_CK"] = df_i[_cca].astype(str).str.strip()
+                        # Dictionnaire code -> nom sur bases completes
+                        _mn = {}
+                        if _cpf and _npf:
+                            _t = pf[[_cpf,_npf]].dropna()
+                            _t = _t[_t[_npf].astype(str).str.strip() != ""]
+                            for _c,_n in zip(_t[_cpf].astype(str).str.strip(),
+                                             _t[_npf].astype(str).str.strip()):
+                                _mn.setdefault(_c,_n)
+                        _nca = next((c for c in ["NOM_APPORT","NOM_APPO","NOM_INTERMEDIAIRE","NOM_APP"]
+                                     if c in ca.columns), None)
+                        if _nca:
+                            _t2 = ca[[_cca,_nca]].dropna()
+                            _t2 = _t2[_t2[_nca].astype(str).str.strip() != ""]
+                            for _c,_n in zip(_t2[_cca].astype(str).str.strip(),
+                                             _t2[_nca].astype(str).str.strip()):
+                                _mn.setdefault(_c,_n)
+                        df_i["_NR"] = df_i["_CK"].map(_mn)
+                        df_i["_APP"] = [
+                            (f"{n} ({c})" if pd.notna(n) and str(n).strip() else f"Code {c}")
+                            for n, c in zip(df_i["_NR"], df_i["_CK"])]
+                        ag_k = "_APP"
+                    else:
+                        ag_k = next((c for c in ["NOM_APPORT","NOM_APPO","NOM_INTERMEDIAIRE","NOM_APP"]
+                                     if c in df_i.columns), None)
+
+                    if ag_k is not None and ag_k in df_i.columns:
+                        _agg_i = {"CA":("CHIFAFFA","sum"), "NbQ":("CHIFAFFA","count")}
+                        if "COMMAPPO" in df_i.columns: _agg_i["Comm"] = ("COMMAPPO","sum")
+                        ci = (df_i.groupby(ag_k, dropna=False).agg(**_agg_i)
+                                  .reset_index().sort_values("CA",ascending=False))
+                        if "Comm" not in ci.columns: ci["Comm"] = 0
+                        tot_ci=ci["CA"].sum()
+                        ci["Part %"]=(ci["CA"]/tot_ci*100).round(2)
+                        ci["Part cum %"]=ci["Part %"].cumsum().round(1)
+                        # Pareto
+                        top20=ci.head(20)
+                        fig=make_subplots(specs=[[{"secondary_y":True}]])
+                        _lbl20 = top20[ag_k].astype(str).str[:26]
+                        fig.add_bar(x=_lbl20, y=top20["CA"], name="CA",
+                            marker_color=GREEN, opacity=.85,
+                            customdata=top20["CA"],
+                            hovertemplate="%{x}<br>CA : %{customdata:,.0f} FCFA<extra></extra>")
+                        fig.add_scatter(x=_lbl20, y=top20["Part cum %"], name="Cumul %",
+                            line=dict(color=RED,width=2.5), secondary_y=True,
+                            hovertemplate="%{x}<br>Cumul : %{y:.1f}%<extra></extra>")
+                        fig.update_xaxes(tickangle=-35)
+                        fig_style(fig,420,f"📊 Pareto CA — Top 20 · {period_lbl}")
+                        st.plotly_chart(fig,use_container_width=True)
+                        # Partenaires financiers
+                        _cstr = "CODEAPPO_STR" if "CODEAPPO_STR" in df_i.columns else (
+                                "_CK" if "_CK" in df_i.columns else None)
+                        if _cstr:
+                            def is_pf(x):
+                                s=str(x).strip()
+                                return s.isdigit() and len(s)==3 and s!="100"
+                            pm=df_i[_cstr].apply(is_pf)
+                            if pm.sum()>0:
+                                ca_pf=float(df_i.loc[pm,"CHIFAFFA"].sum()); ca_ri=float(df_i.loc[~pm,"CHIFAFFA"].sum())
+                                section("🏦 Partenaires financiers vs Réseau interne","CODEAPPO")
+                                pp1,pp2,pp3=st.columns(3)
+                                kpi(pp1,"CA Réseau interne",fmt(ca_ri),pct(ca_ri/max(chifaffa,1)*100),"teal",icon="🏢")
+                                kpi(pp2,"CA Partenaires",fmt(ca_pf),pct(ca_pf/max(chifaffa,1)*100),"blue",icon="🏦")
+                                kpi(pp3,"Nb partenaires",nb_full(df_i.loc[pm,_cstr].nunique()),"Codes 3 chiffres ≠100","",icon="🤝")
+                        ci_d=ci.head(50).copy()
+                        ci_d = ci_d.rename(columns={ag_k:"Apporteur"})
+                        for c_ in ["CA","Comm"]: ci_d[c_]=ci_d[c_].apply(lambda x: fmt_full(x,""))
+                        ci_d["NbQ"]=ci_d["NbQ"].apply(nb_full)
+                        ci_d["Part %"]=ci_d["Part %"].apply(lambda x:f"{x:.2f}%")
+                        ci_d["Part cum %"]=ci_d["Part cum %"].apply(lambda x:f"{x:.1f}%")
+                        st.dataframe(ci_d,use_container_width=True,hide_index=True,height=360)
+                        a,b=st.columns(2)
+                        a.download_button("📥 CSV",dl_csv(ci),"intermediaires.csv","text/csv",use_container_width=True,key="dl_int")
+                        b.download_button("📥 Excel",dl_xlsx(ci.head(50000)),"intermediaires.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_int_xl")
+
+                with t_raw:
+                    show_c=[c for c in ["DATECOMP","LIBECATE","NOM_INTERMEDIAIRE","NUMEPOLI","CODEAPPO_STR","CHIFAFFA","PRIMNETT","COMMAPPO","TYPEMOUV","POLICE_KEY"] if c in df.columns]
+                    srch=st.text_input("🔍 Rechercher",placeholder="Produit, intermédiaire, N° police…",label_visibility="collapsed",key="srch_ca")
+                    di=df[show_c].copy()
+                    if "DATECOMP" in di.columns: di["DATECOMP"]=di["DATECOMP"].apply(ds)
+                    for nc in ["CHIFAFFA","PRIMNETT","COMMAPPO"]:
+                        if nc in di.columns: di[nc]=di[nc].apply(lambda x:fmt(x,""))
+                    if srch: di=di[di.apply(lambda r:srch.lower() in str(r).lower(),axis=1)]
+                    st.dataframe(di.head(500),use_container_width=True,hide_index=True,height=400)
+                    st.caption(f"Affichage 500 / {len(di):,} lignes")
+                    a,b=st.columns(2)
+                    a.download_button("📥 CSV complet",dl_csv(df),f"ca_{period_lbl}.csv","text/csv",use_container_width=True,key="dl_ca_raw")
+                    b.download_button("📥 Excel",dl_xlsx(df[show_c].head(50000)),f"ca_{period_lbl}.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_ca_raw_xl")
+
+
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # 
+    # PAGE — PORTEFEUILLE
+    # ═══════════════════════════════════════════════════════════════════════════════
+    except Exception as _e_page:
+        _erreur_onglet(_e_page, "Analyse CA")
+
+elif "Portefeuille" in page:
+    try:
+        if pf is None: alert("Chargez le Portefeuille dans la barre latérale.","warn"); st.stop()
+        df_all = pf  # portefeuille complet (reference pour les totaux)
+        # ── Perimetre analyse : annee de saisie (DATESOUS) puis periode ──────────
+        # Priorite : filtre annee de la sidebar > filtre periode > tout
+        if SEL_YEAR:
+            df = pf[year_mask(pf, ["DATESOUS","ANNEESOUS","ANNEE","DATEEFFE"], SEL_YEAR)].copy()
+            _pf_scope = f"Année de saisie {SEL_YEAR}"
         else:
-            alert("Aucun partenaire financier identifié dans les données.","info")
+            df = pf_f()
+            _pf_scope = period_lbl
+        if df is None or df.empty:
+            alert(f"Aucune police saisie sur <b>{_pf_scope}</b>. "
+                  f"Affichage du portefeuille complet.", "warn")
+            df, _pf_scope = df_all, "Toutes périodes"
 
-    with tp2:
-        labels = ["Partenaires financiers","Réseau interne / Autres"]
-        vals   = [ca_pf_tot, ca_ri_tot]
-        fig3 = go.Figure(go.Pie(labels=labels, values=vals, hole=.5,
-            marker_colors=[BLUE, GREEN], textinfo="percent+label+value",
-            textfont=dict(size=12)))
-        fig_style(fig3, 400, f"Réseau vs Partenaires — {period_lbl}")
-        st.plotly_chart(fig3, use_container_width=True)
+        # Titre dynamique selon filtre année
+        section(f"📋 Portefeuille — {_pf_scope}",
+                "PÉRIMÈTRE : DATE DE SAISIE · FILTRES · EXPORT")
 
-    with tp3:
-        if not df_pf.empty:
-            _show_cols = [c for c in ["_CODE_STR", _col_nom, "CHIFAFFA","COMMAPPO","PRIMNETT"]
-                          if c and c in df_pf.columns]
-            _raw = df_pf[_show_cols].rename(columns={"_CODE_STR":"Code"}).copy()
-            for mc in ["CHIFAFFA","COMMAPPO","PRIMNETT"]:
-                if mc in _raw.columns: _raw[mc] = _raw[mc].apply(fmt)
-            st.dataframe(_raw.head(500), use_container_width=True, hide_index=True)
-            st.download_button("📥 CSV brut",dl_csv(df_pf),"pf_brut.csv","text/csv",
-                use_container_width=True,key="dl_pf_raw")
+        # Listes de choix construites depuis df (déjà filtré par année si SEL_YEAR)
+        _base_opts = df  # base pour les options = données de l'année choisie
 
+        f0,f1,f2,f3,f4 = st.columns([1.2,1.2,1.2,1.2,1.2])
 
-elif "Clients" in page:
-        if pf is None: alert("Chargez le Portefeuille.","warn"); st.stop()
-        df=pf; section("👤 Clients & Géographie","ASSURÉS · VILLES · DÉMOGRAPHIE · ÂGES")
-        nb_cli=df["NOM_ASSU"].nunique() if "NOM_ASSU" in df.columns else 0
-        nb_vl=df["LIBEVILL"].nunique() if "LIBEVILL" in df.columns else 0
-        ca_moy=float(df["MONTENCA"].fillna(0).sum())/max(nb_cli,1) if "MONTENCA" in df.columns else 0
-        c1,c2,c3=st.columns(3)
-        kpi(c1,"Clients distincts",f"{nb_cli:,}","NOM_ASSU uniques","teal",icon="👤")
-        kpi(c2,"Villes couvertes",f"{nb_vl:,}","LIBEVILL","",icon="📍")
-        kpi(c3,"MONTENCA moy/client",fmt(ca_moy),"Encaissement moyen","blue",icon="💰")
-        t_g,t_d,t_a,t_cl=st.tabs(["🗺️ Géographie","📊 Démographie","🎂 Pyramide des âges","👤 Répertoire clients"])
-        with t_g:
-            if "LIBEVILL" in df.columns:
-                c1,c2=st.columns(2)
-                with c1:
-                    vl=df.groupby("LIBEVILL").agg(Nb=("LIBEVILL","count"),CA=("MONTENCA","sum")).reset_index().sort_values("Nb",ascending=False).head(15)
-                    fig=go.Figure(go.Bar(x=vl["Nb"],y=vl["LIBEVILL"].str[:18],orientation="h",
-                        marker=dict(color=vl["Nb"],colorscale=[[0,MINT],[1,GREEN2]],showscale=False),
-                        text=vl["Nb"].astype(str),textposition="outside", textfont=dict(size=10)))
-                    fig.update_layout(yaxis=dict(autorange="reversed"))
-                    fig_style(fig,400,"📍 Top 15 villes — Polices")
-                    st.plotly_chart(fig,use_container_width=True)
-                with c2:
-                    vl_ca=df.groupby("LIBEVILL")["MONTENCA"].sum().reset_index().sort_values("MONTENCA",ascending=False).head(12)
-                    fig2=go.Figure(go.Bar(x=vl_ca["MONTENCA"],y=vl_ca["LIBEVILL"].str[:18],orientation="h",
-                        marker=dict(color=vl_ca["MONTENCA"],colorscale=[[0,MINT],[1,GREEN2]],showscale=False),
-                        text=[fmt(v) for v in vl_ca["MONTENCA"]],textposition="outside", textfont=dict(size=10)))
-                    fig2.update_layout(yaxis=dict(autorange="reversed"))
-                    fig_style(fig2,400,"💰 Top 12 villes — CA (MONTENCA)")
-                    st.plotly_chart(fig2,use_container_width=True)
-                vl_e=df.groupby("LIBEVILL").agg(Nb=("LIBEVILL","count"),CA=("MONTENCA","sum")).reset_index().sort_values("Nb",ascending=False)
-                vl_e["CA"]=vl_e["CA"].apply(fmt)
-                st.dataframe(vl_e.head(30),use_container_width=True,hide_index=True)
+        # 0. Filtre état ETAT_POLICE
+        etat_opts = ["Tous"] + sorted(
+            _base_opts["ETAT_POLICE"].str.strip().dropna().unique().tolist()
+        ) if "ETAT_POLICE" in _base_opts.columns else ["Tous"]
+        etat_sel  = f0.selectbox("🔘 État police", etat_opts, key="pf_etat")
+
+        # 1. Filtre produit / catégorie
+        prod_opts = ["Tous"] + sorted(
+            _base_opts["LIBECATE"].dropna().unique().tolist()
+        ) if "LIBECATE" in _base_opts.columns else ["Tous"]
+        prod_sel  = f1.selectbox("📦 Produit", prod_opts, key="pf_prod")
+
+        # 2. Filtre périodicité
+        peri_opts = ["Toutes"] + sorted(
+            _base_opts["PERIODICITE"].dropna().unique().tolist()
+        ) if "PERIODICITE" in _base_opts.columns else ["Toutes"]
+        peri_sel  = f2.selectbox("🔄 Périodicité", peri_opts, key="pf_peri")
+
+        # 3. Filtre ville
+        villes_opts = ["Toutes"] + sorted(
+            _base_opts["LIBEVILL"].dropna().unique().tolist()[:80]
+        ) if "LIBEVILL" in _base_opts.columns else ["Toutes"]
+        ville_sel   = f3.selectbox("📍 Ville", villes_opts, key="pf_ville")
+
+        # 4. Recherche texte libre
+        srch_pf = f4.text_input("🔍 Recherche", placeholder="Nom, ville, apporteur…", key="pf_srch")
+
+        # Appliquer les filtres
+        fi = df.copy()
+        if etat_sel  != "Tous"    and "ETAT_POLICE"  in fi.columns:
+            fi = fi[fi["ETAT_POLICE"].str.strip() == etat_sel]
+        if prod_sel  != "Tous"    and "LIBECATE"      in fi.columns:
+            fi = fi[fi["LIBECATE"] == prod_sel]
+        if peri_sel  != "Toutes"  and "PERIODICITE"   in fi.columns:
+            fi = fi[fi["PERIODICITE"] == peri_sel]
+        if ville_sel != "Toutes"  and "LIBEVILL"      in fi.columns:
+            fi = fi[fi["LIBEVILL"] == ville_sel]
+        if srch_pf.strip():
+            _cols_s = [c for c in ["NOM_ASSU","LIBEVILL","NOM_APP","LIBECATE"] if c in fi.columns]
+            _mask   = pd.Series(False, index=fi.index)
+            for c_ in _cols_s:
+                _mask |= fi[c_].astype(str).str.lower().str.contains(srch_pf.lower(), na=False)
+            fi = fi[_mask]
+
+        # Badge filtres actifs
+        _filters_active = [x for x in [
+            f"Année {SEL_YEAR}" if SEL_YEAR else None,
+            f"État : {etat_sel}" if etat_sel != "Tous" else None,
+            f"Produit : {prod_sel}" if prod_sel != "Tous" else None,
+            f"Périodicité : {peri_sel}" if peri_sel != "Toutes" else None,
+            f"Ville : {ville_sel}" if ville_sel != "Toutes" else None,
+            f"Recherche : {srch_pf}" if srch_pf.strip() else None,
+        ] if x]
+        if _filters_active:
+            st.markdown(
+                " &nbsp;".join([f'<span style="background:{NAVY}20;border:1px solid {NAVY}40;'
+                                f'border-radius:12px;padding:2px 10px;font-size:11px;'
+                                f'font-weight:600">🔍 {f}</span>'
+                                for f in _filters_active]),
+                unsafe_allow_html=True)
+        st.markdown(f"<div style='font-size:11px;color:#888;margin:4px 0'>"
+                    f"<b>{len(fi):,}</b> police(s) sur {len(df):,}</div>",
+                    unsafe_allow_html=True)
+
+        nb=len(fi)
+        actifs=int((fi["ETAT_POLICE"].str.strip()=="ACTIF").sum()) if "ETAT_POLICE" in fi.columns and nb else 0
+        resil =int((fi["ETAT_POLICE"].str.strip()=="RESILIE").sum()) if "ETAT_POLICE" in fi.columns and nb else 0
+        monten=float(fi["MONTENCA"].fillna(0).sum()) if "MONTENCA" in fi.columns and nb else 0
+        coti_p=float(fi["COTI_PERIODIQUE"].fillna(0).sum()) if "COTI_PERIODIQUE" in fi.columns and nb else 0
+
+        c1,c2,c3,c4,c5 = st.columns(5)
+        kpi(c1,"Polices",nb_full(nb),f"{_pf_scope} · {len(df_all):,} au total".replace(","," "),"",icon="📋")
+        kpi(c2,"Actives",f"{actifs:,}",pct(actifs/max(nb,1)*100),"",icon="✅")
+        kpi(c3,"Résiliées",f"{resil:,}",pct(resil/max(nb,1)*100),"red",icon="📉")
+        kpi(c4,"Encaissements",fmt(monten),"MONTENCA","teal",icon="💰")
+        kpi(c5,"Cotisation périodique",fmt(coti_p),"COTI_PERIODIQUE","blue",icon="💳")
+
+        st.markdown("")
+        t1,t2,t3,t4,t5 = st.tabs(["📋 Tableau","📊 Statistiques","📈 Évolution souscriptions","🔗 Jointure CA","👤 Tous les clients"])
+
+        with t1:
+            COLS_SHOW=[c for c in ["POLICE_KEY","NUMEPOLI_P","LIBECATE","ETAT_POLICE","NOM_ASSU","LIBEVILL","NOM_APP","DATESOUS","DATEEFFE","DATEECHE","COTI_PERIODIQUE","MONTENCA","SEXERISQ","CODEPERI","NBRE_PRIME"] if c in fi.columns]
+            di=fi[COLS_SHOW].copy()
+            for dc in ["DATESOUS","DATEEFFE","DATEECHE"]:
+                if dc in di.columns: di[dc]=di[dc].apply(ds)
+            for nc in ["COTI_PERIODIQUE","MONTENCA"]:
+                if nc in di.columns: di[nc]=di[nc].apply(lambda x:fmt(x,""))
+            st.dataframe(di.head(500),use_container_width=True,hide_index=True,height=400)
+            st.caption(f"Affichage 500 / {nb:,} polices")
+            a,b=st.columns(2)
+            a.download_button("📥 CSV",dl_csv(fi),f"pf_{period_lbl}.csv","text/csv",use_container_width=True,key="dl_pf_csv")
+            b.download_button("📥 Excel",dl_xlsx(fi[COLS_SHOW].head(50000)),f"pf_{period_lbl}.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_pf_xl")
+
+        with t2:
+            try:
+                sc1,sc2=st.columns(2)
+                with sc1:
+                    if "LIBECATE" in fi.columns and not fi.empty:
+                        _pc_agg = {"Nb":("LIBECATE","count")}
+                        if "MONTENCA" in fi.columns: _pc_agg["CA"] = ("MONTENCA","sum")
+                        pc_=fi.groupby("LIBECATE").agg(**_pc_agg).reset_index().sort_values("Nb",ascending=False)
+                        if "CA" not in pc_.columns: pc_["CA"] = 0
+                        fig=go.Figure(go.Bar(x=pc_["Nb"],y=pc_["LIBECATE"].astype(str).str[:24],
+                            orientation="h",
+                            marker=dict(color=pc_["Nb"],colorscale=[[0,MINT],[1,GREEN2]],showscale=False),
+                            text=pc_["Nb"].astype(str),textposition="outside", textfont=dict(size=10)))
+                        fig.update_layout(yaxis=dict(autorange="reversed"))
+                        fig_style(fig,380,"Polices par produit / catégorie")
+                        st.plotly_chart(fig,use_container_width=True)
+                with sc2:
+                    if "ETAT_POLICE" in fi.columns and not fi.empty:
+                        etat_c_={"ACTIF":GREEN,"RESILIE":RED,"INACTIF":AMBER,
+                                 "ECHU":"#5A6478","ASSURE ECHU":"#2C3E50","SUSPENDU":BLUE}
+                        ec=fi["ETAT_POLICE"].str.strip().value_counts().reset_index()
+                        ec.columns=["État","Nb"]
+                        fig2=go.Figure(go.Pie(labels=ec["État"],values=ec["Nb"],hole=.44,
+                            marker_colors=[etat_c_.get(e,"#888") for e in ec["État"]],
+                            textinfo="percent+label", textfont=dict(size=11)))
+                        fig_style(fig2,380,"États du portefeuille")
+                        st.plotly_chart(fig2,use_container_width=True)
+                sc3,sc4=st.columns(2)
+                with sc3:
+                    if "CODEPERI" in fi.columns and not fi.empty:
+                        per=fi["CODEPERI"].map(CODEPERI_MAP).fillna("Autre").value_counts().reset_index()
+                        per.columns=["Périodicité","Nb"]
+                        fig3=go.Figure(go.Pie(labels=per["Périodicité"],values=per["Nb"],
+                            hole=.44,marker_colors=PAL,textinfo="percent+label", textfont=dict(size=11)))
+                        fig_style(fig3,320,"Périodicité des cotisations")
+                        st.plotly_chart(fig3,use_container_width=True)
+                with sc4:
+                    if "LIBEVILL" in fi.columns and not fi.empty:
+                        vl=fi["LIBEVILL"].value_counts().head(10).reset_index()
+                        vl.columns=["Ville","Nb"]
+                        fig4=go.Figure(go.Bar(x=vl["Nb"],y=vl["Ville"].astype(str).str[:18],
+                            orientation="h",marker_color=PAL[:len(vl)],
+                            text=vl["Nb"].astype(str),textposition="outside", textfont=dict(size=10)))
+                        fig4.update_layout(yaxis=dict(autorange="reversed"))
+                        fig_style(fig4,320,"Top 10 villes d'implantation")
+                        st.plotly_chart(fig4,use_container_width=True)
+                _pc_stat = pc_ if "pc_" in dir() else fi
                 a,b=st.columns(2)
-                a.download_button("📥 CSV villes",dl_csv(vl_e),"geo.csv","text/csv",use_container_width=True,key="dl_geo")
-                b.download_button("📥 Excel",dl_xlsx(vl_e),"geo.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_geo_xl")
-        with t_d:
-            c1,c2,c3=st.columns(3)
-            with c1:
-                if "SEXERISQ" in df.columns:
-                    sx=df["SEXERISQ"].map({"M":"Hommes","F":"Femmes"}).value_counts().reset_index(); sx.columns=["Sexe","Nb"]
-                    fig=go.Figure(go.Pie(labels=sx["Sexe"],values=sx["Nb"],hole=.44,marker_colors=[BLUE,GREEN],textinfo="percent+label+value", textfont=dict(size=12)))
-                    fig_style(fig,320,"👥 Répartition H/F"); st.plotly_chart(fig,use_container_width=True)
-            with c2:
-                if "CODEPERI" in df.columns:
-                    per=df["CODEPERI"].map(CODEPERI_MAP).fillna("Autre").value_counts().reset_index(); per.columns=["Périodicité","Nb"]
-                    fig2=go.Figure(go.Pie(labels=per["Périodicité"],values=per["Nb"],hole=.44,marker_colors=PAL,textinfo="percent+label", textfont=dict(size=11)))
-                    fig_style(fig2,320,"📅 Périodicité cotisations"); st.plotly_chart(fig2,use_container_width=True)
-            with c3:
-                if "NOM_APP" in df.columns:
-                    ap=df[df["ETAT_POLICE"].str.strip()=="ACTIF"]["NOM_APP"].value_counts().head(10).reset_index() if "ETAT_POLICE" in df.columns else df["NOM_APP"].value_counts().head(10).reset_index()
-                    ap.columns=["Apporteur","Nb actifs"]
-                    fig3=go.Figure(go.Bar(y=ap["Apporteur"].str[:18],x=ap["Nb actifs"],orientation="h",marker_color=GREEN,text=ap["Nb actifs"].astype(str),textposition="outside", textfont=dict(size=10)))
-                    fig3.update_layout(yaxis=dict(autorange="reversed"))
-                    fig_style(fig3,320,"🏆 Top apporteurs (polices actives)"); st.plotly_chart(fig3,use_container_width=True)
-        with t_a:
-            if "DATENAIS" in df.columns and "SEXERISQ" in df.columns:
-                da=df[["DATENAIS","SEXERISQ","MONTENCA"]].copy()
-                da["DATENAIS"]=pd.to_datetime(da["DATENAIS"],errors="coerce")
-                da=da.dropna(subset=["DATENAIS"])
-                da["age"]=(pd.Timestamp.now()-da["DATENAIS"]).dt.days/365.25
-                da=da[(da["age"]>=0)&(da["age"]<=95)]
-                bins=list(range(0,100,5)); da["tranch"]=pd.cut(da["age"],bins=bins,right=False).astype(str)
-                pyr=da.groupby(["tranch","SEXERISQ"]).size().unstack(fill_value=0).reset_index()
-                if "M" in pyr.columns and "F" in pyr.columns:
+                a.download_button("📥 CSV stats",dl_csv(_pc_stat),"stats_pf.csv",
+                    "text/csv",use_container_width=True,key="dl_stats_pf")
+            except Exception as _e_t2:
+                alert(f"Erreur Statistiques portefeuille : {_e_t2}","danger")
+
+        with t3:
+            if "DATESOUS" in df_all.columns:
+                es=df_all.groupby(df_all["DATESOUS"].dt.year).agg(Souscriptions=("DATESOUS","count"),CA=("MONTENCA","sum")).reset_index()
+                es.columns=["Année","Souscriptions","CA"]; es=es[es["Année"].between(1995,2026)].sort_values("Année")
+                fig=make_subplots(specs=[[{"secondary_y":True}]])
+                fig.add_bar(x=es["Année"].astype(str),y=es["Souscriptions"],name="Souscriptions",
+                    marker=dict(color=es["Souscriptions"],colorscale=[[0,MINT],[.4,GREEN],[1,GREEN2]],showscale=False))
+                fig.add_scatter(x=es["Année"].astype(str),y=es["CA"],name="CA MONTENCA",
+                    line=dict(color=RED,width=2.5),mode="lines+markers",secondary_y=True)
+                fig.update_yaxes(title_text="Nb souscriptions",secondary_y=False)
+                fig.update_yaxes(title_text="CA MONTENCA",secondary_y=True,showgrid=False)
+                fig_style(fig,420,"📈 Évolution souscriptions & CA 1995–2025")
+                st.plotly_chart(fig,use_container_width=True)
+                a,b=st.columns(2)
+                a.download_button("📥 CSV",dl_csv(es),"evo_sous.csv","text/csv",use_container_width=True,key="dl_evo_pf")
+                b.download_button("📥 Excel",dl_xlsx(es),"evo_sous.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_evo_pf_xl")
+
+        with t4:
+            if ca is not None and "POLICE_KEY" in fi.columns and "POLICE_KEY" in ca.columns:
+                section(f"🔗 Polices avec CA — {period_lbl}","JOINTURE PF × CA")
+                _ca_tmp = ca_f(); _ca_join = _ca_tmp if _ca_tmp is not None and not _ca_tmp.empty else ca
+                # Merge avec suffixes : colonnes PF ont suffixe _PF si conflit
+                _fi_join = fi[["POLICE_KEY","LIBECATE","ETAT_POLICE","NOM_ASSU","LIBEVILL","NOM_APP"]].drop_duplicates("POLICE_KEY")
+                ca_pf = _ca_join.merge(_fi_join, on="POLICE_KEY", how="inner", suffixes=("","_PF"))
+                # Résolution dynamique des noms de colonnes après merge
+                _libe = "LIBECATE_PF" if "LIBECATE_PF" in ca_pf.columns else "LIBECATE"
+                _etat = "ETAT_POLICE_PF" if "ETAT_POLICE_PF" in ca_pf.columns else "ETAT_POLICE"
+                _nom  = "NOM_ASSU_PF"  if "NOM_ASSU_PF"  in ca_pf.columns else "NOM_ASSU"
+                _app  = "NOM_APP_PF"   if "NOM_APP_PF"   in ca_pf.columns else "NOM_APP"
+                _grp_cols = [c for c in ["POLICE_KEY",_libe,_etat,_nom,_app] if c in ca_pf.columns]
+                tp = (ca_pf.groupby(_grp_cols)
+                           .agg(CA=("CHIFAFFA","sum"), NbQ=("CHIFAFFA","count"))
+                           .reset_index()
+                           .sort_values("CA", ascending=False)
+                           .head(25))
+                tp.columns = [c.replace("_PF","") for c in tp.columns]
+                tp_d = tp.copy(); tp_d["CA"] = tp_d["CA"].apply(fmt)
+                st.dataframe(tp_d, use_container_width=True, hide_index=True)
+                a,b=st.columns(2)
+                a.download_button("📥 CSV jointure",dl_csv(tp),"jointure_pf_ca.csv","text/csv",use_container_width=True,key="dl_join_pf")
+            else: alert("Chargez la Base CA pour voir la jointure PF × CA.","info")
+
+        with t5:
+            section("👤 Liste complète des clients","NOM_ASSU · TOUTES POLICES")
+            if pf is None:
+                alert("Chargez le Portefeuille.","warn")
+            else:
+                # Filtres clients
+                fc1,fc2,fc3 = st.columns(3)
+                srch_cli = fc1.text_input("🔍 Rechercher un assuré",
+                    placeholder="Nom, prénom…", label_visibility="collapsed",
+                    key="srch_cli")
+                etat_cli_opts = ["Tous"] + sorted(
+                    pf["ETAT_POLICE"].dropna().unique().tolist()) if "ETAT_POLICE" in pf.columns else ["Tous"]
+                etat_cli = fc2.selectbox("État police", etat_cli_opts,
+                    label_visibility="collapsed", key="etat_cli")
+                ville_cli_opts = ["Toutes"] + sorted(
+                    pf["LIBEVILL"].dropna().unique().tolist()) if "LIBEVILL" in pf.columns else ["Toutes"]
+                ville_cli = fc3.selectbox("Ville", ville_cli_opts,
+                    label_visibility="collapsed", key="ville_cli")
+
+                df_cli = pf.copy()
+                if etat_cli != "Tous" and "ETAT_POLICE" in df_cli.columns:
+                    df_cli = df_cli[df_cli["ETAT_POLICE"] == etat_cli]
+                if ville_cli != "Toutes" and "LIBEVILL" in df_cli.columns:
+                    df_cli = df_cli[df_cli["LIBEVILL"] == ville_cli]
+                if srch_cli:
+                    _mask = pd.Series(False, index=df_cli.index)
+                    for _c in ["NOM_ASSU","LIBEVILL","NOM_APP"]:
+                        if _c in df_cli.columns:
+                            _mask |= df_cli[_c].astype(str).str.lower().str.contains(
+                                srch_cli.lower(), na=False)
+                    df_cli = df_cli[_mask]
+
+                # Colonnes à afficher
+                _cli_cols = [c for c in [
+                    "NOM_ASSU","LIBECATE","ETAT_POLICE","LIBEVILL","NOM_APP",
+                    "DATESOUS","COTI_PERIODIQUE","MONTENCA","CODEPERI","POLICE_KEY"
+                ] if c in df_cli.columns]
+                df_cli_disp = df_cli[_cli_cols].copy()
+                if "DATESOUS" in df_cli_disp.columns:
+                    df_cli_disp["DATESOUS"] = df_cli_disp["DATESOUS"].apply(ds)
+                for _nc in ["COTI_PERIODIQUE","MONTENCA"]:
+                    if _nc in df_cli_disp.columns:
+                        df_cli_disp[_nc] = df_cli_disp[_nc].apply(lambda x: fmt(x,""))
+
+                st.caption(f"**{len(df_cli):,} clients** affichés sur {len(pf):,} polices totales")
+
+                # Afficher avec pagination (1000 lignes max)
+                page_size = 1000
+                total_pages = max(1, (len(df_cli) + page_size - 1) // page_size)
+                if total_pages > 1:
+                    page_num = st.number_input(
+                        f"Page (1–{total_pages})", min_value=1,
+                        max_value=total_pages, value=1, key="cli_page")
+                    start = (page_num - 1) * page_size
+                    df_show = df_cli_disp.iloc[start:start+page_size]
+                else:
+                    df_show = df_cli_disp
+
+                st.dataframe(df_show, use_container_width=True,
+                            hide_index=True, height=500)
+                ac1, ac2 = st.columns(2)
+                ac1.download_button("📥 CSV clients filtrés",
+                    dl_csv(df_cli[_cli_cols]),
+                    f"clients_{etat_cli}_{ville_cli}.csv",
+                    "text/csv", use_container_width=True, key="dl_cli_csv")
+                ac2.download_button("📥 Excel clients",
+                    dl_xlsx(df_cli[_cli_cols].head(50000)),
+                    "clients.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True, key="dl_cli_xl")
+
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # PAGE — PRODUITS
+    # ═══════════════════════════════════════════════════════════════════════════════
+    except Exception as _e_page:
+        _erreur_onglet(_e_page, "Portefeuille")
+
+elif "Produits" in page:
+    try:
+            section(f"🛒 Analyse Produits — {period_lbl}","CA · ÉTATS · STRUCTURE")
+            t_cap,t_pfp=st.tabs(["💰 CA par produit","📋 Portefeuille par produit"])
+            with t_cap:
+                if ca is None: alert("Chargez la Base CA.","warn")
+                else:
+                    df=ca_f()
+                    if df.empty: alert(f"Aucune donnée CA pour {period_lbl}. Essayez 'Année'.","warn")
+                    else:
+                        cp=df.groupby("LIBECATE").agg(CA=("CHIFAFFA","sum"),NbQ=("CHIFAFFA","count"),Comm=("COMMAPPO","sum"),Prime=("PRIMNETT","sum")).reset_index().sort_values("CA",ascending=False)
+                        cp["Tx comm"]=cp["Comm"]/cp["CA"].replace(0,np.nan)*100; cp["Part CA"]=cp["CA"]/cp["CA"].sum()*100
+                        c1,c2=st.columns(2)
+                        with c1:
+                            fig=go.Figure(go.Bar(x=cp["CA"],y=cp["LIBECATE"].str[:26],orientation="h",
+                                marker=dict(color=cp["Tx comm"],colorscale=[[0,MINT],[.5,GREEN],[1,GREEN2]],showscale=True),
+                                text=[fmt(v) for v in cp["CA"]],textposition="outside", textfont=dict(size=10)))
+                            fig.update_layout(yaxis=dict(autorange="reversed"))
+                            fig_style(fig,400,"💰 CA + taux commission")
+                            st.plotly_chart(fig,use_container_width=True)
+                        with c2:
+                            fig2=px.sunburst(cp,path=["LIBECATE"],values="CA",color="Part CA",color_continuous_scale=[[0,MINT],[.5,GREEN],[1,GREEN2]])
+                            fig2.update_layout(height=400,margin=dict(l=5,r=5,t=20,b=5))
+                            st.plotly_chart(fig2,use_container_width=True)
+                        cp_d=cp.copy()
+                        for c_ in ["CA","Comm","Prime"]: cp_d[c_]=cp_d[c_].apply(fmt)
+                        cp_d["Tx comm"]=cp_d["Tx comm"].apply(lambda x:f"{x:.2f}%"); cp_d["Part CA"]=cp_d["Part CA"].apply(lambda x:f"{x:.2f}%")
+                        cp_d.columns=["Produit","CA","Nb quittances","Commissions","Prime nette","Tx comm","Part CA"]
+                        st.dataframe(cp_d,use_container_width=True,hide_index=True)
+                        a,b=st.columns(2)
+                        a.download_button("📥 CSV",dl_csv(cp),"prod_ca.csv","text/csv",use_container_width=True,key="dl_prod_ca")
+                        b.download_button("📥 Excel",dl_xlsx(cp),"prod_ca.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_prod_ca_xl")
+            with t_pfp:
+                if pf is None: alert("Chargez le Portefeuille.","warn")
+                else:
+                    df_p=pf_f() if not pf_f().empty else pf
+                    pp=df_p.groupby("LIBECATE").agg(Nb=("LIBECATE","count"),
+                        Actifs=("ETAT_POLICE",lambda x:(x.str.strip()=="ACTIF").sum()),
+                        Resil=("ETAT_POLICE",lambda x:(x.str.strip()=="RESILIE").sum()),
+                        Echus=("ETAT_POLICE",lambda x:(x.str.strip().isin(["ECHU","ASSURE ECHU"])).sum()),
+                        CA=("MONTENCA","sum")).reset_index()
+                    pp["Tx actif"]=(pp["Actifs"]/pp["Nb"].replace(0,np.nan)*100).round(1)
+                    pp["Tx resil"]=(pp["Resil"]/pp["Nb"].replace(0,np.nan)*100).round(1); pp=pp.sort_values("Nb",ascending=False)
                     fig=go.Figure()
-                    fig.add_bar(y=pyr["tranch"],x=-pyr["M"],name="Hommes",orientation="h",marker_color=BLUE,text=pyr["M"].astype(str),textposition="outside", textfont=dict(size=9))
-                    fig.add_bar(y=pyr["tranch"],x=pyr["F"],name="Femmes",orientation="h",marker_color=GREEN,text=pyr["F"].astype(str),textposition="outside", textfont=dict(size=9))
-                    fig.update_layout(barmode="overlay",xaxis=dict(tickvals=list(range(-4000,4001,500)),ticktext=[str(abs(x)) for x in range(-4000,4001,500)]))
-                    fig_style(fig,520,"🎂 Pyramide des âges (tranches quinquennales)")
+                    fig.add_bar(name="✅ Actifs",y=pp["LIBECATE"].str[:22],x=pp["Actifs"],orientation="h",marker_color=GREEN)
+                    fig.add_bar(name="📉 Résiliés",y=pp["LIBECATE"].str[:22],x=pp["Resil"],orientation="h",marker_color=RED)
+                    fig.add_bar(name="⌛ Échus",y=pp["LIBECATE"].str[:22],x=pp["Echus"],orientation="h",marker_color=AMBER)
+                    fig.update_layout(barmode="stack",yaxis=dict(autorange="reversed"))
+                    fig_style(fig,440,"📊 États polices par produit")
                     st.plotly_chart(fig,use_container_width=True)
-                    a,_=st.columns(2)
-                    a.download_button("📥 CSV pyramide",dl_csv(da[["age","SEXERISQ"]]),"pyramide.csv","text/csv",use_container_width=True,key="dl_pyr")
-            else: alert("Colonnes DATENAIS et SEXERISQ requises dans le portefeuille.","info")
+                    pp_d=pp.copy(); pp_d["CA"]=pp_d["CA"].apply(fmt)
+                    pp_d["Tx actif"]=pp_d["Tx actif"].apply(lambda x:f"{x:.1f}%"); pp_d["Tx resil"]=pp_d["Tx resil"].apply(lambda x:f"{x:.1f}%")
+                    st.dataframe(pp_d,use_container_width=True,hide_index=True)
+                    a,b=st.columns(2)
+                    a.download_button("📥 CSV",dl_csv(pp),"pf_produits.csv","text/csv",use_container_width=True,key="dl_prod_pf")
+                    b.download_button("📥 Excel",dl_xlsx(pp),"pf_produits.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_prod_pf_xl")
+
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # 
+    # PAGE — COMMERCIAUX
+    # ═══════════════════════════════════════════════════════════════════════════════
+    except Exception as _e_page:
+        _erreur_onglet(_e_page, "Produits")
+
+elif "Commerciaux" in page and "Partenaires" not in page:
+    try:
+        if ca is None: alert("Chargez la Base CA.","warn"); st.stop()
+        df_com = ca_f()
+        if df_com.empty: df_com = ca  # fallback toutes périodes
+
+        section(f"👥 Performance Commerciale — {period_lbl}","CA · CLIENTS · COMMISSIONS · CLASSEMENT")
+
+        # ── Identification des commerciaux ────────────────────────────────────────
+        # Regle metier : le CODE APPORTEUR vient de la base CA (CODEAPPO),
+        # le NOM correspondant est recupere dans la base Portefeuille (NOM_APP).
+        _code_ca = next((c for c in ["CODEAPPO","CODE_APPO","CODEAPP"]
+                         if c in df_com.columns), None)
+
+        if _code_ca is not None and pf is not None:
+            _code_pf = next((c for c in ["CODEAPPO","CODE_APPO","CODEAPP"]
+                             if c in pf.columns), None)
+            _nom_pf  = next((c for c in ["NOM_APP","NOM_APPORT","NOM_APPO"]
+                             if c in pf.columns), None)
+            if _code_pf and _nom_pf:
+                # Dictionnaire code -> nom construit sur les bases COMPLETES
+                # (Portefeuille puis CA tous exercices), afin qu'un exercice ou le
+                # nom est absent de la base CA reste correctement libelle.
+                _map_nom = {}
+                _t = pf[[_code_pf, _nom_pf]].dropna()
+                _t = _t[_t[_nom_pf].astype(str).str.strip() != ""]
+                for _c, _n in zip(_t[_code_pf].astype(str).str.strip(),
+                                  _t[_nom_pf].astype(str).str.strip()):
+                    _map_nom.setdefault(_c, _n)
+                _nca = next((c for c in ["NOM_APPORT","NOM_APPO","NOM_INTERMEDIAIRE","NOM_APP"]
+                             if c in ca.columns), None)
+                if _nca:
+                    _t2 = ca[[_code_ca, _nca]].dropna()
+                    _t2 = _t2[_t2[_nca].astype(str).str.strip() != ""]
+                    for _c, _n in zip(_t2[_code_ca].astype(str).str.strip(),
+                                      _t2[_nca].astype(str).str.strip()):
+                        _map_nom.setdefault(_c, _n)
+                df_com = df_com.copy()
+                df_com["_CODE_K"]  = df_com[_code_ca].astype(str).str.strip()
+                df_com["_NOM_REF"] = df_com["_CODE_K"].map(_map_nom)
+                # Libelle final : "NOM (CODE)" ou "CODE" si le nom est absent
+                df_com["_APPORTEUR"] = df_com.apply(
+                    lambda r: (f"{r['_NOM_REF']} ({r['_CODE_K']})"
+                               if pd.notna(r.get("_NOM_REF")) and str(r.get("_NOM_REF")).strip()
+                               else f"Code {r['_CODE_K']}"), axis=1)
+                ag_k = "_APPORTEUR"
+            else:
+                df_com = df_com.copy()
+                df_com["_APPORTEUR"] = "Code " + df_com[_code_ca].astype(str).str.strip()
+                ag_k = "_APPORTEUR"
+        else:
+            # Repli : colonnes nom presentes directement dans le CA
+            ag_k = next((c for c in ["NOM_APPORT","NOM_APPO","NOM_INTERMEDIAIRE","NOM_APP"]
+                         if c in df_com.columns), None)
+            if ag_k is None:
+                alert("Impossible d'identifier les commerciaux : "
+                      "ni CODEAPPO dans la base CA, ni colonne nom apporteur.","danger")
+                st.stop()
+
+        # Agrégation commerciale complète
+        _agg_com = {"CA":("CHIFAFFA","sum"), "NbQ":("CHIFAFFA","count")}
+        if "COMMAPPO" in df_com.columns:  _agg_com["Comm"]     = ("COMMAPPO","sum")
+        else:                             _agg_com["Comm"]     = ("CHIFAFFA","count")
+        if "POLICE_KEY" in df_com.columns: _agg_com["NbPolices"] = ("POLICE_KEY","nunique")
+        else:                              _agg_com["NbPolices"] = ("CHIFAFFA","count")
+        grp = (df_com.groupby(ag_k, dropna=False).agg(**_agg_com)
+                     .reset_index().sort_values("CA",ascending=False).reset_index(drop=True))
+        grp[ag_k] = grp[ag_k].fillna("Non renseigné").astype(str)
+        grp.index += 1
+        tot = grp["CA"].sum()
+        grp["Part %"]    = (grp["CA"]/max(tot,1)*100).round(2)
+        grp["Part cum %"]= grp["Part %"].cumsum().round(1)
+        grp["Tx comm %"] = (grp["Comm"]/grp["CA"].replace(0,np.nan)*100).round(2)
+        grp["Ticket moy"]= grp["CA"]/grp["NbQ"].replace(0,np.nan)
+
+        # KPIs synthèse
+        k1,k2,k3,k4 = st.columns(4)
+        kpi(k1,"Nb commerciaux",f"{len(grp):,}","Intermédiaires actifs","teal",icon="👥")
+        kpi(k2,"CA total",fmt(tot),"Période filtrée","",icon="💰")
+        kpi(k3,"Ticket moyen",fmt(grp["CA"].mean()),"CA moyen/commercial","blue",icon="🎫")
+        kpi(k4,"Commission moyenne",pct(grp["Tx comm %"].mean()),"Taux moyen","amber",icon="💼")
+
+        st.markdown("")
+
+        # Podium Top 3
+        medals=["🥇","🥈","🥉"]; mc_c=[GREEN,TEAL,BLUE]
+        cols3 = st.columns(3)
+        for col,(med,mc),(idx,row) in zip(cols3,zip(medals,mc_c),grp.head(3).iterrows()):
+            col.markdown(f"""
+            <div style="background:linear-gradient(135deg,{mc}18,white);border:2px solid {mc};
+                 border-radius:14px;padding:1rem;text-align:center">
+              <div style="font-size:28px">{med}</div>
+              <div style="font-size:12px;font-weight:700;margin:5px 0;overflow:hidden;
+                   text-overflow:ellipsis;white-space:nowrap" title="{row[ag_k]}">{str(row[ag_k])[:26]}</div>
+              <div style="font-size:10px;color:#666">{row['NbQ']:,} quittances · {row['NbPolices']:,} polices</div>
+              <div style="font-size:17px;font-weight:800;color:{mc};margin-top:5px">{fmt(row['CA'])}</div>
+              <div style="font-size:10px;color:#888">{pct(row['Part %'])} du CA · Comm. {fmt(row['Comm'])}</div>
+            </div>""", unsafe_allow_html=True)
+
+        st.markdown("")
+        t_cl,t_par,t_stat,t_dt = st.tabs([
+            "🏆 Classement complet","📊 Pareto CA","📈 Statistiques détaillées","🔍 Données par date"])
 
         with t_cl:
-            section("👤 Répertoire complet des clients assurés","RECHERCHE · FILTRE · EXPORT")
-            _c1,_c2,_c3,_c4 = st.columns(4)
-            _srch = _c1.text_input("🔍 Rechercher",placeholder="Nom assuré…",
-                label_visibility="collapsed", key="cli_geo_srch")
-            _etat_opts = ["Tous"]+sorted(df["ETAT_POLICE"].dropna().unique().tolist())             if "ETAT_POLICE" in df.columns else ["Tous"]
-            _etat = _c2.selectbox("État",_etat_opts,label_visibility="collapsed",key="cli_geo_etat")
-            _vill_opts = ["Toutes"]+sorted(df["LIBEVILL"].dropna().unique().tolist())             if "LIBEVILL" in df.columns else ["Toutes"]
-            _vill = _c3.selectbox("Ville",_vill_opts,label_visibility="collapsed",key="cli_geo_vill")
-            _prod_opts = ["Tous"]+sorted(df["LIBECATE"].dropna().unique().tolist())             if "LIBECATE" in df.columns else ["Tous"]
-            _prod = _c4.selectbox("Produit",_prod_opts,label_visibility="collapsed",key="cli_geo_prod")
-
-            _df_rep = df.copy()
-            if _etat != "Tous" and "ETAT_POLICE" in _df_rep.columns:
-                _df_rep = _df_rep[_df_rep["ETAT_POLICE"]==_etat]
-            if _vill != "Toutes" and "LIBEVILL" in _df_rep.columns:
-                _df_rep = _df_rep[_df_rep["LIBEVILL"]==_vill]
-            if _prod != "Tous" and "LIBECATE" in _df_rep.columns:
-                _df_rep = _df_rep[_df_rep["LIBECATE"]==_prod]
-            if _srch:
-                _m = pd.Series(False,index=_df_rep.index)
-                for _c in ["NOM_ASSU","LIBEVILL","NOM_APP","LIBECATE"]:
-                    if _c in _df_rep.columns:
-                        _m |= _df_rep[_c].astype(str).str.lower().str.contains(_srch.lower(),na=False)
-                _df_rep = _df_rep[_m]
-
-            _rep_cols = [c for c in ["NOM_ASSU","LIBECATE","ETAT_POLICE","LIBEVILL",
-                "NOM_APP","DATESOUS","COTI_PERIODIQUE","MONTENCA","CODEPERI","POLICE_KEY"]
-                if c in _df_rep.columns]
-            _df_rep_d = _df_rep[_rep_cols].copy()
-            if "DATESOUS" in _df_rep_d.columns:
-                _df_rep_d["DATESOUS"] = _df_rep_d["DATESOUS"].apply(ds)
-            for _nc in ["COTI_PERIODIQUE","MONTENCA"]:
-                if _nc in _df_rep_d.columns:
-                    _df_rep_d[_nc] = _df_rep_d[_nc].apply(lambda x: fmt(x,""))
-            _df_rep_d.columns = [
-                {"NOM_ASSU":"Assuré","LIBECATE":"Produit","ETAT_POLICE":"État",
-                 "LIBEVILL":"Ville","NOM_APP":"Apporteur","DATESOUS":"Date souscription",
-                 "COTI_PERIODIQUE":"Cotisation","MONTENCA":"Encaissement",
-                 "CODEPERI":"Périodicité","POLICE_KEY":"N° Police"}.get(c,c)
-                for c in _df_rep_d.columns]
-
-            st.caption(f"**{len(_df_rep):,} polices** · {_df_rep['NOM_ASSU'].nunique() if 'NOM_ASSU' in _df_rep.columns else 0:,} clients distincts")
-
-            # Pagination 500 lignes
-            _ps = 500
-            _tp = max(1,(len(_df_rep)+_ps-1)//_ps)
-            if _tp > 1:
-                _pn = st.number_input(f"Page (1–{_tp})",min_value=1,max_value=_tp,value=1,key="cli_rep_page")
-                _st = (_pn-1)*_ps
-                st.dataframe(_df_rep_d.iloc[_st:_st+_ps],use_container_width=True,hide_index=True,height=520)
-            else:
-                st.dataframe(_df_rep_d,use_container_width=True,hide_index=True,height=520)
-
-            _ac1,_ac2 = st.columns(2)
-            _ac1.download_button("📥 CSV répertoire",dl_csv(_df_rep[_rep_cols]),
-                "repertoire_clients.csv","text/csv",use_container_width=True,key="dl_rep_csv")
-            _ac2.download_button("📥 Excel répertoire",dl_xlsx(_df_rep[_rep_cols].head(50000)),
-                "repertoire_clients.xlsx",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,key="dl_rep_xl")
-
-    # ═══════════════════════════════════════════════════════════════════════════════
-    # 
-# PAGE — SINISTRES & PROVISIONS
-# ═══════════════════════════════════════════════════════════════════════════════
-elif "Sinistres" in page:
-    if sin is None: alert("Chargez le fichier Prestations.","warn"); st.stop()
-    df_s = sin  # base complete (reference)
-    # ── Perimetre : exercice sinistre puis periode ───────────────────────────
-    if SEL_YEAR:
-        df_sf = sin[year_mask(sin,
-            ["ANNEE_SIN","Exercice Sinistre","Date Survenance","DATECOMP"],
-            SEL_YEAR)].copy()
-        _sin_scope = f"Exercice {SEL_YEAR}"
-    else:
-        df_sf = sin_f()
-        _sin_scope = period_lbl
-    if df_sf is None or df_sf.empty:
-        alert(f"Aucun dossier sur <b>{_sin_scope}</b>. Affichage de toutes les périodes.","warn")
-        df_sf, _sin_scope = sin.copy(), "Toutes périodes"
-    # Résolution colonnes sinistres — noms exacts vérifiés sur fichier AFG réel
-    def _find_col(df, *candidates):
-        """
-        Retourne la 1ère colonne trouvée parmi les candidats.
-        Stratégie : exact  strip  lower+strip  fuzzy.
-        """
-        # Index normalisé : {nom_lowercase_sans_espaces: nom_réel}
-        cols_norm = {c.strip().lower().replace(" ",""): c for c in df.columns}
-        for cand in candidates:
-            # 1. Correspondance exacte
-            if cand in df.columns:
-                return cand
-            # 2. Après strip des deux côtés
-            cand_strip = cand.strip()
-            for col in df.columns:
-                if col.strip() == cand_strip:
-                    return col
-            # 3. Normalisé lowercase sans espaces
-            cand_norm = cand.strip().lower().replace(" ","")
-            if cand_norm in cols_norm:
-                return cols_norm[cand_norm]
-            # 4. Fuzzy : tous les mots du candidat présents dans la colonne
-            cand_words = [w for w in cand.lower().split() if len(w) > 2]
-            for col in df.columns:
-                col_l = col.lower()
-                if cand_words and all(w in col_l for w in cand_words):
-                    return col
-        return None
-
-    # Noms EXACTS confirmés sur le fichier Prestations_au_31122025.xlsx
-    # + fallbacks pour robustesse si encodage différent
-    _c_regle_ = _find_col(sin, "Réglement Total",      "Reglement Total",      "Règlement Total")
-    _c_sap_   = _find_col(sin, "SAP au 31/12/2025",    "SAP")
-    _c_hon_   = _find_col(sin, "Réglement Honoraires",  "Reglement Honoraires", "Règlement Honoraires")
-    _c_nat_   = _find_col(sin, "Nature Sinistre",       "Nature Sinstre")
-    _c_sort_  = _find_col(sin, "Sort Sinistre")
-    _c_cat_   = _find_col(sin, "Libéllé Catégorie",    "Libellé Catégorie",    "Libelle Categorie", "Libéllé Catégorie risque")
-    _c_souscr = _find_col(sin, "Souscripteur")
-    _c_exo    = _find_col(sin, "Exercice Sinistre")
-    _c_surv_  = _find_col(sin, "Date Survenance")
-    _c_decl   = _find_col(sin, "Date Déclaration",     "Date Declaration")
-    _c_compt  = _find_col(sin, "Réglement Comptable",   "Reglement Comptable")
-    _c_rae    = _find_col(sin, "RAE Cie au 31/12/2025")
-    _c_branch = _find_col(sin, "Libellé branche")
-
-    # Debug : afficher ce qui a été trouvé (si colonnes manquantes)
-    _missing_cols = [n for n,v in [
-        ("Réglement Total",_c_regle_),("SAP",_c_sap_),
-        ("Nature Sinistre",_c_nat_),("Sort Sinistre",_c_sort_),
-        ("Libéllé Catégorie",_c_cat_)] if v is None]
-    if _missing_cols:
-        st.warning(f"⚠️ Colonnes non trouvées : {_missing_cols} | "
-                   f"Colonnes disponibles : {list(sin.columns[:10])}")
-
-    section(f"⚠️ Sinistres & Prestations — {_sin_scope}","ANALYSE ACTUARIELLE · SAP · S/P")
-    # Noms exacts vérifiés sur fichier AFG réel
-    _c_tot  = "Réglement Total"     if "Réglement Total"     in sin.columns else next((c for c in sin.columns if "glement" in c and "otal" in c), None)
-    _c_sap  = "SAP au 31/12/2025"  if "SAP au 31/12/2025"  in sin.columns else next((c for c in sin.columns if c.startswith("SAP")), None)
-    _c_hon  = "Réglement Honoraires" if "Réglement Honoraires" in sin.columns else next((c for c in sin.columns if "glement" in c and "onnor" in c), None)
-    # Tous les indicateurs sont calcules sur le PERIMETRE FILTRE (df_sf)
-    _S = df_sf
-    tot_sin = float(_S[_c_tot].fillna(0).sum()) if _c_tot and _c_tot in _S.columns else 0
-    tot_sap = float(_S[_c_sap].fillna(0).sum()) if _c_sap and _c_sap in _S.columns else 0
-    tot_hon = float(_S[_c_hon].fillna(0).sum()) if _c_hon and _c_hon in _S.columns else 0
-    charge_u=tot_sin+tot_sap+tot_hon
-    nb_sin  = len(_S)
-    nb_clos = int((_S[_c_sort_]=="Cloturé").sum()) if _c_sort_ and _c_sort_ in _S.columns else 0
-    nb_ouv  = int((_S[_c_sort_]=="Ouvert").sum())  if _c_sort_ and _c_sort_ in _S.columns else 0
-    # CA de reference : meme perimetre que les sinistres pour un S/P coherent
-    _ca_ref_df = ca_f() if (ca is not None and SEL_YEAR is None) else (
-                 ca[year_mask(ca,["ANNEE","DATECOMP","DATEEFFE"],SEL_YEAR)]
-                 if (ca is not None and SEL_YEAR) else None)
-    if _ca_ref_df is None or _ca_ref_df.empty: _ca_ref_df = ca
-    ca_all = float(_ca_ref_df["CHIFAFFA"].fillna(0).sum()) if (
-             _ca_ref_df is not None and "CHIFAFFA" in _ca_ref_df.columns) else 0
-    sp=tot_sin/max(ca_all,1)*100; cout_m=tot_sin/max(nb_clos,1)
-    actifs_n=int((pf["ETAT_POLICE"].str.strip()=="ACTIF").sum()) if pf is not None and "ETAT_POLICE" in pf.columns else 1
-    burning=charge_u/max(actifs_n,1)*1000
-
-    c1,c2,c3,c4,c5,c6=st.columns(6)
-    kpi(c1,"Total réglé",     fmt_full(tot_sin), _sin_scope,            "red",  icon="💊")
-    kpi(c2,"SAP (provisions)",fmt_full(tot_sap), "Provisions restantes","amber",icon="📌")
-    kpi(c3,"Charge ultime",   fmt_full(charge_u),"Réglé+SAP+Honoraires","red",  icon="⚖️")
-    kpi(c4,"Ratio S/P",       pct(sp),           "vs CA même période",
-        "red" if sp>80 else "amber", icon="📐")
-    kpi(c5,"Coût moy/clos",   fmt_full(cout_m),  f"{nb_clos:,} dossiers clos".replace(","," "),
-        "teal", icon="💰")
-    kpi(c6,"Burning Cost",    fmt_full(burning), "Charge/1 000 actifs", "red", icon="🔥")
-
-    st.markdown(f"<div style='font-size:11px;color:#667;margin:4px 0 10px'>"
-                f"Périmètre : <b>{_sin_scope}</b> — "
-                f"<b>{nb_full(nb_sin)}</b> dossiers sur {nb_full(len(sin))} "
-                f"({nb_sin/max(len(sin),1)*100:.1f} %) · "
-                f"{nb_full(nb_ouv)} ouverts · {nb_full(nb_clos)} clos</div>",
-                unsafe_allow_html=True)
-
-    t_n,t_e,t_p,t_tri,t_r=st.tabs(["🏷️ Par nature","📈 Évolution","🛒 Par produit","📐 Triangle dev.","🔍 Données brutes"])
-
-    with t_n:
-        if _c_nat_ and _c_regle_:
-            try:
-                # Les variantes de deces sont fusionnees sous un libelle unique
-                _sn = df_sf.copy()
-                _sn[_c_nat_] = normaliser_nature(_sn[_c_nat_])
-                nat = _safe_groupby(_sn, _c_nat_,
-                    {"Nb":(_c_nat_,"count"),
-                     "Réglé":(_c_regle_,"sum"),
-                     **( {"SAP":(_c_sap_,"sum")} if _c_sap_ else {})},
-                    sort_col="Réglé")
-                if "Réglé" not in nat.columns: nat["Réglé"] = 0.0
-                if "SAP"   not in nat.columns: nat["SAP"]   = 0.0
-                nat["Charge"]   = nat["Réglé"] + nat["SAP"]
-                nat["Coût moyen"] = nat["Réglé"] / nat["Nb"].replace(0, np.nan)
-                c1,c2 = st.columns(2)
-                with c1:
-                    fig = go.Figure()
-                    fig.add_bar(y=nat[_c_nat_].astype(str).str[:24],
-                        x=nat["Réglé"], name="Réglé", marker_color=RED, orientation="h")
-                    fig.add_bar(y=nat[_c_nat_].astype(str).str[:24],
-                        x=nat["SAP"],   name="SAP",   marker_color=AMBER, orientation="h")
-                    fig.update_layout(barmode="stack", yaxis=dict(autorange="reversed"))
-                    fig_style(fig, 380, "Règlements + SAP par nature de sinistre")
-                    st.plotly_chart(fig, use_container_width=True)
-                with c2:
-                    _nat_c = nat[nat["Charge"]>0]
-                    if not _nat_c.empty:
-                        fig2 = px.treemap(_nat_c, path=[_c_nat_], values="Charge",
-                            color="Nb", color_continuous_scale=[[0,MINT],[.5,AMBER],[1,RED]])
-                        fig2.update_layout(height=380, margin=dict(l=5,r=5,t=20,b=5))
-                        st.plotly_chart(fig2, use_container_width=True)
-                nat_d = nat.copy()
-                for c_ in ["Réglé","SAP","Charge","Coût moyen"]:
-                    if c_ in nat_d.columns: nat_d[c_] = nat_d[c_].apply(fmt)
-                st.dataframe(nat_d, use_container_width=True, hide_index=True)
-                a,b = st.columns(2)
-                a.download_button("📥 CSV", dl_csv(nat), "sin_nature.csv",
-                    "text/csv", use_container_width=True, key="dl_sin_nat")
-                b.download_button("📥 Excel", dl_xlsx(nat), "sin_nature.xlsx",
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True, key="dl_sin_nat_xl")
-            except Exception as _e:
-                alert(f"Erreur 'Par nature' : {_e}", "danger")
-        else:
-            alert("Colonne 'Nature Sinistre' ou 'Reglement Total' absente du fichier.", "warn")
-
-    with t_e:
-        if "ANNEE_SIN" in sin.columns:
-            evo = _safe_groupby(sin, "ANNEE_SIN",
-                {"Nb":("ANNEE_SIN","count"),
-                 "Réglé":(_c_regle_,"sum") if _c_regle_ else None,
-                 "SAP":(_c_sap_,"sum") if _c_sap_ else None})
-            if "Réglé" not in evo.columns: evo["Réglé"] = 0
-            if "SAP"   not in evo.columns: evo["SAP"]   = 0
-            evo=evo[evo["ANNEE_SIN"].between(1997,2025)].sort_values("ANNEE_SIN")
-            fig=make_subplots(specs=[[{"secondary_y":True}]])
-            fig.add_bar(x=evo["ANNEE_SIN"].astype(str),y=evo["Réglé"],name="Réglé",marker_color=RED,opacity=.82)
-            fig.add_bar(x=evo["ANNEE_SIN"].astype(str),y=evo["SAP"],name="SAP",marker_color=AMBER,opacity=.82)
-            fig.add_scatter(x=evo["ANNEE_SIN"].astype(str),y=evo["Nb"],name="Nb dossiers",
-                line=dict(color=GREEN,width=2.5),mode="lines+markers",secondary_y=True)
-            fig.update_layout(barmode="stack")
-            fig.update_yaxes(title_text="Montant (FCFA)",secondary_y=False)
-            fig.update_yaxes(title_text="Nb dossiers",secondary_y=True,showgrid=False)
-            fig_style(fig,420,"📈 Sinistres par exercice 1997–2025"); st.plotly_chart(fig,use_container_width=True)
-            a,b=st.columns(2)
-            a.download_button("📥 CSV",dl_csv(evo),"evo_sin.csv","text/csv",use_container_width=True,key="dl_evo_sin")
-            b.download_button("📥 Excel",dl_xlsx(evo),"evo_sin.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_evo_sin_xl")
-
-    with t_p:
-        # Détection robuste du nom de colonne (accents variables selon encodage)
-        cat_c = next((c for c in sin.columns
-                      if "cat" in c.lower() and ("gorie" in c.lower() or "g" in c.lower())),
-                     "Libéllé Catégorie")
-        if _c_cat_ and _c_cat_ in sin.columns:
-            cat_c = _c_cat_
-            sp2 = _safe_groupby(sin, cat_c,
-                {"Nb":(cat_c,"count"),
-                 "Réglé":(_c_regle_,"sum") if _c_regle_ else None,
-                 "SAP":(_c_sap_,"sum") if _c_sap_ else None},
-                sort_col="Réglé")
-            if "Réglé" not in sp2.columns: sp2["Réglé"] = 0
-            if "SAP"   not in sp2.columns: sp2["SAP"]   = 0
-            sp2["Charge"]=sp2["Réglé"]+sp2["SAP"]
-            fig=go.Figure()
-            fig.add_bar(x=sp2["Réglé"],y=sp2[cat_c].str[:24],name="Réglé",marker_color=RED,orientation="h")
-            fig.add_bar(x=sp2["SAP"],y=sp2[cat_c].str[:24],name="SAP",marker_color=AMBER,orientation="h")
-            fig.update_layout(barmode="stack",yaxis=dict(autorange="reversed"))
-            fig_style(fig,360,"🛒 Sinistres par produit"); st.plotly_chart(fig,use_container_width=True)
-            sp2_d=sp2.copy()
-            for c_ in ["Réglé","SAP","Charge"]: sp2_d[c_]=sp2_d[c_].apply(fmt)
-            st.dataframe(sp2_d,use_container_width=True,hide_index=True)
-            a,_=st.columns(2)
-            a.download_button("📥 CSV",dl_csv(sp2),"sin_prod.csv","text/csv",use_container_width=True,key="dl_sin_p")
-
-    with t_tri:
-        section("Triangle de développement — Décès",
-                "SURVENANCE (lignes) × COMPTABILISATION (colonnes) · RÈGLEMENTS")
-
-        # ── 1. Isoler les DÉCÈS sur la base COMPLÈTE ──────────────────────────
-        # Un triangle de développement se construit toujours sur l'historique
-        # intégral : le filtre de période de la barre latérale ne s'y applique
-        # pas, sinon les exercices antérieurs disparaîtraient et les facteurs
-        # de développement seraient faux.
-        _tri_src = sin.copy()
-        _c_nat_t = next((c for c in _tri_src.columns
-                         if "ature" in c.lower() and "ini" in c.lower()), None)
-        if _c_nat_t:
-            _msk_dc = _tri_src[_c_nat_t].astype(str).str.upper().str.contains(
-                r"D[EÉ]C[EÈ]|DECES|DEATH|MORTAL", regex=True, na=False)
-            _n_avant  = len(_tri_src)
-            _natures  = sorted(_tri_src.loc[_msk_dc, _c_nat_t].dropna().unique().tolist())
-            _tri_src  = _tri_src[_msk_dc].copy()
-            _nb_deces = len(_tri_src)
-            if _tri_src.empty:
-                alert("Aucun dossier de nature <b>Décès</b> dans la base Prestations. "
-                      "Vérifiez la colonne « Nature Sinistre ».","warn")
-            else:
-                _tri_src[_c_nat_t] = "Décès"
-                d1, d2, d3 = st.columns(3)
-                kpi(d1, "Décès recensés", nb_full(_nb_deces),
-                    f"sur {nb_full(_n_avant)} dossiers", "red", icon="🕯️")
-                kpi(d2, "Part des décès", f"{_nb_deces/max(_n_avant,1)*100:.1f} %",
-                    "de la base Prestations", "amber", icon="📊")
-                kpi(d3, "Libellés fusionnés", nb_full(len(_natures)),
-                    "regroupés sous « Décès »", "teal", icon="🔗")
-                st.caption("Historique intégral — le filtre de période ne s'applique "
-                           "pas au triangle. Libellés regroupés : "
-                           + ", ".join(str(n)[:30] for n in _natures[:8])
-                           + (" …" if len(_natures) > 8 else ""))
-        else:
-            alert("Colonne « Nature Sinistre » introuvable — triangle sur tous les dossiers.","warn")
-
-        # ── 2. Résolution des colonnes de dates et de montants ────────────────
-        _c_surv_t = next((c for c in _tri_src.columns
-                          if "survenance" in c.lower()), None)
-        _c_comp_t = next((c for c in _tri_src.columns
-                          if "datecomp" in c.lower() or "comptab" in c.lower()), None)
-        _c_regl_t = next((c for c in _tri_src.columns
-                          if "glement" in c.lower() and "otal" in c.lower()), None)
-
-        if not (_c_surv_t and _c_comp_t and _c_regl_t):
-            _manque = [lbl for lbl, c in
-                       [("Date Survenance", _c_surv_t),
-                        ("Date Comptabilisation", _c_comp_t),
-                        ("Règlement Total", _c_regl_t)] if not c]
-            alert(f"Colonne(s) manquante(s) pour le triangle : {', '.join(_manque)}.","warn")
-        else:
-            _tri = _tri_src[[_c_surv_t, _c_comp_t, _c_regl_t]].copy()
-            _tri["_SURV"] = pd.to_datetime(_tri[_c_surv_t], errors="coerce").dt.year
-            _tri["_COMP"] = pd.to_datetime(_tri[_c_comp_t], errors="coerce").dt.year
-            _tri["_MT"]   = pd.to_numeric(_tri[_c_regl_t], errors="coerce").fillna(0)
-            _tri = _tri.dropna(subset=["_SURV","_COMP"])
-            _tri["_SURV"] = _tri["_SURV"].astype(int)
-            _tri["_COMP"] = _tri["_COMP"].astype(int)
-            # Un règlement ne peut pas précéder la survenance
-            _tri = _tri[_tri["_COMP"] >= _tri["_SURV"]]
-
-            if _tri.empty:
-                alert("Pas de couple (survenance, comptabilisation) exploitable.","warn")
-            else:
-                # ── 3. Triangle : survenance en LIGNES, comptabilisation en COLONNES
-                tri = _tri.pivot_table(index="_SURV", columns="_COMP",
-                                       values="_MT", aggfunc="sum", fill_value=0)
-                tri = tri.sort_index().sort_index(axis=1)
-                tri.index.name   = "Survenance"
-                tri.columns.name = "Comptabilisation"
-
-                t_a, t_b, t_c2 = st.tabs(["📐 Triangle brut",
-                                          "📈 Triangle cumulé",
-                                          "🔗 Facteurs de développement"])
-
-                with t_a:
-                    st.caption("Montants réglés (FCFA) — année de survenance en ligne, "
-                               "année de comptabilisation en colonne.")
-                    _td = tri.copy()
-                    for c_ in _td.columns: _td[c_] = _td[c_].apply(lambda v: fmt_full(v,""))
-                    _td.columns = [str(c) for c in _td.columns]
-                    st.dataframe(_td, use_container_width=True, height=340)
-                    st.download_button("📥 CSV triangle brut", dl_csv(tri.reset_index()),
-                        "triangle_deces_brut.csv","text/csv",
-                        use_container_width=True, key="dl_tri_brut")
-
-                with t_b:
-                    tri_c = tri.cumsum(axis=1)
-                    st.caption("Cumul des règlements au fil des exercices de comptabilisation.")
-                    _tc = tri_c.copy()
-                    for c_ in _tc.columns: _tc[c_] = _tc[c_].apply(lambda v: fmt_full(v,""))
-                    _tc.columns = [str(c) for c in _tc.columns]
-                    st.dataframe(_tc, use_container_width=True, height=340)
-
-                    fig_tri = go.Figure(go.Heatmap(
-                        z=tri_c.values,
-                        x=[str(c) for c in tri_c.columns],
-                        y=[str(i) for i in tri_c.index],
-                        colorscale=[[0,"#FFFFFF"],[.5,MINT],[1,GREEN]],
-                        text=[[f"{v:,.0f}".replace(",", " ") if v else ""
-                               for v in row] for row in tri_c.values],
-                        texttemplate="%{text}", textfont=dict(size=9),
-                        hovertemplate="Survenance %{y} · Comptabilise %{x}"
-                                      "<br>Cumul : %{z:,.0f} FCFA<extra></extra>"))
-                    fig_tri.update_layout(
-                        xaxis=dict(title="Année de comptabilisation", side="top"),
-                        yaxis=dict(title="Année de survenance", autorange="reversed"))
-                    fig_style(fig_tri, 380, "🔥 Triangle cumulé — Décès")
-                    st.plotly_chart(fig_tri, use_container_width=True)
-                    st.download_button("📥 CSV triangle cumulé", dl_csv(tri_c.reset_index()),
-                        "triangle_deces_cumule.csv","text/csv",
-                        use_container_width=True, key="dl_tri_cum")
-
-                with t_c2:
-                    tri_c = tri.cumsum(axis=1)
-                    _cols = list(tri_c.columns)
-                    if len(_cols) < 2:
-                        alert("Au moins deux exercices de comptabilisation sont "
-                              "nécessaires pour calculer des facteurs.","info")
-                    else:
-                        _fac = []
-                        for k in range(len(_cols)-1):
-                            _c0, _c1 = _cols[k], _cols[k+1]
-                            _num = tri_c[_c1][tri_c[_c0] > 0].sum()
-                            _den = tri_c[_c0][tri_c[_c0] > 0].sum()
-                            _f = (_num/_den) if _den else np.nan
-                            _fac.append({"Transition": f"{_c0} → {_c1}",
-                                         "Cumul départ": _den, "Cumul arrivée": _num,
-                                         "Facteur": _f})
-                        _dff = pd.DataFrame(_fac)
-                        _dfa = _dff.copy()
-                        _dfa["Cumul départ"]  = _dfa["Cumul départ"].apply(lambda v: fmt_full(v,""))
-                        _dfa["Cumul arrivée"] = _dfa["Cumul arrivée"].apply(lambda v: fmt_full(v,""))
-                        _dfa["Facteur"]       = _dfa["Facteur"].apply(
-                            lambda v: f"{v:.4f}" if pd.notna(v) else "—")
-                        st.dataframe(_dfa, use_container_width=True, hide_index=True)
-
-                        _fv = _dff["Facteur"].dropna()
-                        if not _fv.empty:
-                            _ldf = float(np.prod(_fv.values))
-                            c_f1, c_f2 = st.columns(2)
-                            kpi(c_f1,"Facteur de queue cumulé", f"{_ldf:.4f}",
-                                "Produit des facteurs", "teal", icon="🔗")
-                            kpi(c_f2,"Charge ultime estimée",
-                                fmt(float(tri_c.iloc[:,-1].sum()) * max(_ldf-1, 0) +
-                                    float(tri_c.iloc[:,-1].sum())),
-                                "Chain-Ladder simplifié", "", icon="📊")
-                            fig_f = go.Figure(go.Bar(
-                                x=_dff["Transition"], y=_dff["Facteur"],
-                                marker_color=GREEN,
-                                text=[f"{v:.3f}" if pd.notna(v) else "—"
-                                      for v in _dff["Facteur"]],
-                                textposition="outside", textfont=dict(size=10)))
-                            fig_f.add_hline(y=1, line_dash="dash", line_color=RED)
-                            fig_style(fig_f, 300, "📈 Facteurs de développement (Chain-Ladder)")
-                            st.plotly_chart(fig_f, use_container_width=True)
-
-    with t_r:
-        # Colonnes brutes — noms EXACTS confirmés sur fichier AFG
-        _sin_raw_want = [c for c in [
-            "Date Survenance", _c_cat_, _c_nat_, _c_sort_, "Souscripteur",
-            "Désignation risque", _c_regle_, _c_sap_, _c_hon_,
-            "Date Déclaration", "Date validation", "Nom Bénéficiaire",
-            "Exercice Sinistre", "POLICE_KEY", "No Sinistre",
-            "Réglement Comptable", "RAE Cie au 31/12/2025"
-        ] if c is not None and c in sin.columns]
-        _sin_raw_want_orig = _sin_raw_want
-        # Ajouter la colonne catégorie quelle que soit son orthographe
-        _cat_col = next((c for c in sin.columns if "cat" in c.lower()),None)
-        if _cat_col and _cat_col not in _sin_raw_want: _sin_raw_want.insert(1, _cat_col)
-        cs=[c for c in _sin_raw_want if c in sin.columns]
-        srch_s=st.text_input("🔍 Rechercher",label_visibility="collapsed",placeholder="Nature, souscripteur, produit…",key="srch_sin")
-        di_s=sin[cs].copy()
-        for dc in ["Date Survenance","Date Déclaration","Date validation"]:
-            if dc in di_s.columns: di_s[dc]=di_s[dc].apply(ds)
-        for nc in ["Réglement Total","SAP au 31/12/2025"]:
-            if nc in di_s.columns: di_s[nc]=di_s[nc].apply(lambda x:fmt(x,""))
-        if srch_s: di_s=di_s[di_s.apply(lambda r:srch_s.lower() in str(r).lower(),axis=1)]
-        st.dataframe(di_s.head(500),use_container_width=True,hide_index=True,height=420)
-        st.caption(f"Affichage 500 / {len(di_s):,} lignes")
-        a,b=st.columns(2)
-        a.download_button("📥 CSV complet",dl_csv(sin),"prestations.csv","text/csv",use_container_width=True,key="dl_sin_raw")
-        b.download_button("📥 Excel",dl_xlsx(sin[cs].head(50000)),"prestations.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_sin_raw_xl")
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# PAGE — ACTUARIAT AVANCÉ
-# ═══════════════════════════════════════════════════════════════════════════════
-elif "Actuariat" in page:
-        section("📐 Actuariat Avancé","CIMA · SAP · BURNING COST · JOINTURES")
-        t_c,t_p = st.tabs(["🏛️ CIMA & Solvabilité","📌 Provisions SAP"])
-        with t_c:
-            if pf is None: alert("Chargez le Portefeuille.","warn")
-            else:
-                nb=len(pf); ek="ETAT_POLICE"
-                actifs=int((pf[ek].str.strip().isin(["ACTIF"])).sum()) if ek in pf.columns else 0
-                resil=int((pf[ek].str.strip()=="RESILIE").sum()) if ek in pf.columns else 0
-                inact=int((pf[ek].str.strip()=="INACTIF").sum()) if ek in pf.columns else 0
-                echu=int((pf[ek].str.strip().isin(["ECHU","ASSURE ECHU"])).sum()) if ek in pf.columns else 0
-                tx_act=actifs/max(nb,1)*100; tx_res=resil/max(nb-inact,1)*100
-                ca_t=float(ca["CHIFAFFA"].fillna(0).sum()) if ca is not None and "CHIFAFFA" in ca.columns else 0
-                sin_t=float(sin["Réglement Total"].fillna(0).sum()) if sin is not None and "Réglement Total" in sin.columns else 0
-                sap_t=float(sin["SAP au 31/12/2025"].fillna(0).sum()) if sin is not None and "SAP au 31/12/2025" in sin.columns else 0
-                sp=sin_t/max(ca_t,1)*100; charge_u=sin_t+sap_t; burning=charge_u/max(actifs,1)*1000
-                monten=float(pf["MONTENCA"].fillna(0).apply(lambda x: float(str(x).replace(" ","").replace(",",".")) if str(x).replace(" ","").replace(",",".").replace(".","",1).replace("-","",1).isdigit() else 0).sum()) if "MONTENCA" in pf.columns else 0
-                indics=[
-                    (tx_act,"Taux d'activité net",50,">=",GREEN),
-                    (tx_res,"Taux résiliation CIMA",25,"<=",RED),
-                    (sp,"Ratio S/P",80,"<=",AMBER),
-                    (inact/max(nb,1)*100,"Part inactifs",5,"<=",AMBER),
-                ]
-                for v,lbl,seuil,op,col in indics:
-                    ok=v>=seuil if op==">=" else v<=seuil; c_=GREEN if ok else RED
-                    st.markdown(f"""<div style="display:flex;align-items:center;justify-content:space-between;
-                         padding:10px 14px;border-left:4px solid {c_};background:{c_}0D;
-                         border-radius:0 10px 10px 0;margin-bottom:8px">
-                      <div><div style="font-size:13px;font-weight:700;color:{NAVY}">{lbl}</div>
-                      <div style="font-size:10px;color:#8899AA">Norme CIMA : {op}{seuil}%</div></div>
-                      <div style="font-size:20px;font-weight:900;color:{c_}">{pct(v)} {'✅' if ok else '⚠️'}</div>
-                    </div>""", unsafe_allow_html=True)
-                st.markdown("")
-                ac1,ac2,ac3,ac4=st.columns(4)
-                kpi(ac1,"Burning Cost",fmt(burning),"Charge ultime / 1 000 actifs","red",icon="🔥")
-                kpi(ac2,"Charge ultime",fmt(charge_u),"Réglé + SAP","red",icon="⚖️")
-                kpi(ac3,"CA 2024",fmt(ca_t),"Base calcul S/P","teal",icon="💰")
-                kpi(ac4,"Encaissements PF",fmt(monten),"MONTENCA total","blue",icon="📊")
-        with t_p:
-            if sin is None: alert("Chargez les Prestations.","warn")
-            else:
-                # Résolution dynamique des colonnes sinistres dans l'onglet Actuariat
-                _act_nat  = next((c for c in sin.columns if "ature" in c.lower() and "ini" in c.lower()), None)
-                _act_regl = next((c for c in sin.columns if "glement" in c.lower() and "otal" in c.lower()), None)
-                _act_sap  = next((c for c in sin.columns if c.upper().startswith("SAP")), None)
-                _act_sort = next((c for c in sin.columns if "ort" in c.lower() and "ini" in c.lower()), None)
-
-                if _act_nat is None:
-                    alert("Colonne 'Nature Sinistre' introuvable dans le fichier Prestations.","warn")
-                else:
-                    _agg_prov = {"Nb": (_act_nat, "count")}
-                    if _act_regl: _agg_prov["Regle"]  = (_act_regl, "sum")
-                    if _act_sap:  _agg_prov["SAP"]    = (_act_sap, "sum")
-                    if _act_sort: _agg_prov["Ouvert"] = (_act_sort, lambda x: (x == "Ouvert").sum())
-
-                    prov = sin.groupby(_act_nat).agg(**_agg_prov).reset_index()
-                    if "Regle"  not in prov.columns: prov["Regle"]  = 0
-                    if "SAP"    not in prov.columns: prov["SAP"]    = 0
-                    if "Ouvert" not in prov.columns: prov["Ouvert"] = 0
-
-                    prov["Charge"]           = prov["Regle"] + prov["SAP"]
-                    prov["Ratio SAP/Charge"] = prov["SAP"] / prov["Charge"].replace(0, np.nan) * 100
-                    prov["Cout moy clos"]    = prov["Regle"] / (prov["Nb"] - prov["Ouvert"]).replace(0, np.nan)
-                fig=go.Figure()
-                fig.add_bar(y=prov["Nature Sinistre"].str[:22],x=prov["Regle"],name="Regle",marker_color=GREEN,orientation="h")
-                fig.add_bar(y=prov["Nature Sinistre"].str[:22],x=prov["SAP"],name="SAP résiduel",marker_color=AMBER,orientation="h")
-                fig.update_layout(barmode="stack",yaxis=dict(autorange="reversed"))
-                fig_style(fig,360,"📌 Structure Réglé / SAP par nature"); st.plotly_chart(fig,use_container_width=True)
-                pv=prov.copy()
-                for c_ in ["Regle","SAP","Charge","Cout moy clos"]: pv[c_]=pv[c_].apply(fmt)
-                pv["Ratio SAP/Charge"]=pv["Ratio SAP/Charge"].apply(lambda x:f"{x:.1f}%" if pd.notna(x) else "—")
-                pv.columns=["Nature","Nb","Réglé","SAP","Dossiers ouverts","Charge","Ratio SAP/Charge","Coût moyen clos"]
-                st.dataframe(pv,use_container_width=True,hide_index=True)
-                a,b = st.columns(2)
-                a.download_button("📥 CSV provisions",dl_csv(prov),"provisions.csv","text/csv",use_container_width=True,key="dl_prov")
-                b.download_button("📥 Excel",dl_xlsx(prov),"provisions.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_prov_xl")
-elif "Prévisions" in page:
-        section("🔮 Prévisions & Tendances","MODÈLE POLYNOMIAL · SAISONNALITÉ · PROJECTION")
-        if ca is None and pf is None: alert("Chargez la Base CA ou le Portefeuille.","warn"); st.stop()
-        src=ca if ca is not None else pf
-        ca_k="CHIFAFFA" if "CHIFAFFA" in src.columns else "MONTENCA"
-        d_k="DATECOMP" if "DATECOMP" in src.columns else "DATESOUS"
-        if d_k not in src.columns: alert("Colonne date introuvable.","warn"); st.stop()
-        src2=src[[d_k,ca_k]].copy()
-        src2[d_k]=pd.to_datetime(src2[d_k],errors="coerce"); src2=src2.dropna(subset=[d_k])
-        mo=src2.groupby(src2[d_k].dt.to_period("M").astype(str))[ca_k].sum().reset_index()
-        mo.columns=["Période","CA"]; mo=mo.sort_values("Période")
-        n=len(mo)
-        if n<6: alert("Données insuffisantes pour les prévisions (< 6 mois).","warn"); st.stop()
-        c1,c2=st.columns(2)
-        deg_sel=c1.slider("Degré du polynôme",1,4,2,key="deg_s")
-        n_hor=c2.slider("Mois à prévoir",1,24,12,key="n_hor_s")
-        xs=np.arange(n); ys=mo["CA"].values.astype(float)
-        coeffs=np.polyfit(xs,ys,deg_sel)
-        trend_h=np.polyval(coeffs,xs)
-        x_f=np.arange(n,n+n_hor); trend_f=np.maximum(np.polyval(coeffs,x_f),0)
-        r2=1-np.sum((ys-trend_h)**2)/max(np.sum((ys-ys.mean())**2),1)
-        last_p=pd.Period(mo["Période"].iloc[-1],"M")
-        fut_l=[str(last_p+i+1) for i in range(n_hor)]
-        kc1,kc2,kc3=st.columns(3)
-        kpi(kc1,"CA historique total",fmt(ys.sum()),"Série complète","",icon="💰")
-        kpi(kc2,f"R² modèle (deg {deg_sel})",f"{r2:.4f}","Qualité ajustement","teal" if r2>.8 else "amber",icon="📐")
-        kpi(kc3,f"Prévision H+{n_hor}",fmt(trend_f[-1]),"Projection","blue",icon="🔮")
-        st.markdown("")
-        fig=go.Figure()
-        fig.add_scatter(x=mo["Période"],y=ys,name="CA historique",line=dict(color=GREEN,width=2),mode="lines+markers",marker=dict(size=4))
-        fig.add_scatter(x=mo["Période"],y=trend_h,name="Tendance ajustée",line=dict(color=TEAL,width=2,dash="dot"),mode="lines")
-        fig.add_scatter(x=fut_l,y=trend_f,name="Prévision",line=dict(color=RED,width=2.5,dash="dash"),mode="lines+markers",marker=dict(symbol="star",size=9,color=RED))
-        fig.add_vrect(x0=fut_l[0],x1=fut_l[-1],fillcolor="rgba(192,57,43,0.04)",line_width=0,annotation_text="Zone prévision")
-        fig_style(fig,480,f"🔮 Modèle polynomial (deg {deg_sel}) — R²={r2:.3f}")
-        st.plotly_chart(fig,use_container_width=True)
-        df_fut=pd.DataFrame({"Période":fut_l,"CA prévu":[fmt(v) for v in trend_f],"Valeur (FCFA)":trend_f.round(0)})
-        st.dataframe(df_fut[["Période","CA prévu"]],use_container_width=True,hide_index=True)
-        a,b=st.columns(2)
-        a.download_button("📥 CSV prévisions",dl_csv(df_fut),"previsions.csv","text/csv",use_container_width=True,key="dl_prev")
-        b.download_button("📥 Excel",dl_xlsx(df_fut),"previsions.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_prev_xl")
-        if n>=12:
-            section("📅 Saisonnalité mensuelle","CA MOYEN PAR MOIS")
-            src2["MOIS"]=src2[d_k].dt.month
-            saison=src2.groupby("MOIS")[ca_k].mean().reset_index(); saison.columns=["Mois","CA moyen"]
-            saison["Label"]=saison["Mois"].apply(lambda m:MOIS_FR[int(m)-1] if pd.notna(m) else "")
-            moy_g=saison["CA moyen"].mean()
-            _mc = [GREEN if v >= moy_g else "rgba(26,127,110,0.3)" for v in saison["CA moyen"]]
-            fig2=go.Figure(go.Bar(x=saison["Label"],y=saison["CA moyen"],
-                marker_color=_mc,
-                text=[fmt(v) for v in saison["CA moyen"]],textposition="outside", textfont=dict(size=10)))
-            fig2.add_hline(y=moy_g,line_dash="dash",line_color=RED,annotation_text=f"Moy. {fmt(moy_g)}",annotation_font_size=10)
-            fig_style(fig2,360,"📅 Saisonnalité — CA moyen par mois")
-            st.plotly_chart(fig2,use_container_width=True)
-            a2,_=st.columns(2)
-            a2.download_button("📥 CSV saisonnalité",dl_csv(saison),"saisonnalite.csv","text/csv",use_container_width=True,key="dl_sai")
-
-
-    # ═══════════════════════════════════════════════════════════════════════════════
-    # 
-# PAGE — SAISIE BIA (7 étapes)
-# ═══════════════════════════════════════════════════════════════════════════════
-elif "Saisie BIA" in page:
-    # Compteurs BIA — filtrés sur PA0 pour les courtiers
-    _df_bia_hdr = bia_all()
-    _is_crt_bia = is_courtier(user)
-    if _is_crt_bia and not _df_bia_hdr.empty and "code_produit" in _df_bia_hdr.columns:
-        _df_bia_hdr = _df_bia_hdr[_df_bia_hdr["code_produit"] == "PA0"]
-    nb_bia  = len(_df_bia_hdr)
-    cot_tot = float(_df_bia_hdr["cotisation"].fillna(0).astype(float).sum()) if not _df_bia_hdr.empty else 0
-    nb_val  = int((_df_bia_hdr["statut"]=="Validé").sum()) if not _df_bia_hdr.empty else 0
-    _titre_kpi = "BIA Prévoyance Auto" if _is_crt_bia else "BIA enregistrés"
-    c1,c2,c3=st.columns(3)
-    kpi(c1, _titre_kpi, str(nb_bia), "Prévoyance Auto" if _is_crt_bia else "Total base BIA","teal",icon="📋")
-    kpi(c2,"Validés",str(nb_val),f"{nb_val/max(nb_bia,1)*100:.0f}%","",icon="✅")
-    kpi(c3,"Cotisations",fmt(cot_tot),"Total FCFA","blue",icon="💰")
-
-    # Callback de selection produit : evite le NotFoundError (removeChild)
-    # provoque par un st.rerun() declenche depuis l'interieur d'un expander.
-    def _pick_prod(code):
-        st.session_state["bia_prod"] = code
-        st.session_state["bia_step"] = 2
-
-    def _reset_prod():
-        st.session_state.pop("bia_prod", None)
-        st.session_state.pop("bia_step", None)
-
-    # ── Étape 1 : Sélection du produit ─────────────────────────────────────────
-    # _is_courtier_role : l'utilisateur est un courtier, il n'accède qu'à PA0.
-    # _is_crt_step      : le formulaire suit le parcours court en 3 étapes.
-    #                     Ce parcours s'applique à Prévoyance Auto quel que
-    #                     soit l'utilisateur (courtier, PDG ou actuaire).
-    _is_courtier_role = is_courtier(user)
-    _is_crt_step      = _is_courtier_role
-    GC = {"Groupe 1": RED, "Groupe 2": GREEN}   # défini AVANT tout usage
-
-    if _is_courtier_role:
-        # ── COURTIER : flux PA0 uniquement ───────────────────────────────────
-        section("Prévoyance Auto — BIA","AFG ASSURANCES BÉNIN VIE")
-
-        st.markdown(f"""
-        <div style="background:linear-gradient(135deg,{RED}18,{AMBER}10);
-             border:1.5px solid {RED};border-radius:12px;padding:14px 18px;margin:10px 0">
-          <div style="font-size:11px;font-weight:800;color:{RED};text-transform:uppercase;
-               letter-spacing:.06em;margin-bottom:10px">Prévoyance Auto — Barème</div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-            <div style="background:white;border-radius:8px;padding:10px;text-align:center">
-              <div style="font-size:10px;color:#888">Prime annuelle</div>
-              <div style="font-size:15px;font-weight:800;color:{RED}">500 FCFA</div>
-              <div style="font-size:11px;color:{NAVY};font-weight:700"> 100 000 FCFA</div>
-            </div>
-            <div style="background:white;border-radius:8px;padding:10px;text-align:center">
-              <div style="font-size:10px;color:#888">Prime annuelle</div>
-              <div style="font-size:15px;font-weight:800;color:{RED}">1 000 FCFA</div>
-              <div style="font-size:11px;color:{NAVY};font-weight:700"> 225 000 FCFA</div>
-            </div>
-            <div style="background:white;border-radius:8px;padding:10px;text-align:center">
-              <div style="font-size:10px;color:#888">Prime annuelle</div>
-              <div style="font-size:15px;font-weight:800;color:{RED}">1 500 FCFA</div>
-              <div style="font-size:11px;color:{NAVY};font-weight:700"> 350 000 FCFA</div>
-            </div>
-            <div style="background:white;border-radius:8px;padding:10px;text-align:center">
-              <div style="font-size:10px;color:#888">Prime annuelle</div>
-              <div style="font-size:15px;font-weight:800;color:{RED}">2 000 FCFA</div>
-              <div style="font-size:11px;color:{NAVY};font-weight:700"> 500 000 FCFA</div>
-            </div>
-          </div>
-        </div>""", unsafe_allow_html=True)
-
-        _nom_courtier = st.text_input(
-            "Courtier (nom ou sigle)",
-            value=st.session_state.get("f_courtier_nom",""),
-            placeholder="Ex: ATLANTIQUE COURTAGE, ABC Assurances...",
-            key="inp_courtier")
-        st.session_state["f_courtier_nom"] = _nom_courtier
-
-        # Logo courtier — Clearbit (auto) + fallback avatar initiales
-        if _nom_courtier and len(_nom_courtier.strip()) >= 2:
-            _slug_crt  = _nom_courtier.strip().lower().replace(" ","").replace(".","")                                       .replace("-","").replace("'","").replace(",","")
-            _logo_url  = f"https://logo.clearbit.com/{_slug_crt}.com"
-            _logo_q    = _nom_courtier.strip().replace(" ", "+")
-            _fallback  = f"https://ui-avatars.com/api/?name={_logo_q}&background=003366&color=fff&size=200&bold=true&font-size=0.38&format=png"
-            st.markdown(f"""
-            <div style="text-align:center;margin:8px 0 14px">
-              <img src="{_logo_url}"
-                   onerror="this.onerror=null;this.src='{_fallback}'"
-                   style="height:72px;object-fit:contain;border-radius:10px;
-                          box-shadow:0 2px 12px rgba(0,0,0,.12)"
-                   alt="{_nom_courtier}"/>
-              <div style="font-size:11px;color:#888;margin-top:5px">{_nom_courtier}</div>
-            </div>""", unsafe_allow_html=True)
-
-        if st.button("▶ Commencer la saisie BIA", type="primary",
-                     use_container_width=True, key="pa_go"):
-            st.session_state["bia_prod"]    = "PA0"
-            st.session_state["bia_step"]    = 2
-            st.session_state["f_peri"]      = "Annuelle"
-            st.session_state["f_gar"]       = "Avec garantie décès"
-            st.session_state["f_duree"]     = 1
-            st.session_state["f_code_appo"] = _nom_courtier
-            st.session_state["f_nom_appo"]  = _nom_courtier
-            st.rerun()
-
-        # Si BIA pas encore démarré  arrêter ici
-        if st.session_state.get("bia_prod") != "PA0":
-            st.stop()
-
-        prod      = next(p for p in PRODUITS if p["code"] == "PA0")
-        gc        = RED
-        step      = st.session_state.get("bia_step", 2)
-        is_avigbo = is_vigninou = is_deces = is_epargne = False
-
-    else:
-        # ── NON-COURTIER : sélection normale des produits ────────────────────
-        # Les cartes produit ne sont affichées que tant qu'aucun produit n'est
-        # retenu. Les laisser visibles ensuite oblige React à démonter puis
-        # remonter tout l'arbre des expanders, ce qui déclenche le
-        # NotFoundError (removeChild) observé sur Streamlit Cloud.
-        _prod_choisi = st.session_state.get("bia_prod")
-
-        if not _prod_choisi:
-            section("Étape 1 — Sélection du produit","AFG ASSURANCES BÉNIN VIE")
-        else:
-            _pn = next((p["nom"] for p in PRODUITS if p["code"] == _prod_choisi),
-                       _prod_choisi)
-            _cs1, _cs2 = st.columns([4,1])
-            _cs1.markdown(
-                f"<div style='font-size:12px;color:#667;padding-top:6px'>"
-                f"Produit retenu : <b style='color:{NAVY}'>{_pn}</b></div>",
-                unsafe_allow_html=True)
-            _cs2.button("Changer", key="chg_prod", use_container_width=True,
-                        on_click=_reset_prod)
-
-        if not _prod_choisi:
-          with st.expander("🛡️ Groupe 1 — Décès & Vie", expanded=True):
-            col_a, col_b = st.columns(2)
-            with col_a:
-                st.markdown(f"""<div style="border:2px solid {RED}44;border-radius:10px;
-                  padding:12px 14px;margin-bottom:6px">
-                  <span style="background:{RED};color:white;font-size:9px;font-weight:700;
-                        padding:2px 7px;border-radius:3px">221</span>
-                  <div style="font-size:13px;font-weight:700;margin-top:6px;color:{NAVY}">ASSURTOUS AVIGBO</div>
-                  <div style="font-size:11px;color:#666;margin-top:3px">Décès · Barème fixe</div>
-                  <div style="font-size:10px;color:#888;margin-top:5px;line-height:1.7">
-                    100 F/mois  Capital 100 000 F  (unique : 1 000 F)<br>
-                    200 F/mois  Capital 200 000 F  (unique : 2 000 F)<br>
-                    300 F/mois  Capital 300 000 F  (unique : 3 000 F)
-                  </div></div>""", unsafe_allow_html=True)
-                st.button("Choisir AVIGBO (221)", key="bp_221",
-                          use_container_width=True,
-                          on_click=_pick_prod, args=("221",))
-            with col_b:
-                st.markdown(f"""<div style="border:2px solid {RED}44;border-radius:10px;
-                  padding:12px 14px;margin-bottom:6px">
-                  <span style="background:{RED};color:white;font-size:9px;font-weight:700;
-                        padding:2px 7px;border-radius:3px">220</span>
-                  <div style="font-size:13px;font-weight:700;margin-top:6px;color:{NAVY}">ASSURTOUS VIGNINOU</div>
-                  <div style="font-size:11px;color:#666;margin-top:3px">Décès · Durée max 12 mois · Barème fixe</div>
-                  <div style="font-size:10px;color:#888;margin-top:5px;line-height:1.7">
-                    400 F/mois  Capital 500 000 F  (unique : 48 000 F)<br>
-                    800 F/mois  Capital 1 000 000 F (unique : 96 000 F)<br>
-                    1 200 F/mois  Capital 1 500 000 F (unique : 144 000 F)
-                  </div></div>""", unsafe_allow_html=True)
-                st.button("Choisir VIGNINOU (220)", key="bp_220",
-                          use_container_width=True,
-                          on_click=_pick_prod, args=("220",))
-
-        # Prévoyance Auto (PA0) — visible pour PDG et ACTUAIRE
-        if not _prod_choisi:
-          with st.expander("🚗 Prévoyance Auto (PA0)", expanded=False):
-            st.markdown(f"""<div style="border:2px solid {RED}44;border-radius:10px;
-              padding:12px 14px;margin-bottom:6px">
-              <span style="background:{RED};color:white;font-size:9px;font-weight:700;
-                    padding:2px 7px;border-radius:3px">PA0</span>
-              <div style="font-size:13px;font-weight:700;margin-top:6px;color:{NAVY}">Prévoyance Auto</div>
-              <div style="font-size:11px;color:#666;margin-top:3px">Décès · Durée 1 an · Barème fixe</div>
-              <div style="font-size:10px;color:#888;margin-top:5px;line-height:1.7">
-                500 FCFA/an  Capital 100 000 FCFA<br>
-                1 000 FCFA/an  Capital 225 000 FCFA<br>
-                1 500 FCFA/an  Capital 350 000 FCFA<br>
-                2 000 FCFA/an  Capital 500 000 FCFA
-              </div></div>""", unsafe_allow_html=True)
-            st.button("Choisir Prévoyance Auto (PA0)", key="bp_PA0",
-                      use_container_width=True,
-                      on_click=_pick_prod, args=("PA0",))
-
-        if not _prod_choisi:
-          with st.expander("💰 Groupe 2 — Épargne & Capitalisation", expanded=True):
-            st.markdown(f"""<div style="border:2px solid {GREEN}44;border-radius:10px;
-              padding:12px 14px;margin-bottom:6px">
-              <span style="background:{GREEN};color:white;font-size:9px;font-weight:700;
-                    padding:2px 7px;border-radius:3px">EP0</span>
-              <div style="font-size:13px;font-weight:700;margin-top:6px;color:{NAVY}">Épargne</div>
-              <div style="font-size:11px;color:#666;margin-top:3px">Épargne vie · Périodicité libre · Capital calculé à la souscription</div>
-              <div style="font-size:10px;color:#888;margin-top:5px">
-                Périodicités : Journalière · Hebdomadaire · Mensuelle · Trimestrielle · Semestrielle · Annuelle · Unique<br>
-                Chargements : 1% acquisition + 0.5% gestion · Taux technique : 3.5%
-              </div></div>""", unsafe_allow_html=True)
-            st.button("Choisir Épargne", key="bp_EP0",
-                      use_container_width=True,
-                      on_click=_pick_prod, args=("EP0",))
-
-        if "bia_prod" not in st.session_state:
-            alert("Sélectionnez un produit pour afficher le formulaire BIA.","info")
-            st.stop()
-
-        prod = next((p for p in PRODUITS if p["code"]==st.session_state.get("bia_prod")), None)
-        if not prod:
-            st.session_state.pop("bia_prod", None); st.rerun()
-
-        gc        = GC.get(prod["grp"], BLUE)
-        step      = st.session_state.get("bia_step", 2)
-        is_avigbo   = prod["code"] == "221"
-        is_vigninou = prod["code"] == "220"
-        is_deces    = prod["code"] in ("220", "221")
-        is_epargne  = prod["code"] == "EP0"
-
-        # Prévoyance Auto suit le parcours court en 3 étapes,
-        # identique à celui du courtier, y compris pour le PDG.
-        if prod["code"] == "PA0":
-            _is_crt_step = True
-            st.session_state.setdefault("f_peri",  "Annuelle")
-            st.session_state.setdefault("f_gar",   "Avec garantie décès")
-            st.session_state.setdefault("f_duree", 1)
-            if not st.session_state.get("f_courtier_nom"):
-                st.session_state["f_courtier_nom"] = st.session_state.get(
-                    "f_nom_appo", "") or ""
-
-    # ── Parcours PA0 hors courtier : saisie de l'apporteur ───────────────────
-    if _is_crt_step and not _is_courtier_role:
-        _nc = st.text_input("Courtier ou apporteur",
-                            value=st.session_state.get("f_courtier_nom",""),
-                            placeholder="Nom ou sigle du distributeur",
-                            key="inp_crt_pdg")
-        st.session_state["f_courtier_nom"] = _nc
-        st.session_state["f_nom_appo"]     = _nc
-
-    # ── Logo courtier affiché en haut ────────────────────────────────────────
-    if _is_crt_step:
-        _crt_n = st.session_state.get("f_courtier_nom","")
-        if _crt_n and len(_crt_n) >= 3:
-            _logo_u = f"https://logo.clearbit.com/{_crt_n.lower().replace(' ','').replace('.','')+'.com'}"
-            _fallback_u = f"https://ui-avatars.com/api/?name={_crt_n.replace(' ','+')}&background=C0392B&color=fff&size=128&bold=true&format=png"
-            st.markdown(f"""
-            <div style="text-align:center;padding:10px 0 6px">
-              <img src="{_logo_u}"
-                   onerror="this.onerror=null;this.src='{_fallback_u}'"
-                   style="height:68px;object-fit:contain;border-radius:10px;
-                          box-shadow:0 2px 14px rgba(0,0,0,.13)"
-                   alt="{_crt_n}"/>
-              <div style="font-size:10px;color:#888;margin-top:4px;font-weight:600">{_crt_n}</div>
-            </div>""", unsafe_allow_html=True)
-
-    st.markdown(f"""<div style="background:{NAVY};border-radius:10px;padding:10px 16px;margin:10px 0;display:flex;align-items:center;justify-content:space-between">
-      <div><div style="color:rgba(255,255,255,.45);font-size:9px;letter-spacing:.1em">BIA — BULLETIN INDIVIDUEL D'ADHÉSION</div>
-      <div style="color:white;font-size:14px;font-weight:700">{prod['nom']}</div></div>
-      <span style="background:{gc};color:white;font-size:12px;font-weight:700;padding:5px 12px;border-radius:6px">{prod['code']}</span>
-    </div>""",unsafe_allow_html=True)
-
-    if st.button("↩️ Changer de produit",key="chg_p"):
-        st.session_state.pop("bia_prod",None); st.session_state.pop("bia_step",None); st.rerun()
-
-    # Étapes selon le type d'utilisateur
-    if _is_crt_step:
-        # Courtier PA0 : 4 étapes réelles  steps 2,3,5,7 (les autres sont skippés)
-        # Mapping step  numéro d'étape affiché
-        _crt_map = {2: (1,4,"Souscripteur"), 3: (2,4,"Bénéficiaires"),
-                    5: (3,4,"Contrat"),       7: (4,4,"Validation")}
-        _crt_num, _crt_tot, _crt_lbl = _crt_map.get(step, (1,4,""))
-        _prog_val = min(max((_crt_num - 1) / (_crt_tot - 1), 0.0), 1.0)
-        st.progress(_prog_val, text=f"Étape {_crt_num}/{_crt_tot} — {_crt_lbl}")
-    else:
-        SLBL={2:"Identification",3:"Souscripteur",4:"Assuré",5:"Contrat",6:"Médical",7:"Validation"}
-        _prog_gen = min(max((step-2)/5, 0.0), 1.0)
-        st.progress(_prog_gen, text=f"Étape {step-1}/6 — {SLBL.get(step,'')}")
-    st.markdown("")
-
-    def ti(k,lbl,ph="",t="text"):
-        st.session_state[k]=st.text_input(lbl,value=st.session_state.get(k,""),placeholder=ph,key=f"i_{k}")
-    def si(k,lbl,opts):
-        cur=st.session_state.get(k,opts[0]); idx=opts.index(cur) if cur in opts else 0
-        st.session_state[k]=st.selectbox(lbl,opts,index=idx,key=f"s_{k}")
-
-    if step==2:
-        if _is_crt_step:
-            # ── COURTIER PA0 — Étape 1/3 : Souscripteur ─────────────────────
-            section("Étape 1 / 3 — Souscripteur","PRÉVOYANCE AUTO · INFORMATIONS PERSONNELLES")
-
-            # Afficher logo courtier en haut de chaque étape
-            _crt_n2 = st.session_state.get("f_courtier_nom","")
-            if _crt_n2:
-                _s2_slug = _crt_n2.strip().lower().replace(" ","").replace(".","").replace("-","")
-                _s2_logo = f"https://logo.clearbit.com/{_s2_slug}.com"
-                _s2_fbk  = f"https://ui-avatars.com/api/?name={_crt_n2.replace(' ','+')}&background=003366&color=fff&size=80&bold=true&format=png"
-                st.image(_s2_logo, width=55)
-
-            # Champs souscripteur (sans adresse, agence, code/nom apporteur)
-            c1,c2,c3 = st.columns([1,2,2])
-            with c1: si("f_c_tit","Civilité *",["","M.","Mme","Mlle"])
-            with c2: ti("f_c_nom","Nom *","NOM EN MAJUSCULES")
-            with c3: ti("f_c_prn","Prénoms *","Prénoms")
-
-            c4,c5 = st.columns(2)
-            with c4:
-                _ddn_v = st.session_state.get("f_c_ddn", date(1985,1,1))
-                if isinstance(_ddn_v, str):
-                    try: _ddn_v = date.fromisoformat(_ddn_v)
-                    except: _ddn_v = date(1985,1,1)
-                st.session_state["f_c_ddn"] = st.date_input(
-                    "Date de naissance *", value=_ddn_v,
-                    min_value=date(1920,1,1), max_value=today, key="ddn_pa2")
-            with c5:
-                ti("f_c_tel","Téléphone *","+229 97…")
-
-            # Valeurs par défaut silencieuses
-            if not st.session_state.get("f_c_nat"):
-                st.session_state["f_c_nat"] = "Béninoise"
-            st.session_state["f_ass_meme"] = True
-            st.session_state["f_bc"]       = True
-
-            st.markdown("")
-            b1,b2 = st.columns(2)
-            if b1.button("← Retour", key="ret2_pa"):
-                st.session_state.pop("bia_prod",None)
-                st.session_state.pop("bia_step",None); st.rerun()
-            if b2.button("Étape suivante ▶", type="primary", key="nxt2_pa"):
-                _errs = []
-                if not st.session_state.get("f_c_nom","").strip():  _errs.append("Le nom est obligatoire.")
-                if not st.session_state.get("f_c_tel","").strip():  _errs.append("Le téléphone est obligatoire.")
-                if _errs:
-                    for _e in _errs: st.error(_e)
-                else:
-                    st.session_state["bia_step"] = 5; st.rerun()
-        else:
-            section("Étape 2 — Identification & Agence")
-            c1,c2,c3=st.columns(3)
-        with c1: si("f_agence","Agence",AGENCES)
-        with c2: ti("f_code_appo","Code apporteur","Ex : AFG001")
-        with c3: ti("f_nom_appo","Nom apporteur")
-        c4,c5=st.columns(2)
-        with c4: ti("f_realis","Réalisateur",user["nom"])
-        with c5: si("f_deja","Déjà assuré AFGVie ?",["Non","Oui"])
-        if st.session_state.get("f_deja")=="Oui": ti("f_num_ct","N° contrat existant")
-        if st.button("Suivant ▶",type="primary"): st.session_state["bia_step"]=3; st.rerun()
-
-    elif step==3:
-        if _is_crt_step:
-            # COURTIER PA0 — Étape 2/4 : Bénéficiaires (optionnel)
-            section("Étape 2 / 4 — Bénéficiaires","OPTIONNEL — vous pouvez passer cette étape")
-            st.info("Les informations bénéficiaires sont optionnelles pour ce produit.")
-            section("Bénéficiaires")
-            _bc_opts = ["Oui","Non"]
-            _cur_bc  = "Oui" if st.session_state.get("f_bc", True) else "Non"
-            _bc_sel  = st.radio("Le conjoint est bénéficiaire ?",
-                                _bc_opts, horizontal=True,
-                                index=_bc_opts.index(_cur_bc), key="bc_r_pa")
-            st.session_state["f_bc"] = (_bc_sel == "Oui")
-            ti("f_ba","Autres bénéficiaires (nom, lien de parenté)","Ex: Jean MARTIN, fils")
-            st.markdown("")
-            b1,b2,b3 = st.columns(3)
-            if b1.button("← Retour", key="ret3_pa"):
-                st.session_state["bia_step"] = 2; st.rerun()
-            if b3.button("Suivant ▶", type="primary", key="nxt3_pa"):
-                st.session_state["bia_step"] = 4; st.rerun()
-            if b2.button("Passer cette étape", key="skip3_pa"):
-                st.session_state["f_bc"] = True
-                st.session_state["bia_step"] = 4; st.rerun()
-        else:
-            section("Étape 3 — Souscripteur / Contractant")
-            c1,c2,c3=st.columns([1,2,2])
-        with c1: si("f_c_tit","Civilité *",["","M.","Mme","Mlle"])
-        with c2: ti("f_c_nom","Nom *","NOM (majuscules)")
-        with c3: ti("f_c_prn","Prénoms *")
-        c4,c5,c6=st.columns(3)
-        with c4:
-            cur_d=st.session_state.get("f_c_ddn",date(1985,1,1))
-            if isinstance(cur_d,str):
-                try: cur_d=date.fromisoformat(cur_d)
-                except: cur_d=date(1985,1,1)
-            st.session_state["f_c_ddn"]=st.date_input("Date naissance *",value=cur_d,min_value=date(1930,1,1),max_value=today,key="ddn_c")
-        with c5: ti("f_c_lieu","Lieu naissance *","Cotonou")
-        with c6: ti("f_c_nat","Nationalité","Béninoise")
-        if not st.session_state.get("f_c_nat"): st.session_state["f_c_nat"]="Béninoise"
-        c7,c8,c9=st.columns(3)
-        with c7: si("f_c_mat","Sit. matrimoniale",["","Célibataire","Marié(e)","Divorcé(e)","Veuf(ve)"])
-        with c8: ti("f_c_prof","Profession *")
-        with c9: ti("f_c_adr","Adresse *","Quartier, rue")
-        c10,c11,c12=st.columns(3)
-        with c10: ti("f_c_tel","Tél. cel. *","+229 97…")
-        with c11: ti("f_c_wapp","WhatsApp *","+229 97…")
-        with c12: ti("f_c_npi","N°NPI / Passeport *","BJ123456")
-        c13,c14=st.columns(2)
-        with c13: ti("f_c_eml","Email","exemple@mail.com")
-        with c14: ti("f_c_bp","Boîte postale","01 BP…")
-        st.session_state["f_ass_meme"]=st.checkbox("✓ L'assuré(e) est identique au souscripteur",value=st.session_state.get("f_ass_meme",True))
-        b1,b2=st.columns(2)
-        if b1.button("← Retour"): st.session_state["bia_step"]=2; st.rerun()
-        if b2.button("Suivant ▶",type="primary"):
-            if not st.session_state.get("f_c_nom","").strip(): st.error("Nom obligatoire")
-            elif not st.session_state.get("f_c_prn","").strip(): st.error("Prénom obligatoire")
-            else: st.session_state["bia_step"]=4; st.rerun()
-
-    elif step==4:
-        if _is_crt_step:
-            # COURTIER PA0 — Étape 3/4 : Caractéristiques du contrat
-            # Rediriger vers step==5 où est défini le bloc PA0 contrat
-            st.session_state["bia_step"] = 5; st.rerun()
-        if not _is_crt_step:
-            section("Étape 4 — Assuré(e) & Bénéficiaires")
-        if st.session_state.get("f_ass_meme",True):
-            st.success(f"✅ Assuré(e) = {st.session_state.get('f_c_tit','')} {st.session_state.get('f_c_nom','').upper()} {st.session_state.get('f_c_prn','')} — reprises du souscripteur.")
-        else:
-            c1,c2,c3=st.columns([1,2,2])
-            with c1: si("f_a_tit","Civilité",["","M.","Mme","Mlle"])
-            with c2:
-                st.session_state["f_a_nom"]=st.text_input("Nom *",value=st.session_state.get("f_a_nom",""),key="an")
-            with c3:
-                st.session_state["f_a_prn"]=st.text_input("Prénoms *",value=st.session_state.get("f_a_prn",""),key="ap")
-            c4,c5=st.columns(2)
-            with c4:
-                cur_a=st.session_state.get("f_a_ddn",date(1990,1,1))
-                if isinstance(cur_a,str):
-                    try: cur_a=date.fromisoformat(cur_a)
-                    except: cur_a=date(1990,1,1)
-                st.session_state["f_a_ddn"]=st.date_input("Date naissance",value=cur_a,key="ddn_a")
-            with c5:
-                st.session_state["f_a_npi"]=st.text_input("NPI",value=st.session_state.get("f_a_npi",""),key="ani")
-        section("Bénéficiaires")
-        st.session_state["f_bc"]=st.checkbox("Mon conjoint, mes enfants nés et à naître, à défaut mes ayants droits",value=st.session_state.get("f_bc",True))
-        st.session_state["f_ba"]=st.text_input("Autres bénéficiaires",value=st.session_state.get("f_ba",""),key="ba_t")
-        b1,b2=st.columns(2)
-        if b1.button("← Retour"): st.session_state["bia_step"]=3; st.rerun()
-        if b2.button("Suivant ▶",type="primary"): st.session_state["bia_step"]=5; st.rerun()
-
-    elif step==5:
-
-        # ── Date d'effet commune ──────────────────────────────────────────────
-        cur_e = st.session_state.get("f_deff", today)
-        if isinstance(cur_e, str):
-            try:    cur_e = date.fromisoformat(cur_e)
-            except: cur_e = today
-
-        # ══════════════════════════════════════════════════════════════════════
-        # CAS 1 — Courtier PA0 : Étape 3/4 — Caractéristiques du contrat
-        # ══════════════════════════════════════════════════════════════════════
-        if _is_crt_step:
-            section("Étape 2 / 3 — Contrat","PRÉVOYANCE AUTO · DATE · PRIME · MODE RÈGLEMENT")
-            # Logo courtier en haut
-            _crt_n5 = st.session_state.get("f_courtier_nom","")
-            if _crt_n5:
-                _s5_slug = _crt_n5.strip().lower().replace(" ","").replace(".","").replace("-","")
-                _s5_fbk  = f"https://ui-avatars.com/api/?name={_crt_n5.replace(' ','+')}&background=003366&color=fff&size=80&bold=true&format=png"
-                st.image("https://logo.clearbit.com/" + _s5_slug + ".com", width=60)
-            from dateutil.relativedelta import relativedelta
-
-            # Prime annuelle — sélection parmi les 4 tranches
-            st.markdown(f"<div style='font-weight:700;color:{NAVY};margin-bottom:4px'>Prime annuelle *</div>",
-                        unsafe_allow_html=True)
-            _pa_opts   = {"500 FCFA":(500,100_000), "1 000 FCFA":(1000,225_000),
-                          "1 500 FCFA":(1500,350_000), "2 000 FCFA":(2000,500_000)}
-            _pa_labels = list(_pa_opts.keys())
-            _cur_lbl   = st.session_state.get("f_pa_lbl", _pa_labels[0])
-            if _cur_lbl not in _pa_labels: _cur_lbl = _pa_labels[0]
-            _pa_sel    = st.radio("Prime", _pa_labels,
-                                  index=_pa_labels.index(_cur_lbl),
-                                  horizontal=True, key="pa_prime_r5",
-                                  label_visibility="collapsed")
-            st.session_state["f_pa_lbl"]  = _pa_sel
-            _pa_prime, _pa_capital        = _pa_opts[_pa_sel]
-            st.session_state["f_coti"]    = _pa_prime
-            st.session_state["f_cap"]     = _pa_capital
-            st.session_state["f_peri"]    = "Annuelle"
-            st.session_state["f_duree"]   = 1
-            st.session_state["f_gar"]     = "Avec garantie décès"
-
-            # Badge prime / capital
-            st.markdown(f"""
-            <div style="background:linear-gradient(135deg,{RED},{AMBER});border-radius:10px;
-                 padding:14px 20px;margin:10px 0;display:flex;gap:28px;align-items:center">
-              <div>
-                <div style="color:rgba(255,255,255,.7);font-size:9px;text-transform:uppercase">Prime annuelle</div>
-                <div style="color:white;font-size:22px;font-weight:800">{_pa_prime:,} FCFA</div>
-              </div>
-              <div style="background:rgba(255,255,255,.25);width:1px;height:48px"></div>
-              <div>
-                <div style="color:rgba(255,255,255,.7);font-size:9px;text-transform:uppercase">Capital garanti décès</div>
-                <div style="color:white;font-size:22px;font-weight:800">{_pa_capital:,} FCFA</div>
-              </div>
-            </div>""", unsafe_allow_html=True)
-
-            # Date d'effet + terme automatique
-            c1, c2 = st.columns(2)
+            # Recherche
+            srch_com = st.text_input("🔍 Rechercher un commercial",
+                label_visibility="collapsed", placeholder="Nom…", key="srch_com")
+            df_show = grp.copy()
+            if srch_com:
+                df_show = df_show[df_show[ag_k].str.lower().str.contains(srch_com.lower(),na=False)]
+            df_disp = df_show.copy()
+            df_disp["CA"]        = df_disp["CA"].apply(fmt)
+            df_disp["Comm"]      = df_disp["Comm"].apply(fmt)
+            df_disp["Ticket moy"]= df_disp["Ticket moy"].apply(fmt)
+            df_disp["Part %"]    = df_disp["Part %"].apply(lambda x:f"{x:.2f}%")
+            df_disp["Part cum %"]= df_disp["Part cum %"].apply(lambda x:f"{x:.1f}%")
+            df_disp["Tx comm %"] = df_disp["Tx comm %"].apply(lambda x:f"{x:.2f}%")
+            df_disp.columns = [ag_k,"CA","Nb quittances","Commissions","Nb polices uniques",
+                               "Part CA","Part cumulée","Tx commission","Ticket moyen"]
+            st.dataframe(df_disp, use_container_width=True, height=480)
+            a,b = st.columns(2)
+            a.download_button("📥 CSV",dl_csv(grp),"commerciaux.csv","text/csv",use_container_width=True,key="dl_com_csv")
+            b.download_button("📥 Excel",dl_xlsx(grp),"commerciaux.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_com_xl")
+
+        with t_par:
+            c1,c2 = st.columns(2)
             with c1:
-                _d_eff = st.date_input("Date d'effet *", value=cur_e, key="eff_d_pa")
-                st.session_state["f_deff"] = _d_eff
-            _deff_pa = _d_eff if isinstance(_d_eff, date) else today
-            try:    _terme_pa = _deff_pa + relativedelta(years=1)
-            except: _terme_pa = _deff_pa.replace(year=_deff_pa.year+1)
-            st.session_state["f_terme_auto"] = str(_terme_pa)
+                t30 = grp.head(30)
+                fig = make_subplots(specs=[[{"secondary_y":True}]])
+                fig.add_bar(x=t30["CA"],y=t30[ag_k].str[:22],name="CA",marker_color=GREEN,orientation="h")
+                fig.add_scatter(x=t30["Part cum %"],y=t30[ag_k].str[:22],name="Cumul %",
+                    line=dict(color=RED,width=2.5),secondary_y=True,orientation="h")
+                fig.update_layout(yaxis=dict(autorange="reversed"))
+                fig_style(fig,520,f"📊 Pareto CA — Top 30 commerciaux · {period_lbl}")
+                st.plotly_chart(fig,use_container_width=True)
             with c2:
-                st.markdown(f"""
-                <div style="background:{GREEN}12;border:1.5px solid {GREEN};border-radius:8px;
-                     padding:10px 14px;margin-top:4px">
-                  <div style="font-size:9px;color:#888;text-transform:uppercase">Date terme (auto)</div>
-                  <div style="font-size:18px;font-weight:800;color:{NAVY}">{_terme_pa.strftime("%d/%m/%Y")}</div>
-                  <div style="font-size:10px;color:{GREEN}">Date d'effet + 1 an</div>
-                </div>""", unsafe_allow_html=True)
+                # Distribution des CA
+                fig2 = go.Figure(go.Histogram(x=grp["CA"],nbinsx=30,
+                    marker_color=GREEN,opacity=.85))
+                fig_style(fig2,520,"📊 Distribution CA par commercial")
+                st.plotly_chart(fig2,use_container_width=True)
 
-            # Mode de règlement
-            st.markdown("---")
-            st.markdown(f"<div style='font-weight:700;color:{NAVY};margin-bottom:4px'>Mode de règlement *</div>",
-                        unsafe_allow_html=True)
-            _modes   = ["Mobile Monnaie","Par chèque","Par virement bancaire","Par Espèce"]
-            _cur_m   = st.session_state.get("f_mode", _modes[0])
-            if _cur_m not in _modes: _cur_m = _modes[0]
-            st.session_state["f_mode"] = st.radio(
-                "Mode", _modes, horizontal=True,
-                index=_modes.index(_cur_m), key="mode_r_pa5",
-                label_visibility="collapsed")
-            _refs = {"Mobile Monnaie":"N° Téléphone Mobile Money",
-                     "Par chèque":"N° Chèque",
-                     "Par virement bancaire":"N° Compte bancaire",
-                     "Par Espèce":"Référence reçu"}
-            st.session_state["f_mref"] = st.text_input(
-                _refs.get(st.session_state["f_mode"],"Référence"),
-                value=st.session_state.get("f_mref",""),
-                key="mref_pa5")
+        with t_stat:
+            c1,c2 = st.columns(2)
+            with c1:
+                # CA par produit × commercial (heatmap)
+                if "LIBECATE" in df_com.columns:
+                    heat = df_com.groupby([ag_k,"LIBECATE"])["CHIFAFFA"].sum().reset_index()
+                    heat_piv = heat.pivot_table(index=ag_k,columns="LIBECATE",
+                        values="CHIFAFFA",aggfunc="sum",fill_value=0)
+                    top10_com = grp.head(10)[ag_k].tolist()
+                    heat_piv  = heat_piv.loc[heat_piv.index.isin(top10_com)]
+                    fig3 = go.Figure(go.Heatmap(
+                        z=heat_piv.values.tolist(),
+                        x=[str(c)[:20] for c in heat_piv.columns],
+                        y=[str(i)[:22] for i in heat_piv.index],
+                        colorscale=[[0,MINT],[.5,GREEN],[1,GREEN2]],
+                        text=[[fmt(v) for v in row] for row in heat_piv.values],
+                        texttemplate="%{text}", textfont=dict(size=9)))
+                    fig3.update_layout(height=420,margin=dict(l=140,r=20,t=40,b=80))
+                    fig3.update_layout(title=dict(text="CA par commercial × produit (Top 10)",
+                        font=dict(size=12,color=NAVY),x=.01))
+                    st.plotly_chart(fig3,use_container_width=True)
+            with c2:
+                # Évolution mensuelle des top 5
+                if "DATECOMP" in df_com.columns:
+                    top5 = grp.head(5)[ag_k].tolist()
+                    df_ev = df_com[df_com[ag_k].isin(top5)].copy()
+                    df_ev["Mois"] = df_ev["DATECOMP"].dt.to_period("M").astype(str)
+                    ev_grp = df_ev.groupby(["Mois",ag_k])["CHIFAFFA"].sum().reset_index()
+                    fig4 = px.line(ev_grp, x="Mois", y="CHIFAFFA",color=ag_k,
+                        color_discrete_sequence=PAL,
+                        labels={"CHIFAFFA":"CA (FCFA)","Mois":"Mois"})
+                    fig_style(fig4,420,"📈 Évolution CA — Top 5 commerciaux")
+                    st.plotly_chart(fig4,use_container_width=True)
 
-            st.markdown("")
-            b1, b2 = st.columns(2)
-            if b1.button("← Retour", key="ret5_pa"):
-                st.session_state["bia_step"] = 3; st.rerun()
-            if b2.button("Suivant ▶", type="primary", key="nxt5_pa"):
-                st.session_state["bia_step"] = 7; st.rerun()  #  Validation
+        with t_dt:
+            if "DATECOMP" in df_com.columns and ag_k in df_com.columns:
+                sel_com = st.selectbox("Sélectionner un commercial",
+                    ["Tous"]+grp[ag_k].tolist()[:50], key="sel_com_dt")
+                df_dt = df_com if sel_com=="Tous" else df_com[df_com[ag_k]==sel_com]
+                dt_grp = df_dt.groupby(df_dt["DATECOMP"].dt.date).agg(
+                    CA=("CHIFAFFA","sum"),NbQ=("CHIFAFFA","count")).reset_index()
+                dt_grp.columns = ["Date","CA","Nb quittances"]
+                fig5 = make_subplots(specs=[[{"secondary_y":True}]])
+                fig5.add_bar(x=dt_grp["Date"].astype(str),y=dt_grp["CA"],
+                    name="CA",marker_color=GREEN,opacity=.85)
+                fig5.add_scatter(x=dt_grp["Date"].astype(str),y=dt_grp["Nb quittances"],
+                    name="Nb quittances",line=dict(color=BLUE,width=2),secondary_y=True)
+                fig_style(fig5,420,f"📅 CA journalier — {sel_com}")
+                st.plotly_chart(fig5,use_container_width=True)
+                dt_d = dt_grp.copy(); dt_d["CA"] = dt_d["CA"].apply(fmt)
+                st.dataframe(dt_d, use_container_width=True, hide_index=True, height=300)
+                a,b = st.columns(2)
+                a.download_button("📥 CSV",dl_csv(dt_grp),"ca_journalier.csv","text/csv",use_container_width=True,key="dl_dt_csv")
 
-        # ══════════════════════════════════════════════════════════════════════
-        # CAS 2 — Non-courtier : produits AVIGBO / VIGNINOU / Épargne
-        # ══════════════════════════════════════════════════════════════════════
-        else:
-            section("Étape 5 — Caractéristiques du Contrat")
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # PAGE — PARTENAIRES FINANCIERS
+    # ═══════════════════════════════════════════════════════════════════════════════
+    except Exception as _e_page:
+        _erreur_onglet(_e_page, "Commerciaux")
 
-            # ── AVIGBO (221) ─────────────────────────────────────────────────
-            if prod["code"] == "221":
-                alert("AVIGBO : capital et cotisation unique déterminés automatiquement.","info")
-                opt_map = {
-                    "100 F/mois  Capital 100 000 F":  (100,  100_000,  1_000),
-                    "200 F/mois  Capital 200 000 F":  (200,  200_000,  2_000),
-                    "300 F/mois  Capital 300 000 F":  (300,  300_000,  3_000),
-                }
-                opts_l = list(opt_map.keys())
-                cur_o  = st.session_state.get("f_avigbo_opt", opts_l[0])
-                if cur_o not in opts_l: cur_o = opts_l[0]
-                sel_o  = st.radio("Barème *", opts_l,
-                                  index=opts_l.index(cur_o), key="avigbo_opt_r5")
-                st.session_state["f_avigbo_opt"] = sel_o
-                pm, cg, pu = opt_map[sel_o]
+elif "Partenaires" in page:
+    try:
+        if ca is None: alert("Chargez la Base CA.","warn"); st.stop()
+        df_part_all = ca_f()
+        if df_part_all is None or df_part_all.empty: df_part_all = ca
 
-                c1,c2 = st.columns(2)
+        section(f"🏦 Partenaires Financiers — {period_lbl}",
+                "CODE INTERMÉDIAIRE 3 CHIFFRES · HORS CODE 100")
+
+        # Identifier la colonne code intermédiaire : CODEINTE (priorité)
+        _col_code = next((c for c in ["CODEINTE","CODE_INTER","CODEINTER","CODEAPPO"]
+                          if c in df_part_all.columns), None)
+        if _col_code is None:
+            alert("Colonne code intermédiaire introuvable (CODE_INTER / CODEAPPO).","warn")
+            st.stop()
+
+        df_part_all = df_part_all.copy()
+        df_part_all["_CODE_STR"] = (df_part_all[_col_code]
+                                    .astype(str).str.strip().str.zfill(3))
+
+        # ── Résolution du nom : le code vient du CA, le nom du Portefeuille ───────
+        # La colonne nom du CA est vide sur certains exercices (ex. 2025) ; on la
+        # complète systématiquement par une table de correspondance code -> nom
+        # construite sur l'INTÉGRALITÉ du Portefeuille et de la base CA.
+        _ref_nom = {}
+
+        # 1) Depuis le Portefeuille (source de référence)
+        if pf is not None:
+            _cpf = next((c for c in ["CODEINTE_P","CODEINTE","CODEAPPO","CODE_APPO"]
+                         if c in pf.columns), None)
+            _npf = next((c for c in ["NOM_APP","NOM_APPORT","NOM_APPO","NOM_INTERMEDIAIRE"]
+                         if c in pf.columns), None)
+            if _cpf and _npf:
+                _t = pf[[_cpf,_npf]].dropna()
+                _t = _t[_t[_npf].astype(str).str.strip() != ""]
+                for _c, _n in zip(_t[_cpf].astype(str).str.strip().str.zfill(3),
+                                  _t[_npf].astype(str).str.strip()):
+                    _ref_nom.setdefault(_c, _n)
+
+        # 2) Complété par la base CA complète (tous exercices confondus)
+        _nca_all = next((c for c in ["NOM_APPORT","NOM_APPO","NOM_INTERMEDIAIRE","NOM_APP"]
+                         if c in ca.columns), None)
+        if _nca_all:
+            _t2 = ca[[_col_code,_nca_all]].dropna()
+            _t2 = _t2[_t2[_nca_all].astype(str).str.strip() != ""]
+            for _c, _n in zip(_t2[_col_code].astype(str).str.strip().str.zfill(3),
+                              _t2[_nca_all].astype(str).str.strip()):
+                _ref_nom.setdefault(_c, _n)
+
+        # Libellé final : jamais vide
+        df_part_all["_NOM_PART"] = df_part_all["_CODE_STR"].map(_ref_nom)
+        df_part_all["_NOM_PART"] = df_part_all["_NOM_PART"].fillna(
+            "Code " + df_part_all["_CODE_STR"].astype(str))
+        _col_nom = "_NOM_PART"
+
+        # Partenaires financiers = code 3 chiffres numériques, hors 100
+        def _is_pf(x):
+            s = str(x).strip().lstrip("0") or "0"
+            return str(x).strip().isdigit() and len(str(x).strip()) <= 3 and str(x).strip() != "100"
+
+        _mask_pf  = df_part_all["_CODE_STR"].apply(
+            lambda x: x.isdigit() and len(x) <= 3 and x not in ("100","000"))
+        df_pf     = df_part_all[_mask_pf].copy()
+        df_ri     = df_part_all[~_mask_pf].copy()
+
+        ca_pf_tot = float(df_pf["CHIFAFFA"].sum()) if "CHIFAFFA" in df_pf.columns else 0
+        ca_ri_tot = float(df_ri["CHIFAFFA"].sum()) if "CHIFAFFA" in df_ri.columns else 0
+        ca_total  = ca_pf_tot + ca_ri_tot
+
+        p1,p2,p3,p4 = st.columns(4)
+        kpi(p1,"CA partenaires",fmt(ca_pf_tot),f"{pct(ca_pf_tot/max(ca_total,1)*100)}","blue",icon="🏦")
+        kpi(p2,"CA réseau interne",fmt(ca_ri_tot),f"{pct(ca_ri_tot/max(ca_total,1)*100)}","teal",icon="🏢")
+        kpi(p3,"Nb partenaires",nb_full(df_pf["_CODE_STR"].nunique()),"Codes distincts","",icon="🤝")
+        _nq_pf = int(df_pf["CHIFAFFA"].count()) if "CHIFAFFA" in df_pf.columns else 1
+        kpi(p4,"Ticket moyen",fmt(ca_pf_tot/max(_nq_pf,1)),"CA / quittance","amber",icon="🎫")
+
+        st.markdown("")
+        tp1,tp2,tpE,tp3 = st.tabs(["📊 Par partenaire","🥧 Réseau vs Partenaires",
+                                   "📈 Évolution & comparaison N/N-1","🔍 Données brutes"])
+
+        # ══════════════════════════════════════════════════════════════════════════
+        #  EVOLUTION MENSUELLE PAR PARTENAIRE + COMPARAISON N vs N-1
+        #  Le perimetre est volontairement la base CA complete : une comparaison
+        #  annuelle exige de disposer des deux exercices simultanement.
+        # ══════════════════════════════════════════════════════════════════════════
+        with tpE:
+            _ev_base = ca.copy()
+            _ev_base["_CODE_STR"] = (_ev_base[_col_code].astype(str)
+                                     .str.strip().str.zfill(3))
+            _ev_base["_NOM_PART"] = _ev_base["_CODE_STR"].map(_ref_nom)
+            _ev_base["_NOM_PART"] = _ev_base["_NOM_PART"].fillna(
+                "Code " + _ev_base["_CODE_STR"].astype(str))
+            _ev_base["_LBL"] = (_ev_base["_NOM_PART"].astype(str).str[:26]
+                                + " (" + _ev_base["_CODE_STR"] + ")")
+            # Restreindre aux partenaires financiers : code 3 chiffres, hors 100
+            _mp = (_ev_base["_CODE_STR"].str.fullmatch(r"\d{3}", na=False)
+                   & (_ev_base["_CODE_STR"] != "100"))
+            _ev_base = _ev_base[_mp]
+
+            _cdt_e = next((c for c in ["DATECOMP","DATEEFFE","DATESOUS"]
+                           if c in _ev_base.columns), None)
+            if _cdt_e is None or _ev_base.empty:
+                alert("Aucune date exploitable pour construire l'évolution mensuelle.","warn")
+            else:
+                _ev_base["_DT"] = pd.to_datetime(_ev_base[_cdt_e], errors="coerce")
+                _ev_base = _ev_base.dropna(subset=["_DT"])
+                _ev_base["_AN"]   = _ev_base["_DT"].dt.year
+                _ev_base["_MOIS"] = _ev_base["_DT"].dt.month
+                _cak = "CHIFAFFA" if "CHIFAFFA" in _ev_base.columns else "MONTENCA"
+
+                # ── Selecteurs ────────────────────────────────────────────────────
+                _tous  = ["Tous les partenaires"] + sorted(
+                            _ev_base.groupby("_LBL")[_cak].sum()
+                                    .sort_values(ascending=False).index.tolist())
+                _annees_e = sorted(_ev_base["_AN"].dropna().astype(int).unique().tolist(),
+                                   reverse=True)
+                e1,e2 = st.columns([2,1])
+                _part_sel = e1.selectbox("Partenaire", _tous, key="part_evo_sel")
+                _an_n     = e2.selectbox("Exercice N", _annees_e,
+                                         index=0, key="part_evo_an")
+                _an_n1    = _an_n - 1
+
+                _dfe = _ev_base if _part_sel == "Tous les partenaires" else \
+                       _ev_base[_ev_base["_LBL"] == _part_sel]
+
+                _MOIS_FR = ["Jan","Fév","Mar","Avr","Mai","Juin",
+                            "Juil","Août","Sep","Oct","Nov","Déc"]
+
+                # ── 1. Evolution mensuelle : N et N-1 superposes ──────────────────
+                _sN  = (_dfe[_dfe["_AN"] == _an_n ].groupby("_MOIS")[_cak].sum()
+                            .reindex(range(1,13), fill_value=0))
+                _sN1 = (_dfe[_dfe["_AN"] == _an_n1].groupby("_MOIS")[_cak].sum()
+                            .reindex(range(1,13), fill_value=0))
+
+                figE = go.Figure()
+                if _sN1.sum() > 0:
+                    figE.add_bar(x=_MOIS_FR, y=_sN1.values, name=f"{_an_n1}",
+                        marker_color=NAVY, opacity=.55,
+                        hovertemplate="%{x} "+str(_an_n1)+"<br>%{y:,.0f} FCFA<extra></extra>")
+                figE.add_bar(x=_MOIS_FR, y=_sN.values, name=f"{_an_n}",
+                    marker_color=GREEN,
+                    hovertemplate="%{x} "+str(_an_n)+"<br>%{y:,.0f} FCFA<extra></extra>")
+                figE.add_scatter(x=_MOIS_FR, y=_sN.values, mode="lines+markers",
+                    name=f"Tendance {_an_n}", line=dict(color=RED, width=2))
+                figE.update_layout(barmode="group",
+                                   yaxis=dict(title="CA (FCFA)"),
+                                   legend=dict(orientation="h", y=-0.16))
+                fig_style(figE, 400,
+                          f"Évolution mensuelle — {_part_sel} · {_an_n} vs {_an_n1}")
+                st.plotly_chart(figE, use_container_width=True)
+
+                # ── 2. Comparaison mois par mois N / N-1 ──────────────────────────
+                _cmp = pd.DataFrame({
+                    "Mois":  _MOIS_FR,
+                    f"{_an_n1}": _sN1.values,
+                    f"{_an_n}":  _sN.values,
+                })
+                _cmp["Écart"] = _cmp[f"{_an_n}"] - _cmp[f"{_an_n1}"]
+                _cmp["Var %"] = np.where(_cmp[f"{_an_n1}"] > 0,
+                                         _cmp["Écart"] / _cmp[f"{_an_n1}"] * 100,
+                                         np.nan)
+
+                figV = go.Figure(go.Bar(
+                    x=_MOIS_FR, y=_cmp["Var %"],
+                    marker_color=[GREEN if (pd.notna(v) and v >= 0) else RED
+                                  for v in _cmp["Var %"]],
+                    text=[("—" if pd.isna(v) else f"{v:+.0f}%") for v in _cmp["Var %"]],
+                    textposition="outside", textfont=dict(size=9),
+                    hovertemplate="%{x}<br>Variation : %{y:+.1f}%<extra></extra>"))
+                figV.add_hline(y=0, line_color="#888", line_width=1)
+                figV.update_layout(yaxis=dict(title="Variation (%)"))
+                fig_style(figV, 300, f"Variation mensuelle {_an_n} / {_an_n1}")
+                st.plotly_chart(figV, use_container_width=True)
+
+                # ── 3. Indicateurs de synthese ────────────────────────────────────
+                _tN, _tN1 = float(_sN.sum()), float(_sN1.sum())
+                _vG  = ((_tN - _tN1)/_tN1*100) if _tN1 else 0
+                _mMx = _cmp.loc[_cmp[f"{_an_n}"].idxmax()]
+                _nbM = int((_cmp[f"{_an_n}"] > 0).sum())
+                g1,g2,g3,g4 = st.columns(4)
+                kpi(g1, f"CA {_an_n}",  fmt_full(_tN),  f"{_nbM} mois actifs", "teal", icon="💰")
+                kpi(g2, f"CA {_an_n1}", fmt_full(_tN1), "Exercice précédent",  "",     icon="📅")
+                kpi(g3, "Variation",    f"{_vG:+.1f} %", f"{_an_n} vs {_an_n1}",
+                    "teal" if _vG >= 0 else "red", icon="📈" if _vG >= 0 else "📉")
+                kpi(g4, "Meilleur mois", str(_mMx["Mois"]), fmt_full(_mMx[f"{_an_n}"]),
+                    "blue", icon="🏆")
+
+                # ── 4. Tableau detaille ───────────────────────────────────────────
+                _cmp_d = _cmp.copy()
+                for _c in [f"{_an_n1}", f"{_an_n}", "Écart"]:
+                    _cmp_d[_c] = _cmp_d[_c].apply(lambda x: fmt_full(x, ""))
+                _cmp_d["Var %"] = _cmp["Var %"].apply(
+                    lambda x: "—" if pd.isna(x) else f"{x:+.1f} %")
+                st.dataframe(_cmp_d, use_container_width=True, hide_index=True)
+                st.download_button("📥 Export comparaison mensuelle",
+                    dl_csv(_cmp), f"evolution_{_an_n}_vs_{_an_n1}.csv", "text/csv",
+                    use_container_width=True, key="dl_evo_part")
+
+
+        with tp1:
+            if not df_pf.empty:
+                _grp_cols = ["_CODE_STR"]
+                if _col_nom and _col_nom in df_pf.columns:
+                    _grp_cols.append(_col_nom)
+                _agg_p = {"CA":("CHIFAFFA","sum"), "NbQ":("CHIFAFFA","count")}
+                if "COMMAPPO" in df_pf.columns: _agg_p["Commission"] = ("COMMAPPO","sum")
+                dp = df_pf.groupby(_grp_cols, dropna=False).agg(**_agg_p).reset_index()
+                dp = dp.sort_values("CA",ascending=False)
+                dp["Part %"] = (dp["CA"]/max(ca_pf_tot,1)*100).round(2)
+                dp.index = range(1, len(dp)+1)
+
+                c1p,c2p = st.columns(2)
+                with c1p:
+                    # Libellé "NOM (CODE)" — jamais vide, jamais un index numérique
+                    if _col_nom in dp.columns:
+                        dp["_LBL"] = (dp[_col_nom].fillna("").astype(str).str.strip()
+                                        .str[:24] + " (" + dp["_CODE_STR"].astype(str) + ")")
+                        dp["_LBL"] = dp["_LBL"].str.replace(r"^\s*\(", "Code (", regex=True)
+                    else:
+                        dp["_LBL"] = "Code " + dp["_CODE_STR"].astype(str)
+                    _par_lbl_col = "_LBL"
+                    _d15         = dp.head(15)
+                    _par_lbl15   = _d15["_LBL"]
+                    _par_val15   = _d15["CA"]
+
+                    fig = go.Figure(go.Bar(
+                        x=_par_val15, y=_par_lbl15,
+                        orientation="h", marker_color=BLUE,
+                        text=[fmt_full(v,"") for v in _par_val15],
+                        textposition="outside", textfont=dict(size=9),
+                        customdata=_par_val15,
+                        hovertemplate="%{y}<br>CA : %{customdata:,.0f} FCFA<extra></extra>"))
+                    fig.update_layout(yaxis=dict(autorange="reversed"))
+                    _yr_lbl_p = f" · {SEL_YEAR}" if SEL_YEAR else f" · {period_lbl}"
+                    fig_style(fig, 420, f"CA par partenaire{_yr_lbl_p}")
+                    st.plotly_chart(fig, use_container_width=True)
+                with c2p:
+                    dp_top = dp.head(10)
+                    fig2 = go.Figure(go.Pie(
+                        labels=dp_top["_LBL"].astype(str).str[:26],
+                        values=dp_top["CA"], hole=.4,
+                        textinfo="percent", textfont=dict(size=10),
+                        hovertemplate="%{label}<br>CA : %{value:,.0f} FCFA<br>"
+                                      "Part : %{percent}<extra></extra>"))
+                    fig2.update_layout(legend=dict(font=dict(size=9)))
+                    fig_style(fig2, 420, "Part de marché — Top 10")
+                    st.plotly_chart(fig2, use_container_width=True)
+
+                # Tableau — renommer proprement sans réindexer colonnes
+                dp_d = dp.drop(columns=["_LBL"], errors="ignore").copy()
+                if _col_nom in dp_d.columns:
+                    dp_d[_col_nom] = (dp_d[_col_nom].fillna("").astype(str).str.strip()
+                                        .replace("", "—"))
+                if "CA" in dp_d.columns:
+                    dp_d["CA"] = dp_d["CA"].apply(lambda x: fmt_full(x,""))
+                if "NbQ" in dp_d.columns:
+                    dp_d["NbQ"] = dp_d["NbQ"].apply(nb_full)
+                if "Commission" in dp_d.columns:
+                    dp_d["Commission"] = dp_d["Commission"].apply(lambda x: fmt_full(x,""))
+                if "Part %" in dp_d.columns:
+                    dp_d["Part %"] = dp_d["Part %"].apply(lambda x: f"{x:.2f}%")
+                # Renommer les colonnes de façon lisible
+                _rename_dp = {"_CODE_STR": "Code", "CA": "CA (FCFA)", "NbQ": "Nb quittances",
+                              "Commission": "Commission (FCFA)", "Part %": "Part %"}
+                if _col_nom and _col_nom in dp_d.columns:
+                    _rename_dp[_col_nom] = "Partenaire"
+                dp_d = dp_d.rename(columns=_rename_dp)
+                st.dataframe(dp_d, use_container_width=True, height=380, hide_index=True)
+                # Export
+                _dl1, _dl2 = st.columns(2)
+                _dl1.download_button("📥 CSV partenaires", dl_csv(dp),
+                    "partenaires.csv", "text/csv",
+                    use_container_width=True, key="dl_part_csv")
+                _dl2.download_button("📥 Excel partenaires", dl_xlsx(dp),
+                    "partenaires.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True, key="dl_part_xl")
+                a,b = st.columns(2)
+                a.download_button("📥 CSV",dl_csv(dp),"partenaires.csv","text/csv",
+                    use_container_width=True,key="dl_pf_csv_b")
+                b.download_button("📥 Excel",dl_xlsx(dp),"partenaires.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,key="dl_pf_xl_b")
+            else:
+                alert("Aucun partenaire financier identifié dans les données.","info")
+
+        with tp2:
+            labels = ["Partenaires financiers","Réseau interne / Autres"]
+            vals   = [ca_pf_tot, ca_ri_tot]
+            fig3 = go.Figure(go.Pie(labels=labels, values=vals, hole=.5,
+                marker_colors=[BLUE, GREEN], textinfo="percent+label+value",
+                textfont=dict(size=12)))
+            fig_style(fig3, 400, f"Réseau vs Partenaires — {period_lbl}")
+            st.plotly_chart(fig3, use_container_width=True)
+
+        with tp3:
+            if not df_pf.empty:
+                _show_cols = [c for c in ["_CODE_STR", _col_nom, "CHIFAFFA","COMMAPPO","PRIMNETT"]
+                              if c and c in df_pf.columns]
+                _raw = df_pf[_show_cols].rename(columns={"_CODE_STR":"Code"}).copy()
+                for mc in ["CHIFAFFA","COMMAPPO","PRIMNETT"]:
+                    if mc in _raw.columns: _raw[mc] = _raw[mc].apply(fmt)
+                st.dataframe(_raw.head(500), use_container_width=True, hide_index=True)
+                st.download_button("📥 CSV brut",dl_csv(df_pf),"pf_brut.csv","text/csv",
+                    use_container_width=True,key="dl_pf_raw")
+    except Exception as _e_page:
+        _erreur_onglet(_e_page, "Partenaires")
+
+elif "Clients" in page:
+    try:
+            if pf is None: alert("Chargez le Portefeuille.","warn"); st.stop()
+            df=pf; section("👤 Clients & Géographie","ASSURÉS · VILLES · DÉMOGRAPHIE · ÂGES")
+            nb_cli=df["NOM_ASSU"].nunique() if "NOM_ASSU" in df.columns else 0
+            nb_vl=df["LIBEVILL"].nunique() if "LIBEVILL" in df.columns else 0
+            ca_moy=float(df["MONTENCA"].fillna(0).sum())/max(nb_cli,1) if "MONTENCA" in df.columns else 0
+            c1,c2,c3=st.columns(3)
+            kpi(c1,"Clients distincts",f"{nb_cli:,}","NOM_ASSU uniques","teal",icon="👤")
+            kpi(c2,"Villes couvertes",f"{nb_vl:,}","LIBEVILL","",icon="📍")
+            kpi(c3,"MONTENCA moy/client",fmt(ca_moy),"Encaissement moyen","blue",icon="💰")
+            t_g,t_d,t_a,t_cl=st.tabs(["🗺️ Géographie","📊 Démographie","🎂 Pyramide des âges","👤 Répertoire clients"])
+            with t_g:
+                if "LIBEVILL" in df.columns:
+                    c1,c2=st.columns(2)
+                    with c1:
+                        vl=df.groupby("LIBEVILL").agg(Nb=("LIBEVILL","count"),CA=("MONTENCA","sum")).reset_index().sort_values("Nb",ascending=False).head(15)
+                        fig=go.Figure(go.Bar(x=vl["Nb"],y=vl["LIBEVILL"].str[:18],orientation="h",
+                            marker=dict(color=vl["Nb"],colorscale=[[0,MINT],[1,GREEN2]],showscale=False),
+                            text=vl["Nb"].astype(str),textposition="outside", textfont=dict(size=10)))
+                        fig.update_layout(yaxis=dict(autorange="reversed"))
+                        fig_style(fig,400,"📍 Top 15 villes — Polices")
+                        st.plotly_chart(fig,use_container_width=True)
+                    with c2:
+                        vl_ca=df.groupby("LIBEVILL")["MONTENCA"].sum().reset_index().sort_values("MONTENCA",ascending=False).head(12)
+                        fig2=go.Figure(go.Bar(x=vl_ca["MONTENCA"],y=vl_ca["LIBEVILL"].str[:18],orientation="h",
+                            marker=dict(color=vl_ca["MONTENCA"],colorscale=[[0,MINT],[1,GREEN2]],showscale=False),
+                            text=[fmt(v) for v in vl_ca["MONTENCA"]],textposition="outside", textfont=dict(size=10)))
+                        fig2.update_layout(yaxis=dict(autorange="reversed"))
+                        fig_style(fig2,400,"💰 Top 12 villes — CA (MONTENCA)")
+                        st.plotly_chart(fig2,use_container_width=True)
+                    vl_e=df.groupby("LIBEVILL").agg(Nb=("LIBEVILL","count"),CA=("MONTENCA","sum")).reset_index().sort_values("Nb",ascending=False)
+                    vl_e["CA"]=vl_e["CA"].apply(fmt)
+                    st.dataframe(vl_e.head(30),use_container_width=True,hide_index=True)
+                    a,b=st.columns(2)
+                    a.download_button("📥 CSV villes",dl_csv(vl_e),"geo.csv","text/csv",use_container_width=True,key="dl_geo")
+                    b.download_button("📥 Excel",dl_xlsx(vl_e),"geo.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_geo_xl")
+            with t_d:
+                c1,c2,c3=st.columns(3)
                 with c1:
-                    pav = ["Mensuelle","Unique"]
-                    cpv = st.session_state.get("f_peri","Mensuelle")
-                    if cpv not in pav: cpv = "Mensuelle"
-                    st.session_state["f_peri"] = st.radio("Périodicité *",pav,
-                        horizontal=True,index=pav.index(cpv),key="peri_av_r5")
+                    if "SEXERISQ" in df.columns:
+                        sx=df["SEXERISQ"].map({"M":"Hommes","F":"Femmes"}).value_counts().reset_index(); sx.columns=["Sexe","Nb"]
+                        fig=go.Figure(go.Pie(labels=sx["Sexe"],values=sx["Nb"],hole=.44,marker_colors=[BLUE,GREEN],textinfo="percent+label+value", textfont=dict(size=12)))
+                        fig_style(fig,320,"👥 Répartition H/F"); st.plotly_chart(fig,use_container_width=True)
                 with c2:
-                    st.session_state["f_deff"] = st.date_input("Date d'effet *",
-                        value=cur_e, key="eff_av")
-                coti_a = pm if st.session_state["f_peri"]=="Mensuelle" else pu
-                st.session_state["f_coti"] = coti_a
-                st.session_state["f_cap"]  = cg
-                st.markdown(f"""
-                <div style="background:{GREEN}12;border:1.5px solid {GREEN};border-radius:10px;
-                     padding:12px 16px;margin:10px 0;display:grid;
-                     grid-template-columns:1fr 1fr 1fr;gap:12px">
-                  <div><div style="font-size:9px;color:#888">Cotisation</div>
-                       <div style="font-weight:700">{coti_a:,} FCFA/{st.session_state["f_peri"].lower()}</div></div>
-                  <div><div style="font-size:9px;color:#888">Capital décès</div>
-                       <div style="font-weight:700;color:{RED}">{cg:,} FCFA</div></div>
-                  <div><div style="font-size:9px;color:#888">Garantie</div>
-                       <div style="font-weight:700">Avec garantie décès</div></div>
-                </div>""", unsafe_allow_html=True)
-                st.session_state["f_gar"] = "Avec garantie décès"
-                st.session_state["f_duree"] = st.number_input("Durée (ans) *",
-                    min_value=1, max_value=40,
-                    value=int(st.session_state.get("f_duree",5)), key="dur_av5")
-
-            # ── VIGNINOU (220) ───────────────────────────────────────────────
-            elif prod["code"] == "220":
-                alert("VIGNINOU : durée maximale 12 mois.","warn")
-                opt_v = {
-                    "400 F/mois  Capital 500 000 F":       (400,  500_000,   48_000),
-                    "800 F/mois  Capital 1 000 000 F":     (800,  1_000_000, 96_000),
-                    "1 200 F/mois  Capital 1 500 000 F":   (1200, 1_500_000, 144_000),
-                }
-                opts_v = list(opt_v.keys())
-                cur_v  = st.session_state.get("f_vigninou_opt", opts_v[0])
-                if cur_v not in opts_v: cur_v = opts_v[0]
-                sel_v  = st.radio("Barème *", opts_v,
-                                  index=opts_v.index(cur_v), key="vign_opt_r5")
-                st.session_state["f_vigninou_opt"] = sel_v
-                pmv, cgv, puv = opt_v[sel_v]
-
-                c1,c2,c3 = st.columns(3)
-                with c1:
-                    pvv = ["Mensuelle","Unique"]
-                    cpvv = st.session_state.get("f_peri","Mensuelle")
-                    if cpvv not in pvv: cpvv = "Mensuelle"
-                    st.session_state["f_peri"] = st.radio("Périodicité *",pvv,
-                        horizontal=True,index=pvv.index(cpvv),key="peri_v_r5")
-                with c2:
-                    dv = st.number_input("Durée (mois, max 12) *",min_value=1,max_value=12,
-                        value=int(st.session_state.get("f_duree_mois_v",12)),key="dur_v_m5")
-                    st.session_state["f_duree_mois_v"] = dv
-                    st.session_state["f_duree"] = 1
+                    if "CODEPERI" in df.columns:
+                        per=df["CODEPERI"].map(CODEPERI_MAP).fillna("Autre").value_counts().reset_index(); per.columns=["Périodicité","Nb"]
+                        fig2=go.Figure(go.Pie(labels=per["Périodicité"],values=per["Nb"],hole=.44,marker_colors=PAL,textinfo="percent+label", textfont=dict(size=11)))
+                        fig_style(fig2,320,"📅 Périodicité cotisations"); st.plotly_chart(fig2,use_container_width=True)
                 with c3:
-                    st.session_state["f_deff"] = st.date_input("Date d'effet *",
-                        value=cur_e, key="eff_vg")
-                cotiv = pmv if st.session_state["f_peri"]=="Mensuelle" else puv
-                st.session_state["f_coti"] = cotiv
-                st.session_state["f_cap"]  = cgv
-                st.session_state["f_gar"]  = "Avec garantie décès"
+                    if "NOM_APP" in df.columns:
+                        ap=df[df["ETAT_POLICE"].str.strip()=="ACTIF"]["NOM_APP"].value_counts().head(10).reset_index() if "ETAT_POLICE" in df.columns else df["NOM_APP"].value_counts().head(10).reset_index()
+                        ap.columns=["Apporteur","Nb actifs"]
+                        fig3=go.Figure(go.Bar(y=ap["Apporteur"].str[:18],x=ap["Nb actifs"],orientation="h",marker_color=GREEN,text=ap["Nb actifs"].astype(str),textposition="outside", textfont=dict(size=10)))
+                        fig3.update_layout(yaxis=dict(autorange="reversed"))
+                        fig_style(fig3,320,"🏆 Top apporteurs (polices actives)"); st.plotly_chart(fig3,use_container_width=True)
+            with t_a:
+                if "DATENAIS" in df.columns and "SEXERISQ" in df.columns:
+                    da=df[["DATENAIS","SEXERISQ","MONTENCA"]].copy()
+                    da["DATENAIS"]=pd.to_datetime(da["DATENAIS"],errors="coerce")
+                    da=da.dropna(subset=["DATENAIS"])
+                    da["age"]=(pd.Timestamp.now()-da["DATENAIS"]).dt.days/365.25
+                    da=da[(da["age"]>=0)&(da["age"]<=95)]
+                    bins=list(range(0,100,5)); da["tranch"]=pd.cut(da["age"],bins=bins,right=False).astype(str)
+                    pyr=da.groupby(["tranch","SEXERISQ"]).size().unstack(fill_value=0).reset_index()
+                    if "M" in pyr.columns and "F" in pyr.columns:
+                        fig=go.Figure()
+                        fig.add_bar(y=pyr["tranch"],x=-pyr["M"],name="Hommes",orientation="h",marker_color=BLUE,text=pyr["M"].astype(str),textposition="outside", textfont=dict(size=9))
+                        fig.add_bar(y=pyr["tranch"],x=pyr["F"],name="Femmes",orientation="h",marker_color=GREEN,text=pyr["F"].astype(str),textposition="outside", textfont=dict(size=9))
+                        fig.update_layout(barmode="overlay",xaxis=dict(tickvals=list(range(-4000,4001,500)),ticktext=[str(abs(x)) for x in range(-4000,4001,500)]))
+                        fig_style(fig,520,"🎂 Pyramide des âges (tranches quinquennales)")
+                        st.plotly_chart(fig,use_container_width=True)
+                        a,_=st.columns(2)
+                        a.download_button("📥 CSV pyramide",dl_csv(da[["age","SEXERISQ"]]),"pyramide.csv","text/csv",use_container_width=True,key="dl_pyr")
+                else: alert("Colonnes DATENAIS et SEXERISQ requises dans le portefeuille.","info")
 
-            # ── ÉPARGNE (EP0) ────────────────────────────────────────────────
-            elif prod["code"] == "EP0":
-                peri_ep_opts = ["Journalière","Hebdomadaire","Mensuelle",
-                                "Trimestrielle","Semestrielle","Annuelle","Unique"]
-                c1,c2,c3 = st.columns(3)
-                with c1:
-                    st.session_state["f_coti"] = st.number_input(
-                        "Cotisation *", min_value=1000, step=500,
-                        value=int(st.session_state.get("f_coti",5000)), key="coti_ep5")
-                with c2:
-                    st.session_state["f_duree"] = st.number_input(
-                        "Durée (ans) *", min_value=1, max_value=40,
-                        value=int(st.session_state.get("f_duree",10)), key="dur_ep5")
-                with c3:
-                    st.session_state["f_deff"] = st.date_input("Date d'effet *",
-                        value=cur_e, key="eff_ep5")
-                cur_pep = st.session_state.get("f_peri","Mensuelle")
-                if cur_pep not in peri_ep_opts: cur_pep = "Mensuelle"
-                st.session_state["f_peri"] = st.selectbox(
-                    "Périodicité *", peri_ep_opts,
-                    index=peri_ep_opts.index(cur_pep), key="peri_ep_s5")
+            with t_cl:
+                section("👤 Répertoire complet des clients assurés","RECHERCHE · FILTRE · EXPORT")
+                _c1,_c2,_c3,_c4 = st.columns(4)
+                _srch = _c1.text_input("🔍 Rechercher",placeholder="Nom assuré…",
+                    label_visibility="collapsed", key="cli_geo_srch")
+                _etat_opts = ["Tous"]+sorted(df["ETAT_POLICE"].dropna().unique().tolist())             if "ETAT_POLICE" in df.columns else ["Tous"]
+                _etat = _c2.selectbox("État",_etat_opts,label_visibility="collapsed",key="cli_geo_etat")
+                _vill_opts = ["Toutes"]+sorted(df["LIBEVILL"].dropna().unique().tolist())             if "LIBEVILL" in df.columns else ["Toutes"]
+                _vill = _c3.selectbox("Ville",_vill_opts,label_visibility="collapsed",key="cli_geo_vill")
+                _prod_opts = ["Tous"]+sorted(df["LIBECATE"].dropna().unique().tolist())             if "LIBECATE" in df.columns else ["Tous"]
+                _prod = _c4.selectbox("Produit",_prod_opts,label_visibility="collapsed",key="cli_geo_prod")
 
-                # Capital affiché (simple lookup, pas de calcul actuariel ici)
-                P_ep  = float(st.session_state.get("f_coti",5000))
-                n_ep  = int(st.session_state.get("f_duree",10))
-                pep   = st.session_state.get("f_peri","Mensuelle")
-                res_ep = calcul_capital_epargne(P_ep, pep, n_ep)
-                cap_ep = res_ep["capital_brut"]
-                st.session_state["f_cap"] = int(cap_ep)
+                _df_rep = df.copy()
+                if _etat != "Tous" and "ETAT_POLICE" in _df_rep.columns:
+                    _df_rep = _df_rep[_df_rep["ETAT_POLICE"]==_etat]
+                if _vill != "Toutes" and "LIBEVILL" in _df_rep.columns:
+                    _df_rep = _df_rep[_df_rep["LIBEVILL"]==_vill]
+                if _prod != "Tous" and "LIBECATE" in _df_rep.columns:
+                    _df_rep = _df_rep[_df_rep["LIBECATE"]==_prod]
+                if _srch:
+                    _m = pd.Series(False,index=_df_rep.index)
+                    for _c in ["NOM_ASSU","LIBEVILL","NOM_APP","LIBECATE"]:
+                        if _c in _df_rep.columns:
+                            _m |= _df_rep[_c].astype(str).str.lower().str.contains(_srch.lower(),na=False)
+                    _df_rep = _df_rep[_m]
 
-                st.markdown(f"""
-                <div style="background:{GREEN}10;border:1.5px solid {GREEN};border-radius:10px;
-                     padding:12px 16px;margin:10px 0;text-align:center">
-                  <div style="font-size:10px;color:#888;text-transform:uppercase">Capital au terme estimé</div>
-                  <div style="font-size:24px;font-weight:800;color:{GREEN}">{cap_ep:,.0f} FCFA</div>
-                  <div style="font-size:10px;color:#888">Taux technique 3,5% · α=1% · β=0,5%</div>
-                </div>""", unsafe_allow_html=True)
+                _rep_cols = [c for c in ["NOM_ASSU","LIBECATE","ETAT_POLICE","LIBEVILL",
+                    "NOM_APP","DATESOUS","COTI_PERIODIQUE","MONTENCA","CODEPERI","POLICE_KEY"]
+                    if c in _df_rep.columns]
+                _df_rep_d = _df_rep[_rep_cols].copy()
+                if "DATESOUS" in _df_rep_d.columns:
+                    _df_rep_d["DATESOUS"] = _df_rep_d["DATESOUS"].apply(ds)
+                for _nc in ["COTI_PERIODIQUE","MONTENCA"]:
+                    if _nc in _df_rep_d.columns:
+                        _df_rep_d[_nc] = _df_rep_d[_nc].apply(lambda x: fmt(x,""))
+                _df_rep_d.columns = [
+                    {"NOM_ASSU":"Assuré","LIBECATE":"Produit","ETAT_POLICE":"État",
+                     "LIBEVILL":"Ville","NOM_APP":"Apporteur","DATESOUS":"Date souscription",
+                     "COTI_PERIODIQUE":"Cotisation","MONTENCA":"Encaissement",
+                     "CODEPERI":"Périodicité","POLICE_KEY":"N° Police"}.get(c,c)
+                    for c in _df_rep_d.columns]
 
-            # ── Mode de règlement (commun AVIGBO/VIGNINOU/EP0) ───────────────
-            st.markdown("---")
-            section("Mode de règlement")
-            m_o  = ["","Mobile Monnaie","Par chèque","Par virement bancaire","Par prélèvement sur salaire"]
-            cur_m = st.session_state.get("f_mode","")
-            st.session_state["f_mode"] = st.radio("Mode *", m_o, horizontal=True,
-                index=m_o.index(cur_m) if cur_m in m_o else 0, key="mode_r_gen",
-                format_func=lambda x:"— Choisir —" if x=="" else x)
-            if st.session_state["f_mode"]:
-                _ref_gen = {"Mobile Monnaie":"N° Mobile Money",
-                            "Par chèque":"N° Chèque",
-                            "Par virement bancaire":"N° Compte/RIB",
-                            "Par prélèvement sur salaire":"N° Matricule"
-                            }.get(st.session_state["f_mode"],"Référence")
-                st.session_state["f_mref"] = st.text_input(
-                    _ref_gen, value=st.session_state.get("f_mref",""),
-                    key="mref_gen5")
+                st.caption(f"**{len(_df_rep):,} polices** · {_df_rep['NOM_ASSU'].nunique() if 'NOM_ASSU' in _df_rep.columns else 0:,} clients distincts")
 
-            b1,b2 = st.columns(2)
-            if b1.button("← Retour", key="ret5_gen"):
-                st.session_state["bia_step"] = 4; st.rerun()
-            if b2.button("Suivant ▶", type="primary", key="nxt5_gen"):
-                st.session_state["bia_step"] = 6; st.rerun()
+                # Pagination 500 lignes
+                _ps = 500
+                _tp = max(1,(len(_df_rep)+_ps-1)//_ps)
+                if _tp > 1:
+                    _pn = st.number_input(f"Page (1–{_tp})",min_value=1,max_value=_tp,value=1,key="cli_rep_page")
+                    _st = (_pn-1)*_ps
+                    st.dataframe(_df_rep_d.iloc[_st:_st+_ps],use_container_width=True,hide_index=True,height=520)
+                else:
+                    st.dataframe(_df_rep_d,use_container_width=True,hide_index=True,height=520)
 
-    elif step==6:
-        # Courtier PA0 : pas de questionnaire médical  rediriger vers validation
-        if _is_crt_step:
-            st.session_state["bia_step"] = 7; st.rerun()
-        section("Étape 6 — Questionnaire Médical CIMA")
-        alert("Art. 18 CIMA : Toute fausse déclaration est sanctionnée par la nullité du contrat.","warn")
-        c1,c2,c3=st.columns(3)
-        st.session_state["f_taille"]=c1.text_input("Taille (m)",value=st.session_state.get("f_taille",""),placeholder="1.72",key="taille_t")
-        st.session_state["f_poids"]=c2.text_input("Poids (kg)",value=st.session_state.get("f_poids",""),placeholder="75",key="poids_t")
-        per_m=["Non","Oui"]
-        cur_pp=st.session_state.get("f_perte","Non")
-        st.session_state["f_perte"]=c3.radio("Grossi/maigri >5 kg (6 mois) ?",per_m,horizontal=True,index=per_m.index(cur_pp) if cur_pp in per_m else 0,key="perte_r")
-        MED=[
-            ("q1","Maladie ou séquelles — surveillance médicale requise (10 ans) ?",False),
-            ("q2","Arrêts de travail >21 jours (5 dernières années) ?",False),
-            ("q3","Traitement médical >21 jours (5 ans, hors contraception) ?",False),
-            ("q4","Actuellement en arrêt de travail sur prescription médicale ?",False),
-            ("q5","Traitement médical en cours (hors contraception) ?",False),
-            ("q6","Hospitalisation ou analyses dans les 12 prochains mois ?",True),
-            ("q7","Méningite, hépatite B, VIH/Sida, cancer ou maladie grave ?",False),
-        ]
-        for qk,qtxt,special in MED:
-            with st.container(border=True):
-                qa,qb=st.columns([3.5,1])
-                qa.markdown(f"<div style='font-size:11px;line-height:1.4'><b>{qk[1:]}.</b> {qtxt}</div>",unsafe_allow_html=True)
-                r_o=["Non","Oui"]
-                cur_r=st.session_state.get(f"f_{qk}","Non")
-                st.session_state[f"f_{qk}"]=qb.radio("",r_o,horizontal=True,index=r_o.index(cur_r) if cur_r in r_o else 0,key=f"r_{qk}")
-                if st.session_state[f"f_{qk}"]=="Oui":
-                    st.session_state[f"f_{qk}d"]=st.text_input("Précisions :",value=st.session_state.get(f"f_{qk}d",""),placeholder="Soyez précis(e)",key=f"d_{qk}")
-        b1,b2=st.columns(2)
-        if b1.button("← Retour"): st.session_state["bia_step"]=5; st.rerun()
-        if b2.button("Suivant ▶",type="primary"): st.session_state["bia_step"]=7; st.rerun()
+                _ac1,_ac2 = st.columns(2)
+                _ac1.download_button("📥 CSV répertoire",dl_csv(_df_rep[_rep_cols]),
+                    "repertoire_clients.csv","text/csv",use_container_width=True,key="dl_rep_csv")
+                _ac2.download_button("📥 Excel répertoire",dl_xlsx(_df_rep[_rep_cols].head(50000)),
+                    "repertoire_clients.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,key="dl_rep_xl")
 
-    elif step==7 or (step==5 and _is_crt_step):
-        if _is_crt_step:
-            section("Étape 3 / 3 — Signatures & Validation","PRÉVOYANCE AUTO")
-            # Logo courtier en haut de la page de validation
-            _crt_n7 = st.session_state.get("f_courtier_nom","")
-            if _crt_n7:
-                _s7_slug = _crt_n7.strip().lower().replace(" ","").replace(".","").replace("-","")
-                _s7_fbk  = f"https://ui-avatars.com/api/?name={_crt_n7.replace(' ','+')}&background=003366&color=fff&size=80&bold=true&format=png"
-                st.image("https://logo.clearbit.com/" + _s7_slug + ".com", width=60)
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # 
+    # PAGE — SINISTRES & PROVISIONS
+    # ═══════════════════════════════════════════════════════════════════════════════
+    except Exception as _e_page:
+        _erreur_onglet(_e_page, "Clients")
+
+elif "Sinistres" in page:
+    try:
+        if sin is None: alert("Chargez le fichier Prestations.","warn"); st.stop()
+        df_s = sin  # base complete (reference)
+        # ── Perimetre : exercice sinistre puis periode ───────────────────────────
+        if SEL_YEAR:
+            df_sf = sin[year_mask(sin,
+                ["ANNEE_SIN","Exercice Sinistre","Date Survenance","DATECOMP"],
+                SEL_YEAR)].copy()
+            _sin_scope = f"Exercice {SEL_YEAR}"
         else:
-            section("Étape 7 — Déclaration & Validation")
-
-        # ── Récapitulatif compact ─────────────────────────────────────────────
-        with st.expander("📋 Récapitulatif du contrat", expanded=True):
-            _cap_r = int(st.session_state.get("f_cap", 0))
-            _dur_r = st.session_state.get("f_duree", 1)
-            _dur_l = (f"{st.session_state.get('f_duree_mois_v',12)} mois"
-                      if is_vigninou else f"{_dur_r} an(s)")
-            _terme_r = st.session_state.get("f_terme_auto","")
-            st.markdown(f"""| Champ | Valeur |
-|---|---|
-|**Souscripteur**|{st.session_state.get('f_c_tit','')} {st.session_state.get('f_c_nom','').upper()} {st.session_state.get('f_c_prn','')}|
-|**Produit**|{prod['nom']} — {prod['code']}|
-|**Prime / Cotisation**|{int(st.session_state.get('f_coti',0)):,} FCFA / {st.session_state.get('f_peri','—')}|
-|**Capital garanti**|**{_cap_r:,} FCFA**|
-|**Date d'effet**|{ds(st.session_state.get('f_deff',today))}|
-|**Date terme**|{_terme_r if _terme_r else _dur_l}|
-|**Mode règlement**|{st.session_state.get('f_mode','—')}|
-|**Apporteur / Courtier**|{st.session_state.get('f_nom_appo','—')}|""")
-
-        st.markdown("---")
-
-        # ── Déclaration ───────────────────────────────────────────────────────
-        st.markdown("""<div style="background:#f8f9fa;border:1px solid #ddd;border-radius:8px;
-            padding:12px;font-size:11px;line-height:1.8;margin-bottom:12px">
-            Je reconnais avoir reçu la notice d'information du produit et les conditions générales.
-            Je certifie exactes et sincères toutes les informations renseignées.
-            Conformément à l'article 18 du code CIMA, toute fausse déclaration
-            entraîne la nullité du contrat.</div>""", unsafe_allow_html=True)
-
-        st.session_state["f_dc"] = st.checkbox(
-            "☑ J'accepte les conditions de souscription *",
-            value=st.session_state.get("f_dc", False), key="chk_dc")
-        st.session_state["f_dd"] = st.checkbox(
-            "☑ J'accepte la politique de protection des données *",
-            value=st.session_state.get("f_dd", False), key="chk_dd")
-
-        st.markdown("---")
-
-        # ── Signatures ────────────────────────────────────────────────────────
-        section("Signatures")
-        st.markdown(f"""
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:10px 0">
-          <div style="border:1.5px dashed #888;border-radius:8px;padding:14px;
-               min-height:90px;text-align:center;background:#fafafa">
-            <div style="font-size:10px;color:#888;font-weight:600;text-transform:uppercase;
-                 margin-bottom:4px">Signature du souscripteur</div>
-            <div style="font-size:11px;color:{NAVY};font-weight:700;margin-top:8px">
-              {st.session_state.get('f_c_tit','')} {st.session_state.get('f_c_nom','').upper()}
-              {st.session_state.get('f_c_prn','')}
-            </div>
-          </div>
-          <div style="border:1.5px dashed #888;border-radius:8px;padding:14px;
-               min-height:90px;text-align:center;background:#fafafa">
-            <div style="font-size:10px;color:#888;font-weight:600;text-transform:uppercase;
-                 margin-bottom:4px">Cachet & Signature</div>
-            <div style="font-size:11px;color:{NAVY};font-weight:700;margin-top:8px">
-              {st.session_state.get('f_nom_appo','AFG Assurances Bénin Vie')}
-            </div>
-          </div>
-        </div>""", unsafe_allow_html=True)
-
-        # Upload signature souscripteur (optionnel)
-        _sig_file = st.file_uploader(
-            "📎 Joindre la signature du souscripteur (image optionnelle)",
-            type=["png","jpg","jpeg","pdf"],
-            key="sig_upload")
-        if _sig_file is not None:
-            st.success(f"✅ Fichier joint : {_sig_file.name}")
-            st.session_state["f_sig_file"] = _sig_file.name
-
-        st.markdown("---")
-
-        # ── Statut & Observations ─────────────────────────────────────────────
-        c1, c2 = st.columns(2)
-        stat_o  = ["Brouillon","En cours","Validé"]
-        cur_st  = st.session_state.get("f_stat", "Brouillon")
-        st.session_state["f_stat"] = c1.selectbox(
-            "Statut", stat_o,
-            index=stat_o.index(cur_st) if cur_st in stat_o else 0,
-            key="stat_s")
-        st.session_state["f_obs"] = c2.text_input(
-            "Observations", value=st.session_state.get("f_obs",""),
-            key="obs_t")
-
-
-        def save_bia(statut_ov=None):
-            ass = st.session_state.get("f_ass_meme", True)
-            _crt_n = st.session_state.get("f_courtier_nom", "").strip()
-            _num_bia = gen_bia(_crt_n) if (_crt_n and prod["code"] == "PA0") else gen_bia()
-            st.session_state["_last_bia_num"] = _num_bia
-            data = {
-                "numero_bia":       _num_bia,
-                "date_saisie":      today.isoformat(),
-                "saisi_par":        user["nom"],
-                "agence":           st.session_state.get("f_agence",""),
-                "code_apporteur":   st.session_state.get("f_code_appo",""),
-                "nom_apporteur":    st.session_state.get("f_nom_appo",""),
-                "realisateur":      st.session_state.get("f_realis",""),
-                "deja_assure":      st.session_state.get("f_deja","Non"),
-                "num_ct_exist":     st.session_state.get("f_num_ct",""),
-                "c_titre":          st.session_state.get("f_c_tit",""),
-                "c_nom":            st.session_state.get("f_c_nom","").upper().strip(),
-                "c_prenom":         st.session_state.get("f_c_prn","").strip(),
-                "c_ddn":            str(st.session_state.get("f_c_ddn", date(1985,1,1))),
-                "c_lieu":           st.session_state.get("f_c_lieu",""),
-                "c_nat":            st.session_state.get("f_c_nat","Béninoise"),
-                "c_mat":            st.session_state.get("f_c_mat",""),
-                "c_prof":           st.session_state.get("f_c_prof",""),
-                "c_adr":            st.session_state.get("f_c_adr",""),
-                "c_bp":             st.session_state.get("f_c_bp",""),
-                "c_email":          st.session_state.get("f_c_eml",""),
-                "c_wapp":           st.session_state.get("f_c_wapp",""),
-                "c_tel":            st.session_state.get("f_c_tel",""),
-                "c_fixe":           st.session_state.get("f_c_fixe",""),
-                "c_npi":            st.session_state.get("f_c_npi",""),
-                "ass_meme":         1 if ass else 0,
-                "a_titre":          "" if ass else st.session_state.get("f_a_tit",""),
-                "a_nom":            "" if ass else st.session_state.get("f_a_nom","").upper(),
-                "a_prenom":         "" if ass else st.session_state.get("f_a_prn",""),
-                "a_ddn":            "" if ass else str(st.session_state.get("f_a_ddn","")),
-                "a_npi":            "" if ass else st.session_state.get("f_a_npi",""),
-                "benef_conj":       1 if st.session_state.get("f_bc", True) else 0,
-                "benef_autres":     st.session_state.get("f_ba",""),
-                "code_produit":     prod["code"],
-                "produit":          prod["nom"],
-                "groupe_produit":   prod["grp"],
-                "cotisation":       float(st.session_state.get("f_coti", 0)),
-                "cotisation_lettres": st.session_state.get("f_cotil",""),
-                "periodicite":      st.session_state.get("f_peri","Mensuelle"),
-                "date_effet":       str(st.session_state.get("f_deff", today)),
-                "duree":            (st.session_state.get("f_duree_mois_v", 12)
-                                     if is_vigninou
-                                     else int(st.session_state.get("f_duree", 10))),
-                "option_gar":       st.session_state.get("f_gar","Sans garantie décès"),
-                "mode_reglement":   st.session_state.get("f_mode",""),
-                "mode_ref":         st.session_state.get("f_mref",""),
-                "capital_terme":    float(st.session_state.get("f_cap", 0) or 0),
-                **{f"q{qi}":  st.session_state.get(f"f_q{qi}","Non") for qi in range(1,8)},
-                **{f"q{qi}d": st.session_state.get(f"f_q{qi}d","")  for qi in range(1,8)},
-                "decl_cond":        1 if st.session_state.get("f_dc") else 0,
-                "decl_data":        1 if st.session_state.get("f_dd") else 0,
-                "statut":           statut_ov or st.session_state.get("f_stat","Brouillon"),
-                "obs":              st.session_state.get("f_obs",""),
-            }
-            # insert_bia() gère PG (%s) et SQLite (?) automatiquement
-            ok = insert_bia(data)
-            if ok:
-                for k in [k for k in list(st.session_state.keys()) if k.startswith("f_")]:
-                    del st.session_state[k]
-                st.session_state.pop("bia_prod", None)
-                st.session_state.pop("bia_step", None)
-                return data["numero_bia"]
+            df_sf = sin_f()
+            _sin_scope = period_lbl
+        if df_sf is None or df_sf.empty:
+            alert(f"Aucun dossier sur <b>{_sin_scope}</b>. Affichage de toutes les périodes.","warn")
+            df_sf, _sin_scope = sin.copy(), "Toutes périodes"
+        # Résolution colonnes sinistres — noms exacts vérifiés sur fichier AFG réel
+        def _find_col(df, *candidates):
+            """
+            Retourne la 1ère colonne trouvée parmi les candidats.
+            Stratégie : exact  strip  lower+strip  fuzzy.
+            """
+            # Index normalisé : {nom_lowercase_sans_espaces: nom_réel}
+            cols_norm = {c.strip().lower().replace(" ",""): c for c in df.columns}
+            for cand in candidates:
+                # 1. Correspondance exacte
+                if cand in df.columns:
+                    return cand
+                # 2. Après strip des deux côtés
+                cand_strip = cand.strip()
+                for col in df.columns:
+                    if col.strip() == cand_strip:
+                        return col
+                # 3. Normalisé lowercase sans espaces
+                cand_norm = cand.strip().lower().replace(" ","")
+                if cand_norm in cols_norm:
+                    return cols_norm[cand_norm]
+                # 4. Fuzzy : tous les mots du candidat présents dans la colonne
+                cand_words = [w for w in cand.lower().split() if len(w) > 2]
+                for col in df.columns:
+                    col_l = col.lower()
+                    if cand_words and all(w in col_l for w in cand_words):
+                        return col
             return None
-        # ── Impression BIA (courtier PA0 uniquement) ─────────────────────────
-        if st.button("🖨️ Imprimer le BIA — 2 exemplaires",
-                                       use_container_width=True, key="print_bia_btn"):
-            try:
-                from reportlab.lib.pagesizes import A4
-                from reportlab.lib.units import cm
-                from reportlab.lib import colors as rl_colors
-                from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
-                    Table, TableStyle, HRFlowable, Image as _RLImg)
-                from reportlab.lib.styles import ParagraphStyle
-                from reportlab.lib.enums import TA_CENTER
-                import io as _io, base64 as _b64
-                from datetime import datetime as _dt
 
-                _buf = _io.BytesIO()
-                doc  = SimpleDocTemplate(_buf, pagesize=A4,
-                    leftMargin=1.5*cm, rightMargin=1.5*cm,
-                    topMargin=1.5*cm, bottomMargin=1.5*cm)
+        # Noms EXACTS confirmés sur le fichier Prestations_au_31122025.xlsx
+        # + fallbacks pour robustesse si encodage différent
+        _c_regle_ = _find_col(sin, "Réglement Total",      "Reglement Total",      "Règlement Total")
+        _c_sap_   = _find_col(sin, "SAP au 31/12/2025",    "SAP")
+        _c_hon_   = _find_col(sin, "Réglement Honoraires",  "Reglement Honoraires", "Règlement Honoraires")
+        _c_nat_   = _find_col(sin, "Nature Sinistre",       "Nature Sinstre")
+        _c_sort_  = _find_col(sin, "Sort Sinistre")
+        _c_cat_   = _find_col(sin, "Libéllé Catégorie",    "Libellé Catégorie",    "Libelle Categorie", "Libéllé Catégorie risque")
+        _c_souscr = _find_col(sin, "Souscripteur")
+        _c_exo    = _find_col(sin, "Exercice Sinistre")
+        _c_surv_  = _find_col(sin, "Date Survenance")
+        _c_decl   = _find_col(sin, "Date Déclaration",     "Date Declaration")
+        _c_compt  = _find_col(sin, "Réglement Comptable",   "Reglement Comptable")
+        _c_rae    = _find_col(sin, "RAE Cie au 31/12/2025")
+        _c_branch = _find_col(sin, "Libellé branche")
 
-                C_N=rl_colors.HexColor("#0D1F3C"); C_G=rl_colors.HexColor("#1A7F6E")
-                C_R=rl_colors.HexColor("#C0392B"); C_W=rl_colors.white
-                C_L=rl_colors.HexColor("#F3F6FA")
+        # Debug : afficher ce qui a été trouvé (si colonnes manquantes)
+        _missing_cols = [n for n,v in [
+            ("Réglement Total",_c_regle_),("SAP",_c_sap_),
+            ("Nature Sinistre",_c_nat_),("Sort Sinistre",_c_sort_),
+            ("Libéllé Catégorie",_c_cat_)] if v is None]
+        if _missing_cols:
+            st.warning(f"⚠️ Colonnes non trouvées : {_missing_cols} | "
+                       f"Colonnes disponibles : {list(sin.columns[:10])}")
 
-                st_ti = ParagraphStyle("T",fontName="Helvetica-Bold",fontSize=12,textColor=C_W,alignment=TA_CENTER)
-                st_su = ParagraphStyle("S",fontName="Helvetica",fontSize=9,textColor=rl_colors.HexColor("#A9DFBF"),alignment=TA_CENTER)
-                st_bd = ParagraphStyle("B",fontName="Helvetica",fontSize=9,textColor=rl_colors.HexColor("#2C3E50"),leading=13)
-                st_sm = ParagraphStyle("Sm",fontName="Helvetica",fontSize=8,textColor=rl_colors.grey,alignment=TA_CENTER)
-                st_bf = ParagraphStyle("Bf",fontName="Helvetica-Bold",fontSize=9,textColor=C_N)
+        section(f"⚠️ Sinistres & Prestations — {_sin_scope}","ANALYSE ACTUARIELLE · SAP · S/P")
+        # Noms exacts vérifiés sur fichier AFG réel
+        _c_tot  = "Réglement Total"     if "Réglement Total"     in sin.columns else next((c for c in sin.columns if "glement" in c and "otal" in c), None)
+        _c_sap  = "SAP au 31/12/2025"  if "SAP au 31/12/2025"  in sin.columns else next((c for c in sin.columns if c.startswith("SAP")), None)
+        _c_hon  = "Réglement Honoraires" if "Réglement Honoraires" in sin.columns else next((c for c in sin.columns if "glement" in c and "onnor" in c), None)
+        # Tous les indicateurs sont calcules sur le PERIMETRE FILTRE (df_sf)
+        _S = df_sf
+        tot_sin = float(_S[_c_tot].fillna(0).sum()) if _c_tot and _c_tot in _S.columns else 0
+        tot_sap = float(_S[_c_sap].fillna(0).sum()) if _c_sap and _c_sap in _S.columns else 0
+        tot_hon = float(_S[_c_hon].fillna(0).sum()) if _c_hon and _c_hon in _S.columns else 0
+        charge_u=tot_sin+tot_sap+tot_hon
+        nb_sin  = len(_S)
+        nb_clos = int((_S[_c_sort_]=="Cloturé").sum()) if _c_sort_ and _c_sort_ in _S.columns else 0
+        nb_ouv  = int((_S[_c_sort_]=="Ouvert").sum())  if _c_sort_ and _c_sort_ in _S.columns else 0
+        # CA de reference : meme perimetre que les sinistres pour un S/P coherent
+        _ca_ref_df = ca_f() if (ca is not None and SEL_YEAR is None) else (
+                     ca[year_mask(ca,["ANNEE","DATECOMP","DATEEFFE"],SEL_YEAR)]
+                     if (ca is not None and SEL_YEAR) else None)
+        if _ca_ref_df is None or _ca_ref_df.empty: _ca_ref_df = ca
+        ca_all = float(_ca_ref_df["CHIFAFFA"].fillna(0).sum()) if (
+                 _ca_ref_df is not None and "CHIFAFFA" in _ca_ref_df.columns) else 0
+        sp=tot_sin/max(ca_all,1)*100; cout_m=tot_sin/max(nb_clos,1)
+        actifs_n=int((pf["ETAT_POLICE"].str.strip()=="ACTIF").sum()) if pf is not None and "ETAT_POLICE" in pf.columns else 1
+        burning=charge_u/max(actifs_n,1)*1000
 
-                def _exemplaire(label):
-                    items = []
-                    # Logo
-                    try:
-                        _img = _RLImg(_io.BytesIO(_b64.b64decode(LOGO_B64)), width=3.5*cm, height=1.5*cm)
-                        _img.hAlign = "CENTER"; items.append(_img); items.append(Spacer(1,0.15*cm))
-                    except Exception: pass
-                    # En-tête adapté au produit
-                    h = Table([[Paragraph("BULLETIN INDIVIDUEL D'ADHÉSION",st_ti)],
-                                [Paragraph(f"{prod['nom']} · AFG Assurances Bénin Vie",st_su)],
-                                [Paragraph(f"Exemplaire : {label}",st_su)]],
-                               colWidths=[17*cm])
-                    h.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,-1),C_N),
-                        ("ALIGN",(0,0),(-1,-1),"CENTER"),
-                        ("TOPPADDING",(0,0),(-1,-1),7),("BOTTOMPADDING",(0,0),(-1,-1),7)]))
-                    items.append(h); items.append(Spacer(1,0.25*cm))
-                    # Données
-                    _n = f"{st.session_state.get('f_c_tit','')} {st.session_state.get('f_c_nom','').upper()} {st.session_state.get('f_c_prn','')}".strip()
-                    _appo_lbl = (st.session_state.get("f_courtier_nom")
-                                 or st.session_state.get("f_nom_appo") or "—")
-                    rows = [
-                        ["N° BIA", st.session_state.get("_last_bia_num","—"),
-                         "Date de saisie", _dt.now().strftime("%d/%m/%Y")],
-                        ["Apporteur", _appo_lbl, "Produit", prod["nom"]],
-                        ["Souscripteur", _n, "Téléphone", st.session_state.get("f_c_tel","—")],
-                        ["Prime annuelle", f"{int(st.session_state.get('f_coti',0)):,} FCFA", "Capital garanti", f"{int(st.session_state.get('f_cap',0)):,} FCFA"],
-                        ["Date effet", ds(st.session_state.get("f_deff","")), "Date terme", str(st.session_state.get("f_terme_auto","—"))],
-                        ["Mode règlement", st.session_state.get("f_mode","—"), "Référence", st.session_state.get("f_mref","—") or "—"],
+        c1,c2,c3,c4,c5,c6=st.columns(6)
+        kpi(c1,"Total réglé",     fmt_full(tot_sin), _sin_scope,            "red",  icon="💊")
+        kpi(c2,"SAP (provisions)",fmt_full(tot_sap), "Provisions restantes","amber",icon="📌")
+        kpi(c3,"Charge ultime",   fmt_full(charge_u),"Réglé+SAP+Honoraires","red",  icon="⚖️")
+        kpi(c4,"Ratio S/P",       pct(sp),           "vs CA même période",
+            "red" if sp>80 else "amber", icon="📐")
+        kpi(c5,"Coût moy/clos",   fmt_full(cout_m),  f"{nb_clos:,} dossiers clos".replace(","," "),
+            "teal", icon="💰")
+        kpi(c6,"Burning Cost",    fmt_full(burning), "Charge/1 000 actifs", "red", icon="🔥")
+
+        st.markdown(f"<div style='font-size:11px;color:#667;margin:4px 0 10px'>"
+                    f"Périmètre : <b>{_sin_scope}</b> — "
+                    f"<b>{nb_full(nb_sin)}</b> dossiers sur {nb_full(len(sin))} "
+                    f"({nb_sin/max(len(sin),1)*100:.1f} %) · "
+                    f"{nb_full(nb_ouv)} ouverts · {nb_full(nb_clos)} clos</div>",
+                    unsafe_allow_html=True)
+
+        t_n,t_e,t_p,t_tri,t_r=st.tabs(["🏷️ Par nature","📈 Évolution","🛒 Par produit","📐 Triangle dev.","🔍 Données brutes"])
+
+        with t_n:
+            if _c_nat_ and _c_regle_:
+                try:
+                    # Les variantes de deces sont fusionnees sous un libelle unique
+                    _sn = df_sf.copy()
+                    _sn[_c_nat_] = normaliser_nature(_sn[_c_nat_])
+                    nat = _safe_groupby(_sn, _c_nat_,
+                        {"Nb":(_c_nat_,"count"),
+                         "Réglé":(_c_regle_,"sum"),
+                         **( {"SAP":(_c_sap_,"sum")} if _c_sap_ else {})},
+                        sort_col="Réglé")
+                    if "Réglé" not in nat.columns: nat["Réglé"] = 0.0
+                    if "SAP"   not in nat.columns: nat["SAP"]   = 0.0
+                    nat["Charge"]   = nat["Réglé"] + nat["SAP"]
+                    nat["Coût moyen"] = nat["Réglé"] / nat["Nb"].replace(0, np.nan)
+                    c1,c2 = st.columns(2)
+                    with c1:
+                        fig = go.Figure()
+                        fig.add_bar(y=nat[_c_nat_].astype(str).str[:24],
+                            x=nat["Réglé"], name="Réglé", marker_color=RED, orientation="h")
+                        fig.add_bar(y=nat[_c_nat_].astype(str).str[:24],
+                            x=nat["SAP"],   name="SAP",   marker_color=AMBER, orientation="h")
+                        fig.update_layout(barmode="stack", yaxis=dict(autorange="reversed"))
+                        fig_style(fig, 380, "Règlements + SAP par nature de sinistre")
+                        st.plotly_chart(fig, use_container_width=True)
+                    with c2:
+                        _nat_c = nat[nat["Charge"]>0]
+                        if not _nat_c.empty:
+                            fig2 = px.treemap(_nat_c, path=[_c_nat_], values="Charge",
+                                color="Nb", color_continuous_scale=[[0,MINT],[.5,AMBER],[1,RED]])
+                            fig2.update_layout(height=380, margin=dict(l=5,r=5,t=20,b=5))
+                            st.plotly_chart(fig2, use_container_width=True)
+                    nat_d = nat.copy()
+                    for c_ in ["Réglé","SAP","Charge","Coût moyen"]:
+                        if c_ in nat_d.columns: nat_d[c_] = nat_d[c_].apply(fmt)
+                    st.dataframe(nat_d, use_container_width=True, hide_index=True)
+                    a,b = st.columns(2)
+                    a.download_button("📥 CSV", dl_csv(nat), "sin_nature.csv",
+                        "text/csv", use_container_width=True, key="dl_sin_nat")
+                    b.download_button("📥 Excel", dl_xlsx(nat), "sin_nature.xlsx",
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True, key="dl_sin_nat_xl")
+                except Exception as _e:
+                    alert(f"Erreur 'Par nature' : {_e}", "danger")
+            else:
+                alert("Colonne 'Nature Sinistre' ou 'Reglement Total' absente du fichier.", "warn")
+
+        with t_e:
+            if "ANNEE_SIN" in sin.columns:
+                evo = _safe_groupby(sin, "ANNEE_SIN",
+                    {"Nb":("ANNEE_SIN","count"),
+                     "Réglé":(_c_regle_,"sum") if _c_regle_ else None,
+                     "SAP":(_c_sap_,"sum") if _c_sap_ else None})
+                if "Réglé" not in evo.columns: evo["Réglé"] = 0
+                if "SAP"   not in evo.columns: evo["SAP"]   = 0
+                evo=evo[evo["ANNEE_SIN"].between(1997,2025)].sort_values("ANNEE_SIN")
+                fig=make_subplots(specs=[[{"secondary_y":True}]])
+                fig.add_bar(x=evo["ANNEE_SIN"].astype(str),y=evo["Réglé"],name="Réglé",marker_color=RED,opacity=.82)
+                fig.add_bar(x=evo["ANNEE_SIN"].astype(str),y=evo["SAP"],name="SAP",marker_color=AMBER,opacity=.82)
+                fig.add_scatter(x=evo["ANNEE_SIN"].astype(str),y=evo["Nb"],name="Nb dossiers",
+                    line=dict(color=GREEN,width=2.5),mode="lines+markers",secondary_y=True)
+                fig.update_layout(barmode="stack")
+                fig.update_yaxes(title_text="Montant (FCFA)",secondary_y=False)
+                fig.update_yaxes(title_text="Nb dossiers",secondary_y=True,showgrid=False)
+                fig_style(fig,420,"📈 Sinistres par exercice 1997–2025"); st.plotly_chart(fig,use_container_width=True)
+                a,b=st.columns(2)
+                a.download_button("📥 CSV",dl_csv(evo),"evo_sin.csv","text/csv",use_container_width=True,key="dl_evo_sin")
+                b.download_button("📥 Excel",dl_xlsx(evo),"evo_sin.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_evo_sin_xl")
+
+        with t_p:
+            # Détection robuste du nom de colonne (accents variables selon encodage)
+            cat_c = next((c for c in sin.columns
+                          if "cat" in c.lower() and ("gorie" in c.lower() or "g" in c.lower())),
+                         "Libéllé Catégorie")
+            if _c_cat_ and _c_cat_ in sin.columns:
+                cat_c = _c_cat_
+                sp2 = _safe_groupby(sin, cat_c,
+                    {"Nb":(cat_c,"count"),
+                     "Réglé":(_c_regle_,"sum") if _c_regle_ else None,
+                     "SAP":(_c_sap_,"sum") if _c_sap_ else None},
+                    sort_col="Réglé")
+                if "Réglé" not in sp2.columns: sp2["Réglé"] = 0
+                if "SAP"   not in sp2.columns: sp2["SAP"]   = 0
+                sp2["Charge"]=sp2["Réglé"]+sp2["SAP"]
+                fig=go.Figure()
+                fig.add_bar(x=sp2["Réglé"],y=sp2[cat_c].str[:24],name="Réglé",marker_color=RED,orientation="h")
+                fig.add_bar(x=sp2["SAP"],y=sp2[cat_c].str[:24],name="SAP",marker_color=AMBER,orientation="h")
+                fig.update_layout(barmode="stack",yaxis=dict(autorange="reversed"))
+                fig_style(fig,360,"🛒 Sinistres par produit"); st.plotly_chart(fig,use_container_width=True)
+                sp2_d=sp2.copy()
+                for c_ in ["Réglé","SAP","Charge"]: sp2_d[c_]=sp2_d[c_].apply(fmt)
+                st.dataframe(sp2_d,use_container_width=True,hide_index=True)
+                a,_=st.columns(2)
+                a.download_button("📥 CSV",dl_csv(sp2),"sin_prod.csv","text/csv",use_container_width=True,key="dl_sin_p")
+
+        with t_tri:
+            section("Triangle de développement — Décès",
+                    "SURVENANCE (lignes) × COMPTABILISATION (colonnes) · RÈGLEMENTS")
+
+            # ── 1. Isoler les DÉCÈS sur la base COMPLÈTE ──────────────────────────
+            # Un triangle de développement se construit toujours sur l'historique
+            # intégral : le filtre de période de la barre latérale ne s'y applique
+            # pas, sinon les exercices antérieurs disparaîtraient et les facteurs
+            # de développement seraient faux.
+            _tri_src = sin.copy()
+            _c_nat_t = next((c for c in _tri_src.columns
+                             if "ature" in c.lower() and "ini" in c.lower()), None)
+            if _c_nat_t:
+                _msk_dc = _tri_src[_c_nat_t].astype(str).str.upper().str.contains(
+                    r"D[EÉ]C[EÈ]|DECES|DEATH|MORTAL", regex=True, na=False)
+                _n_avant  = len(_tri_src)
+                _natures  = sorted(_tri_src.loc[_msk_dc, _c_nat_t].dropna().unique().tolist())
+                _tri_src  = _tri_src[_msk_dc].copy()
+                _nb_deces = len(_tri_src)
+                if _tri_src.empty:
+                    alert("Aucun dossier de nature <b>Décès</b> dans la base Prestations. "
+                          "Vérifiez la colonne « Nature Sinistre ».","warn")
+                else:
+                    _tri_src[_c_nat_t] = "Décès"
+                    d1, d2, d3 = st.columns(3)
+                    kpi(d1, "Décès recensés", nb_full(_nb_deces),
+                        f"sur {nb_full(_n_avant)} dossiers", "red", icon="🕯️")
+                    kpi(d2, "Part des décès", f"{_nb_deces/max(_n_avant,1)*100:.1f} %",
+                        "de la base Prestations", "amber", icon="📊")
+                    kpi(d3, "Libellés fusionnés", nb_full(len(_natures)),
+                        "regroupés sous « Décès »", "teal", icon="🔗")
+                    st.caption("Historique intégral — le filtre de période ne s'applique "
+                               "pas au triangle. Libellés regroupés : "
+                               + ", ".join(str(n)[:30] for n in _natures[:8])
+                               + (" …" if len(_natures) > 8 else ""))
+            else:
+                alert("Colonne « Nature Sinistre » introuvable — triangle sur tous les dossiers.","warn")
+
+            # ── 2. Résolution des colonnes de dates et de montants ────────────────
+            _c_surv_t = next((c for c in _tri_src.columns
+                              if "survenance" in c.lower()), None)
+            _c_comp_t = next((c for c in _tri_src.columns
+                              if "datecomp" in c.lower() or "comptab" in c.lower()), None)
+            _c_regl_t = next((c for c in _tri_src.columns
+                              if "glement" in c.lower() and "otal" in c.lower()), None)
+
+            if not (_c_surv_t and _c_comp_t and _c_regl_t):
+                _manque = [lbl for lbl, c in
+                           [("Date Survenance", _c_surv_t),
+                            ("Date Comptabilisation", _c_comp_t),
+                            ("Règlement Total", _c_regl_t)] if not c]
+                alert(f"Colonne(s) manquante(s) pour le triangle : {', '.join(_manque)}.","warn")
+            else:
+                _tri = _tri_src[[_c_surv_t, _c_comp_t, _c_regl_t]].copy()
+                _tri["_SURV"] = pd.to_datetime(_tri[_c_surv_t], errors="coerce").dt.year
+                _tri["_COMP"] = pd.to_datetime(_tri[_c_comp_t], errors="coerce").dt.year
+                _tri["_MT"]   = pd.to_numeric(_tri[_c_regl_t], errors="coerce").fillna(0)
+                _tri = _tri.dropna(subset=["_SURV","_COMP"])
+                _tri["_SURV"] = _tri["_SURV"].astype(int)
+                _tri["_COMP"] = _tri["_COMP"].astype(int)
+                # Un règlement ne peut pas précéder la survenance
+                _tri = _tri[_tri["_COMP"] >= _tri["_SURV"]]
+
+                if _tri.empty:
+                    alert("Pas de couple (survenance, comptabilisation) exploitable.","warn")
+                else:
+                    # ── 3. Triangle : survenance en LIGNES, comptabilisation en COLONNES
+                    tri = _tri.pivot_table(index="_SURV", columns="_COMP",
+                                           values="_MT", aggfunc="sum", fill_value=0)
+                    tri = tri.sort_index().sort_index(axis=1)
+                    tri.index.name   = "Survenance"
+                    tri.columns.name = "Comptabilisation"
+
+                    t_a, t_b, t_c2 = st.tabs(["📐 Triangle brut",
+                                              "📈 Triangle cumulé",
+                                              "🔗 Facteurs de développement"])
+
+                    with t_a:
+                        st.caption("Montants réglés (FCFA) — année de survenance en ligne, "
+                                   "année de comptabilisation en colonne.")
+                        _td = tri.copy()
+                        for c_ in _td.columns: _td[c_] = _td[c_].apply(lambda v: fmt_full(v,""))
+                        _td.columns = [str(c) for c in _td.columns]
+                        st.dataframe(_td, use_container_width=True, height=340)
+                        st.download_button("📥 CSV triangle brut", dl_csv(tri.reset_index()),
+                            "triangle_deces_brut.csv","text/csv",
+                            use_container_width=True, key="dl_tri_brut")
+
+                    with t_b:
+                        tri_c = tri.cumsum(axis=1)
+                        st.caption("Cumul des règlements au fil des exercices de comptabilisation.")
+                        _tc = tri_c.copy()
+                        for c_ in _tc.columns: _tc[c_] = _tc[c_].apply(lambda v: fmt_full(v,""))
+                        _tc.columns = [str(c) for c in _tc.columns]
+                        st.dataframe(_tc, use_container_width=True, height=340)
+
+                        fig_tri = go.Figure(go.Heatmap(
+                            z=tri_c.values,
+                            x=[str(c) for c in tri_c.columns],
+                            y=[str(i) for i in tri_c.index],
+                            colorscale=[[0,"#FFFFFF"],[.5,MINT],[1,GREEN]],
+                            text=[[f"{v:,.0f}".replace(",", " ") if v else ""
+                                   for v in row] for row in tri_c.values],
+                            texttemplate="%{text}", textfont=dict(size=9),
+                            hovertemplate="Survenance %{y} · Comptabilise %{x}"
+                                          "<br>Cumul : %{z:,.0f} FCFA<extra></extra>"))
+                        fig_tri.update_layout(
+                            xaxis=dict(title="Année de comptabilisation", side="top"),
+                            yaxis=dict(title="Année de survenance", autorange="reversed"))
+                        fig_style(fig_tri, 380, "🔥 Triangle cumulé — Décès")
+                        st.plotly_chart(fig_tri, use_container_width=True)
+                        st.download_button("📥 CSV triangle cumulé", dl_csv(tri_c.reset_index()),
+                            "triangle_deces_cumule.csv","text/csv",
+                            use_container_width=True, key="dl_tri_cum")
+
+                    with t_c2:
+                        tri_c = tri.cumsum(axis=1)
+                        _cols = list(tri_c.columns)
+                        if len(_cols) < 2:
+                            alert("Au moins deux exercices de comptabilisation sont "
+                                  "nécessaires pour calculer des facteurs.","info")
+                        else:
+                            _fac = []
+                            for k in range(len(_cols)-1):
+                                _c0, _c1 = _cols[k], _cols[k+1]
+                                _num = tri_c[_c1][tri_c[_c0] > 0].sum()
+                                _den = tri_c[_c0][tri_c[_c0] > 0].sum()
+                                _f = (_num/_den) if _den else np.nan
+                                _fac.append({"Transition": f"{_c0} → {_c1}",
+                                             "Cumul départ": _den, "Cumul arrivée": _num,
+                                             "Facteur": _f})
+                            _dff = pd.DataFrame(_fac)
+                            _dfa = _dff.copy()
+                            _dfa["Cumul départ"]  = _dfa["Cumul départ"].apply(lambda v: fmt_full(v,""))
+                            _dfa["Cumul arrivée"] = _dfa["Cumul arrivée"].apply(lambda v: fmt_full(v,""))
+                            _dfa["Facteur"]       = _dfa["Facteur"].apply(
+                                lambda v: f"{v:.4f}" if pd.notna(v) else "—")
+                            st.dataframe(_dfa, use_container_width=True, hide_index=True)
+
+                            _fv = _dff["Facteur"].dropna()
+                            if not _fv.empty:
+                                _ldf = float(np.prod(_fv.values))
+                                c_f1, c_f2 = st.columns(2)
+                                kpi(c_f1,"Facteur de queue cumulé", f"{_ldf:.4f}",
+                                    "Produit des facteurs", "teal", icon="🔗")
+                                kpi(c_f2,"Charge ultime estimée",
+                                    fmt(float(tri_c.iloc[:,-1].sum()) * max(_ldf-1, 0) +
+                                        float(tri_c.iloc[:,-1].sum())),
+                                    "Chain-Ladder simplifié", "", icon="📊")
+                                fig_f = go.Figure(go.Bar(
+                                    x=_dff["Transition"], y=_dff["Facteur"],
+                                    marker_color=GREEN,
+                                    text=[f"{v:.3f}" if pd.notna(v) else "—"
+                                          for v in _dff["Facteur"]],
+                                    textposition="outside", textfont=dict(size=10)))
+                                fig_f.add_hline(y=1, line_dash="dash", line_color=RED)
+                                fig_style(fig_f, 300, "📈 Facteurs de développement (Chain-Ladder)")
+                                st.plotly_chart(fig_f, use_container_width=True)
+
+        with t_r:
+            # Colonnes brutes — noms EXACTS confirmés sur fichier AFG
+            _sin_raw_want = [c for c in [
+                "Date Survenance", _c_cat_, _c_nat_, _c_sort_, "Souscripteur",
+                "Désignation risque", _c_regle_, _c_sap_, _c_hon_,
+                "Date Déclaration", "Date validation", "Nom Bénéficiaire",
+                "Exercice Sinistre", "POLICE_KEY", "No Sinistre",
+                "Réglement Comptable", "RAE Cie au 31/12/2025"
+            ] if c is not None and c in sin.columns]
+            _sin_raw_want_orig = _sin_raw_want
+            # Ajouter la colonne catégorie quelle que soit son orthographe
+            _cat_col = next((c for c in sin.columns if "cat" in c.lower()),None)
+            if _cat_col and _cat_col not in _sin_raw_want: _sin_raw_want.insert(1, _cat_col)
+            cs=[c for c in _sin_raw_want if c in sin.columns]
+            srch_s=st.text_input("🔍 Rechercher",label_visibility="collapsed",placeholder="Nature, souscripteur, produit…",key="srch_sin")
+            di_s=sin[cs].copy()
+            for dc in ["Date Survenance","Date Déclaration","Date validation"]:
+                if dc in di_s.columns: di_s[dc]=di_s[dc].apply(ds)
+            for nc in ["Réglement Total","SAP au 31/12/2025"]:
+                if nc in di_s.columns: di_s[nc]=di_s[nc].apply(lambda x:fmt(x,""))
+            if srch_s: di_s=di_s[di_s.apply(lambda r:srch_s.lower() in str(r).lower(),axis=1)]
+            st.dataframe(di_s.head(500),use_container_width=True,hide_index=True,height=420)
+            st.caption(f"Affichage 500 / {len(di_s):,} lignes")
+            a,b=st.columns(2)
+            a.download_button("📥 CSV complet",dl_csv(sin),"prestations.csv","text/csv",use_container_width=True,key="dl_sin_raw")
+            b.download_button("📥 Excel",dl_xlsx(sin[cs].head(50000)),"prestations.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_sin_raw_xl")
+
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # PAGE — ACTUARIAT AVANCÉ
+    # ═══════════════════════════════════════════════════════════════════════════════
+    except Exception as _e_page:
+        _erreur_onglet(_e_page, "Sinistres")
+
+elif "Actuariat" in page:
+    try:
+            section("📐 Actuariat Avancé","CIMA · SAP · BURNING COST · JOINTURES")
+            t_c,t_p = st.tabs(["🏛️ CIMA & Solvabilité","📌 Provisions SAP"])
+            with t_c:
+                if pf is None: alert("Chargez le Portefeuille.","warn")
+                else:
+                    nb=len(pf); ek="ETAT_POLICE"
+                    actifs=int((pf[ek].str.strip().isin(["ACTIF"])).sum()) if ek in pf.columns else 0
+                    resil=int((pf[ek].str.strip()=="RESILIE").sum()) if ek in pf.columns else 0
+                    inact=int((pf[ek].str.strip()=="INACTIF").sum()) if ek in pf.columns else 0
+                    echu=int((pf[ek].str.strip().isin(["ECHU","ASSURE ECHU"])).sum()) if ek in pf.columns else 0
+                    tx_act=actifs/max(nb,1)*100; tx_res=resil/max(nb-inact,1)*100
+                    ca_t=float(ca["CHIFAFFA"].fillna(0).sum()) if ca is not None and "CHIFAFFA" in ca.columns else 0
+                    sin_t=float(sin["Réglement Total"].fillna(0).sum()) if sin is not None and "Réglement Total" in sin.columns else 0
+                    sap_t=float(sin["SAP au 31/12/2025"].fillna(0).sum()) if sin is not None and "SAP au 31/12/2025" in sin.columns else 0
+                    sp=sin_t/max(ca_t,1)*100; charge_u=sin_t+sap_t; burning=charge_u/max(actifs,1)*1000
+                    monten=float(pf["MONTENCA"].fillna(0).apply(lambda x: float(str(x).replace(" ","").replace(",",".")) if str(x).replace(" ","").replace(",",".").replace(".","",1).replace("-","",1).isdigit() else 0).sum()) if "MONTENCA" in pf.columns else 0
+                    indics=[
+                        (tx_act,"Taux d'activité net",50,">=",GREEN),
+                        (tx_res,"Taux résiliation CIMA",25,"<=",RED),
+                        (sp,"Ratio S/P",80,"<=",AMBER),
+                        (inact/max(nb,1)*100,"Part inactifs",5,"<=",AMBER),
                     ]
-                    t = Table(rows, colWidths=[4*cm,4.5*cm,4*cm,4.5*cm])
-                    t.setStyle(TableStyle([
-                        ("FONTNAME",(0,0),(0,-1),"Helvetica-Bold"),("FONTNAME",(2,0),(2,-1),"Helvetica-Bold"),
-                        ("FONTSIZE",(0,0),(-1,-1),8.5),
-                        ("ROWBACKGROUNDS",(0,0),(-1,-1),[C_L,C_W]),
-                        ("GRID",(0,0),(-1,-1),0.3,rl_colors.HexColor("#DDE3EE")),
-                        ("TOPPADDING",(0,0),(-1,-1),5),("BOTTOMPADDING",(0,0),(-1,-1),5),("LEFTPADDING",(0,0),(-1,-1),6),
-                    ]))
-                    items.append(t); items.append(Spacer(1,0.3*cm))
-                    items.append(Paragraph("Je soussigné(e) certifie l'exactitude des informations ci-dessus et reconnais avoir reçu les conditions générales du contrat.",st_bd))
-                    items.append(Spacer(1,0.5*cm))
-                    sig = Table([["Signature souscripteur","Cachet & Signature AFG"],["",""],["",""]],
-                                 colWidths=[8.5*cm,8.5*cm])
-                    sig.setStyle(TableStyle([
-                        ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("FONTSIZE",(0,0),(-1,-1),8),
-                        ("ALIGN",(0,0),(-1,-1),"CENTER"),
-                        ("BOX",(0,1),(0,2),0.5,C_N),("BOX",(1,1),(1,2),0.5,C_N),
-                        ("BOTTOMPADDING",(0,1),(-1,2),25),
-                    ]))
-                    items.append(sig)
-                    items.append(Spacer(1,0.15*cm))
-                    items.append(Paragraph("AFG Assurances Bénin Vie · Groupe AFG Holding · Conforme CIMA",st_sm))
-                    return items
+                    for v,lbl,seuil,op,col in indics:
+                        ok=v>=seuil if op==">=" else v<=seuil; c_=GREEN if ok else RED
+                        st.markdown(f"""<div style="display:flex;align-items:center;justify-content:space-between;
+                             padding:10px 14px;border-left:4px solid {c_};background:{c_}0D;
+                             border-radius:0 10px 10px 0;margin-bottom:8px">
+                          <div><div style="font-size:13px;font-weight:700;color:{NAVY}">{lbl}</div>
+                          <div style="font-size:10px;color:#8899AA">Norme CIMA : {op}{seuil}%</div></div>
+                          <div style="font-size:20px;font-weight:900;color:{c_}">{pct(v)} {'✅' if ok else '⚠️'}</div>
+                        </div>""", unsafe_allow_html=True)
+                    st.markdown("")
+                    ac1,ac2,ac3,ac4=st.columns(4)
+                    kpi(ac1,"Burning Cost",fmt(burning),"Charge ultime / 1 000 actifs","red",icon="🔥")
+                    kpi(ac2,"Charge ultime",fmt(charge_u),"Réglé + SAP","red",icon="⚖️")
+                    kpi(ac3,"CA 2024",fmt(ca_t),"Base calcul S/P","teal",icon="💰")
+                    kpi(ac4,"Encaissements PF",fmt(monten),"MONTENCA total","blue",icon="📊")
+            with t_p:
+                if sin is None: alert("Chargez les Prestations.","warn")
+                else:
+                    # Résolution dynamique des colonnes sinistres dans l'onglet Actuariat
+                    _act_nat  = next((c for c in sin.columns if "ature" in c.lower() and "ini" in c.lower()), None)
+                    _act_regl = next((c for c in sin.columns if "glement" in c.lower() and "otal" in c.lower()), None)
+                    _act_sap  = next((c for c in sin.columns if c.upper().startswith("SAP")), None)
+                    _act_sort = next((c for c in sin.columns if "ort" in c.lower() and "ini" in c.lower()), None)
 
-                story = []
-                story.extend(_exemplaire("EXEMPLAIRE CLIENT"))
-                story.append(Spacer(1,0.3*cm))
-                story.append(HRFlowable(width="100%",thickness=0.8,color=C_R,dash=[3,3],spaceAfter=3))
-                story.append(Paragraph("✂ — — — Découper ici — — — ✂",
-                    ParagraphStyle("C",fontName="Helvetica",fontSize=8,textColor=rl_colors.grey,alignment=TA_CENTER)))
-                story.append(Spacer(1,0.3*cm))
-                story.extend(_exemplaire("EXEMPLAIRE AFG ASSURANCES"))
+                    if _act_nat is None:
+                        alert("Colonne 'Nature Sinistre' introuvable dans le fichier Prestations.","warn")
+                    else:
+                        _agg_prov = {"Nb": (_act_nat, "count")}
+                        if _act_regl: _agg_prov["Regle"]  = (_act_regl, "sum")
+                        if _act_sap:  _agg_prov["SAP"]    = (_act_sap, "sum")
+                        if _act_sort: _agg_prov["Ouvert"] = (_act_sort, lambda x: (x == "Ouvert").sum())
 
-                doc.build(story)
-                _pdf_bia = _buf.getvalue()
-                _nom_bia = st.session_state.get("f_c_nom","").upper()
-                st.success(f"✅ BIA généré — {len(_pdf_bia)//1024} Ko")
-                st.download_button("📥 Télécharger le BIA (PDF — 2 exemplaires)",
-                    data=_pdf_bia,
-                    file_name=f"BIA_PA0_{_nom_bia}_{_dt.now().strftime('%Y%m%d')}.pdf",
-                    mime="application/pdf", use_container_width=True,
-                    type="primary", key="dl_bia_pdf_final")
-            except ImportError:
-                alert("La bibliothèque <b>reportlab</b> n'est pas installée.","danger")
-            except Exception as _ep_bia:
-                alert(f"Erreur impression BIA : {_ep_bia}","danger")
+                        prov = sin.groupby(_act_nat).agg(**_agg_prov).reset_index()
+                        if "Regle"  not in prov.columns: prov["Regle"]  = 0
+                        if "SAP"    not in prov.columns: prov["SAP"]    = 0
+                        if "Ouvert" not in prov.columns: prov["Ouvert"] = 0
 
-        # ── Bouton PDF universel (tous produits) ────────────────────────────────
-        if False:
-            if st.button("🖨️ Télécharger le BIA (PDF — 2 exemplaires)",
-                         use_container_width=True, key="dl_bia_btn_all"):
+                        prov["Charge"]           = prov["Regle"] + prov["SAP"]
+                        prov["Ratio SAP/Charge"] = prov["SAP"] / prov["Charge"].replace(0, np.nan) * 100
+                        prov["Cout moy clos"]    = prov["Regle"] / (prov["Nb"] - prov["Ouvert"]).replace(0, np.nan)
+                    fig=go.Figure()
+                    fig.add_bar(y=prov["Nature Sinistre"].str[:22],x=prov["Regle"],name="Regle",marker_color=GREEN,orientation="h")
+                    fig.add_bar(y=prov["Nature Sinistre"].str[:22],x=prov["SAP"],name="SAP résiduel",marker_color=AMBER,orientation="h")
+                    fig.update_layout(barmode="stack",yaxis=dict(autorange="reversed"))
+                    fig_style(fig,360,"📌 Structure Réglé / SAP par nature"); st.plotly_chart(fig,use_container_width=True)
+                    pv=prov.copy()
+                    for c_ in ["Regle","SAP","Charge","Cout moy clos"]: pv[c_]=pv[c_].apply(fmt)
+                    pv["Ratio SAP/Charge"]=pv["Ratio SAP/Charge"].apply(lambda x:f"{x:.1f}%" if pd.notna(x) else "—")
+                    pv.columns=["Nature","Nb","Réglé","SAP","Dossiers ouverts","Charge","Ratio SAP/Charge","Coût moyen clos"]
+                    st.dataframe(pv,use_container_width=True,hide_index=True)
+                    a,b = st.columns(2)
+                    a.download_button("📥 CSV provisions",dl_csv(prov),"provisions.csv","text/csv",use_container_width=True,key="dl_prov")
+                    b.download_button("📥 Excel",dl_xlsx(prov),"provisions.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_prov_xl")
+    except Exception as _e_page:
+        _erreur_onglet(_e_page, "Actuariat")
+
+elif "Prévisions" in page:
+    try:
+            section("🔮 Prévisions & Tendances","MODÈLE POLYNOMIAL · SAISONNALITÉ · PROJECTION")
+            if ca is None and pf is None: alert("Chargez la Base CA ou le Portefeuille.","warn"); st.stop()
+            src=ca if ca is not None else pf
+            ca_k="CHIFAFFA" if "CHIFAFFA" in src.columns else "MONTENCA"
+            d_k="DATECOMP" if "DATECOMP" in src.columns else "DATESOUS"
+            if d_k not in src.columns: alert("Colonne date introuvable.","warn"); st.stop()
+            src2=src[[d_k,ca_k]].copy()
+            src2[d_k]=pd.to_datetime(src2[d_k],errors="coerce"); src2=src2.dropna(subset=[d_k])
+            mo=src2.groupby(src2[d_k].dt.to_period("M").astype(str))[ca_k].sum().reset_index()
+            mo.columns=["Période","CA"]; mo=mo.sort_values("Période")
+            n=len(mo)
+            if n<6: alert("Données insuffisantes pour les prévisions (< 6 mois).","warn"); st.stop()
+            c1,c2=st.columns(2)
+            deg_sel=c1.slider("Degré du polynôme",1,4,2,key="deg_s")
+            n_hor=c2.slider("Mois à prévoir",1,24,12,key="n_hor_s")
+            xs=np.arange(n); ys=mo["CA"].values.astype(float)
+            coeffs=np.polyfit(xs,ys,deg_sel)
+            trend_h=np.polyval(coeffs,xs)
+            x_f=np.arange(n,n+n_hor); trend_f=np.maximum(np.polyval(coeffs,x_f),0)
+            r2=1-np.sum((ys-trend_h)**2)/max(np.sum((ys-ys.mean())**2),1)
+            last_p=pd.Period(mo["Période"].iloc[-1],"M")
+            fut_l=[str(last_p+i+1) for i in range(n_hor)]
+            kc1,kc2,kc3=st.columns(3)
+            kpi(kc1,"CA historique total",fmt(ys.sum()),"Série complète","",icon="💰")
+            kpi(kc2,f"R² modèle (deg {deg_sel})",f"{r2:.4f}","Qualité ajustement","teal" if r2>.8 else "amber",icon="📐")
+            kpi(kc3,f"Prévision H+{n_hor}",fmt(trend_f[-1]),"Projection","blue",icon="🔮")
+            st.markdown("")
+            fig=go.Figure()
+            fig.add_scatter(x=mo["Période"],y=ys,name="CA historique",line=dict(color=GREEN,width=2),mode="lines+markers",marker=dict(size=4))
+            fig.add_scatter(x=mo["Période"],y=trend_h,name="Tendance ajustée",line=dict(color=TEAL,width=2,dash="dot"),mode="lines")
+            fig.add_scatter(x=fut_l,y=trend_f,name="Prévision",line=dict(color=RED,width=2.5,dash="dash"),mode="lines+markers",marker=dict(symbol="star",size=9,color=RED))
+            fig.add_vrect(x0=fut_l[0],x1=fut_l[-1],fillcolor="rgba(192,57,43,0.04)",line_width=0,annotation_text="Zone prévision")
+            fig_style(fig,480,f"🔮 Modèle polynomial (deg {deg_sel}) — R²={r2:.3f}")
+            st.plotly_chart(fig,use_container_width=True)
+            df_fut=pd.DataFrame({"Période":fut_l,"CA prévu":[fmt(v) for v in trend_f],"Valeur (FCFA)":trend_f.round(0)})
+            st.dataframe(df_fut[["Période","CA prévu"]],use_container_width=True,hide_index=True)
+            a,b=st.columns(2)
+            a.download_button("📥 CSV prévisions",dl_csv(df_fut),"previsions.csv","text/csv",use_container_width=True,key="dl_prev")
+            b.download_button("📥 Excel",dl_xlsx(df_fut),"previsions.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_prev_xl")
+            if n>=12:
+                section("📅 Saisonnalité mensuelle","CA MOYEN PAR MOIS")
+                src2["MOIS"]=src2[d_k].dt.month
+                saison=src2.groupby("MOIS")[ca_k].mean().reset_index(); saison.columns=["Mois","CA moyen"]
+                saison["Label"]=saison["Mois"].apply(lambda m:MOIS_FR[int(m)-1] if pd.notna(m) else "")
+                moy_g=saison["CA moyen"].mean()
+                _mc = [GREEN if v >= moy_g else "rgba(26,127,110,0.3)" for v in saison["CA moyen"]]
+                fig2=go.Figure(go.Bar(x=saison["Label"],y=saison["CA moyen"],
+                    marker_color=_mc,
+                    text=[fmt(v) for v in saison["CA moyen"]],textposition="outside", textfont=dict(size=10)))
+                fig2.add_hline(y=moy_g,line_dash="dash",line_color=RED,annotation_text=f"Moy. {fmt(moy_g)}",annotation_font_size=10)
+                fig_style(fig2,360,"📅 Saisonnalité — CA moyen par mois")
+                st.plotly_chart(fig2,use_container_width=True)
+                a2,_=st.columns(2)
+                a2.download_button("📥 CSV saisonnalité",dl_csv(saison),"saisonnalite.csv","text/csv",use_container_width=True,key="dl_sai")
+
+
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # 
+    # PAGE — SAISIE BIA (7 étapes)
+    # ═══════════════════════════════════════════════════════════════════════════════
+    except Exception as _e_page:
+        _erreur_onglet(_e_page, "Prévisions")
+
+elif "Saisie BIA" in page:
+    try:
+        # Compteurs BIA — filtrés sur PA0 pour les courtiers
+        _df_bia_hdr = bia_all()
+        _is_crt_bia = is_courtier(user)
+        if _is_crt_bia and not _df_bia_hdr.empty and "code_produit" in _df_bia_hdr.columns:
+            _df_bia_hdr = _df_bia_hdr[_df_bia_hdr["code_produit"] == "PA0"]
+        nb_bia  = len(_df_bia_hdr)
+        cot_tot = float(_df_bia_hdr["cotisation"].fillna(0).astype(float).sum()) if not _df_bia_hdr.empty else 0
+        nb_val  = int((_df_bia_hdr["statut"]=="Validé").sum()) if not _df_bia_hdr.empty else 0
+        _titre_kpi = "BIA Prévoyance Auto" if _is_crt_bia else "BIA enregistrés"
+        c1,c2,c3=st.columns(3)
+        kpi(c1, _titre_kpi, str(nb_bia), "Prévoyance Auto" if _is_crt_bia else "Total base BIA","teal",icon="📋")
+        kpi(c2,"Validés",str(nb_val),f"{nb_val/max(nb_bia,1)*100:.0f}%","",icon="✅")
+        kpi(c3,"Cotisations",fmt(cot_tot),"Total FCFA","blue",icon="💰")
+
+        # Callback de selection produit : evite le NotFoundError (removeChild)
+        # provoque par un st.rerun() declenche depuis l'interieur d'un expander.
+        def _pick_prod(code):
+            st.session_state["bia_prod"] = code
+            st.session_state["bia_step"] = 2
+
+        def _reset_prod():
+            st.session_state.pop("bia_prod", None)
+            st.session_state.pop("bia_step", None)
+
+        # ── Étape 1 : Sélection du produit ─────────────────────────────────────────
+        # _is_courtier_role : l'utilisateur est un courtier, il n'accède qu'à PA0.
+        # _is_crt_step      : le formulaire suit le parcours court en 3 étapes.
+        #                     Ce parcours s'applique à Prévoyance Auto quel que
+        #                     soit l'utilisateur (courtier, PDG ou actuaire).
+        _is_courtier_role = is_courtier(user)
+        _is_crt_step      = _is_courtier_role
+        GC = {"Groupe 1": RED, "Groupe 2": GREEN}   # défini AVANT tout usage
+
+        if _is_courtier_role:
+            # ── COURTIER : flux PA0 uniquement ───────────────────────────────────
+            section("Prévoyance Auto — BIA","AFG ASSURANCES BÉNIN VIE")
+
+            st.markdown(f"""
+            <div style="background:linear-gradient(135deg,{RED}18,{AMBER}10);
+                 border:1.5px solid {RED};border-radius:12px;padding:14px 18px;margin:10px 0">
+              <div style="font-size:11px;font-weight:800;color:{RED};text-transform:uppercase;
+                   letter-spacing:.06em;margin-bottom:10px">Prévoyance Auto — Barème</div>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+                <div style="background:white;border-radius:8px;padding:10px;text-align:center">
+                  <div style="font-size:10px;color:#888">Prime annuelle</div>
+                  <div style="font-size:15px;font-weight:800;color:{RED}">500 FCFA</div>
+                  <div style="font-size:11px;color:{NAVY};font-weight:700"> 100 000 FCFA</div>
+                </div>
+                <div style="background:white;border-radius:8px;padding:10px;text-align:center">
+                  <div style="font-size:10px;color:#888">Prime annuelle</div>
+                  <div style="font-size:15px;font-weight:800;color:{RED}">1 000 FCFA</div>
+                  <div style="font-size:11px;color:{NAVY};font-weight:700"> 225 000 FCFA</div>
+                </div>
+                <div style="background:white;border-radius:8px;padding:10px;text-align:center">
+                  <div style="font-size:10px;color:#888">Prime annuelle</div>
+                  <div style="font-size:15px;font-weight:800;color:{RED}">1 500 FCFA</div>
+                  <div style="font-size:11px;color:{NAVY};font-weight:700"> 350 000 FCFA</div>
+                </div>
+                <div style="background:white;border-radius:8px;padding:10px;text-align:center">
+                  <div style="font-size:10px;color:#888">Prime annuelle</div>
+                  <div style="font-size:15px;font-weight:800;color:{RED}">2 000 FCFA</div>
+                  <div style="font-size:11px;color:{NAVY};font-weight:700"> 500 000 FCFA</div>
+                </div>
+              </div>
+            </div>""", unsafe_allow_html=True)
+
+            _nom_courtier = st.text_input(
+                "Courtier (nom ou sigle)",
+                value=st.session_state.get("f_courtier_nom",""),
+                placeholder="Ex: ATLANTIQUE COURTAGE, ABC Assurances...",
+                key="inp_courtier")
+            st.session_state["f_courtier_nom"] = _nom_courtier
+
+            # Logo courtier — Clearbit (auto) + fallback avatar initiales
+            if _nom_courtier and len(_nom_courtier.strip()) >= 2:
+                _slug_crt  = _nom_courtier.strip().lower().replace(" ","").replace(".","")                                       .replace("-","").replace("'","").replace(",","")
+                _logo_url  = f"https://logo.clearbit.com/{_slug_crt}.com"
+                _logo_q    = _nom_courtier.strip().replace(" ", "+")
+                _fallback  = f"https://ui-avatars.com/api/?name={_logo_q}&background=003366&color=fff&size=200&bold=true&font-size=0.38&format=png"
+                st.markdown(f"""
+                <div style="text-align:center;margin:8px 0 14px">
+                  <img src="{_logo_url}"
+                       onerror="this.onerror=null;this.src='{_fallback}'"
+                       style="height:72px;object-fit:contain;border-radius:10px;
+                              box-shadow:0 2px 12px rgba(0,0,0,.12)"
+                       alt="{_nom_courtier}"/>
+                  <div style="font-size:11px;color:#888;margin-top:5px">{_nom_courtier}</div>
+                </div>""", unsafe_allow_html=True)
+
+            if st.button("▶ Commencer la saisie BIA", type="primary",
+                         use_container_width=True, key="pa_go"):
+                st.session_state["bia_prod"]    = "PA0"
+                st.session_state["bia_step"]    = 2
+                st.session_state["f_peri"]      = "Annuelle"
+                st.session_state["f_gar"]       = "Avec garantie décès"
+                st.session_state["f_duree"]     = 1
+                st.session_state["f_code_appo"] = _nom_courtier
+                st.session_state["f_nom_appo"]  = _nom_courtier
+                st.rerun()
+
+            # Si BIA pas encore démarré  arrêter ici
+            if st.session_state.get("bia_prod") != "PA0":
+                st.stop()
+
+            prod      = next(p for p in PRODUITS if p["code"] == "PA0")
+            gc        = RED
+            step      = st.session_state.get("bia_step", 2)
+            is_avigbo = is_vigninou = is_deces = is_epargne = False
+
+        else:
+            # ── NON-COURTIER : sélection normale des produits ────────────────────
+            # Les cartes produit ne sont affichées que tant qu'aucun produit n'est
+            # retenu. Les laisser visibles ensuite oblige React à démonter puis
+            # remonter tout l'arbre des expanders, ce qui déclenche le
+            # NotFoundError (removeChild) observé sur Streamlit Cloud.
+            _prod_choisi = st.session_state.get("bia_prod")
+
+            if not _prod_choisi:
+                section("Étape 1 — Sélection du produit","AFG ASSURANCES BÉNIN VIE")
+            else:
+                _pn = next((p["nom"] for p in PRODUITS if p["code"] == _prod_choisi),
+                           _prod_choisi)
+                _cs1, _cs2 = st.columns([4,1])
+                _cs1.markdown(
+                    f"<div style='font-size:12px;color:#667;padding-top:6px'>"
+                    f"Produit retenu : <b style='color:{NAVY}'>{_pn}</b></div>",
+                    unsafe_allow_html=True)
+                _cs2.button("Changer", key="chg_prod", use_container_width=True,
+                            on_click=_reset_prod)
+
+            if not _prod_choisi:
+              with st.expander("🛡️ Groupe 1 — Décès & Vie", expanded=True):
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    st.markdown(f"""<div style="border:2px solid {RED}44;border-radius:10px;
+                      padding:12px 14px;margin-bottom:6px">
+                      <span style="background:{RED};color:white;font-size:9px;font-weight:700;
+                            padding:2px 7px;border-radius:3px">221</span>
+                      <div style="font-size:13px;font-weight:700;margin-top:6px;color:{NAVY}">ASSURTOUS AVIGBO</div>
+                      <div style="font-size:11px;color:#666;margin-top:3px">Décès · Barème fixe</div>
+                      <div style="font-size:10px;color:#888;margin-top:5px;line-height:1.7">
+                        100 F/mois  Capital 100 000 F  (unique : 1 000 F)<br>
+                        200 F/mois  Capital 200 000 F  (unique : 2 000 F)<br>
+                        300 F/mois  Capital 300 000 F  (unique : 3 000 F)
+                      </div></div>""", unsafe_allow_html=True)
+                    st.button("Choisir AVIGBO (221)", key="bp_221",
+                              use_container_width=True,
+                              on_click=_pick_prod, args=("221",))
+                with col_b:
+                    st.markdown(f"""<div style="border:2px solid {RED}44;border-radius:10px;
+                      padding:12px 14px;margin-bottom:6px">
+                      <span style="background:{RED};color:white;font-size:9px;font-weight:700;
+                            padding:2px 7px;border-radius:3px">220</span>
+                      <div style="font-size:13px;font-weight:700;margin-top:6px;color:{NAVY}">ASSURTOUS VIGNINOU</div>
+                      <div style="font-size:11px;color:#666;margin-top:3px">Décès · Durée max 12 mois · Barème fixe</div>
+                      <div style="font-size:10px;color:#888;margin-top:5px;line-height:1.7">
+                        400 F/mois  Capital 500 000 F  (unique : 48 000 F)<br>
+                        800 F/mois  Capital 1 000 000 F (unique : 96 000 F)<br>
+                        1 200 F/mois  Capital 1 500 000 F (unique : 144 000 F)
+                      </div></div>""", unsafe_allow_html=True)
+                    st.button("Choisir VIGNINOU (220)", key="bp_220",
+                              use_container_width=True,
+                              on_click=_pick_prod, args=("220",))
+
+            # Prévoyance Auto (PA0) — visible pour PDG et ACTUAIRE
+            if not _prod_choisi:
+              with st.expander("🚗 Prévoyance Auto (PA0)", expanded=False):
+                st.markdown(f"""<div style="border:2px solid {RED}44;border-radius:10px;
+                  padding:12px 14px;margin-bottom:6px">
+                  <span style="background:{RED};color:white;font-size:9px;font-weight:700;
+                        padding:2px 7px;border-radius:3px">PA0</span>
+                  <div style="font-size:13px;font-weight:700;margin-top:6px;color:{NAVY}">Prévoyance Auto</div>
+                  <div style="font-size:11px;color:#666;margin-top:3px">Décès · Durée 1 an · Barème fixe</div>
+                  <div style="font-size:10px;color:#888;margin-top:5px;line-height:1.7">
+                    500 FCFA/an  Capital 100 000 FCFA<br>
+                    1 000 FCFA/an  Capital 225 000 FCFA<br>
+                    1 500 FCFA/an  Capital 350 000 FCFA<br>
+                    2 000 FCFA/an  Capital 500 000 FCFA
+                  </div></div>""", unsafe_allow_html=True)
+                st.button("Choisir Prévoyance Auto (PA0)", key="bp_PA0",
+                          use_container_width=True,
+                          on_click=_pick_prod, args=("PA0",))
+
+            if not _prod_choisi:
+              with st.expander("💰 Groupe 2 — Épargne & Capitalisation", expanded=True):
+                st.markdown(f"""<div style="border:2px solid {GREEN}44;border-radius:10px;
+                  padding:12px 14px;margin-bottom:6px">
+                  <span style="background:{GREEN};color:white;font-size:9px;font-weight:700;
+                        padding:2px 7px;border-radius:3px">EP0</span>
+                  <div style="font-size:13px;font-weight:700;margin-top:6px;color:{NAVY}">Épargne</div>
+                  <div style="font-size:11px;color:#666;margin-top:3px">Épargne vie · Périodicité libre · Capital calculé à la souscription</div>
+                  <div style="font-size:10px;color:#888;margin-top:5px">
+                    Périodicités : Journalière · Hebdomadaire · Mensuelle · Trimestrielle · Semestrielle · Annuelle · Unique<br>
+                    Chargements : 1% acquisition + 0.5% gestion · Taux technique : 3.5%
+                  </div></div>""", unsafe_allow_html=True)
+                st.button("Choisir Épargne", key="bp_EP0",
+                          use_container_width=True,
+                          on_click=_pick_prod, args=("EP0",))
+
+            if "bia_prod" not in st.session_state:
+                alert("Sélectionnez un produit pour afficher le formulaire BIA.","info")
+                st.stop()
+
+            prod = next((p for p in PRODUITS if p["code"]==st.session_state.get("bia_prod")), None)
+            if not prod:
+                st.session_state.pop("bia_prod", None); st.rerun()
+
+            gc        = GC.get(prod["grp"], BLUE)
+            step      = st.session_state.get("bia_step", 2)
+            is_avigbo   = prod["code"] == "221"
+            is_vigninou = prod["code"] == "220"
+            is_deces    = prod["code"] in ("220", "221")
+            is_epargne  = prod["code"] == "EP0"
+
+            # Prévoyance Auto suit le parcours court en 3 étapes,
+            # identique à celui du courtier, y compris pour le PDG.
+            if prod["code"] == "PA0":
+                _is_crt_step = True
+                st.session_state.setdefault("f_peri",  "Annuelle")
+                st.session_state.setdefault("f_gar",   "Avec garantie décès")
+                st.session_state.setdefault("f_duree", 1)
+                if not st.session_state.get("f_courtier_nom"):
+                    st.session_state["f_courtier_nom"] = st.session_state.get(
+                        "f_nom_appo", "") or ""
+
+        # ── Parcours PA0 hors courtier : saisie de l'apporteur ───────────────────
+        if _is_crt_step and not _is_courtier_role:
+            _nc = st.text_input("Courtier ou apporteur",
+                                value=st.session_state.get("f_courtier_nom",""),
+                                placeholder="Nom ou sigle du distributeur",
+                                key="inp_crt_pdg")
+            st.session_state["f_courtier_nom"] = _nc
+            st.session_state["f_nom_appo"]     = _nc
+
+        # ── Logo courtier affiché en haut ────────────────────────────────────────
+        if _is_crt_step:
+            _crt_n = st.session_state.get("f_courtier_nom","")
+            if _crt_n and len(_crt_n) >= 3:
+                _logo_u = f"https://logo.clearbit.com/{_crt_n.lower().replace(' ','').replace('.','')+'.com'}"
+                _fallback_u = f"https://ui-avatars.com/api/?name={_crt_n.replace(' ','+')}&background=C0392B&color=fff&size=128&bold=true&format=png"
+                st.markdown(f"""
+                <div style="text-align:center;padding:10px 0 6px">
+                  <img src="{_logo_u}"
+                       onerror="this.onerror=null;this.src='{_fallback_u}'"
+                       style="height:68px;object-fit:contain;border-radius:10px;
+                              box-shadow:0 2px 14px rgba(0,0,0,.13)"
+                       alt="{_crt_n}"/>
+                  <div style="font-size:10px;color:#888;margin-top:4px;font-weight:600">{_crt_n}</div>
+                </div>""", unsafe_allow_html=True)
+
+        st.markdown(f"""<div style="background:{NAVY};border-radius:10px;padding:10px 16px;margin:10px 0;display:flex;align-items:center;justify-content:space-between">
+          <div><div style="color:rgba(255,255,255,.45);font-size:9px;letter-spacing:.1em">BIA — BULLETIN INDIVIDUEL D'ADHÉSION</div>
+          <div style="color:white;font-size:14px;font-weight:700">{prod['nom']}</div></div>
+          <span style="background:{gc};color:white;font-size:12px;font-weight:700;padding:5px 12px;border-radius:6px">{prod['code']}</span>
+        </div>""",unsafe_allow_html=True)
+
+        if st.button("↩️ Changer de produit",key="chg_p"):
+            st.session_state.pop("bia_prod",None); st.session_state.pop("bia_step",None); st.rerun()
+
+        # Étapes selon le type d'utilisateur
+        if _is_crt_step:
+            # Courtier PA0 : 4 étapes réelles  steps 2,3,5,7 (les autres sont skippés)
+            # Mapping step  numéro d'étape affiché
+            _crt_map = {2: (1,4,"Souscripteur"), 3: (2,4,"Bénéficiaires"),
+                        5: (3,4,"Contrat"),       7: (4,4,"Validation")}
+            _crt_num, _crt_tot, _crt_lbl = _crt_map.get(step, (1,4,""))
+            _prog_val = min(max((_crt_num - 1) / (_crt_tot - 1), 0.0), 1.0)
+            st.progress(_prog_val, text=f"Étape {_crt_num}/{_crt_tot} — {_crt_lbl}")
+        else:
+            SLBL={2:"Identification",3:"Souscripteur",4:"Assuré",5:"Contrat",6:"Médical",7:"Validation"}
+            _prog_gen = min(max((step-2)/5, 0.0), 1.0)
+            st.progress(_prog_gen, text=f"Étape {step-1}/6 — {SLBL.get(step,'')}")
+        st.markdown("")
+
+        def ti(k,lbl,ph="",t="text"):
+            st.session_state[k]=st.text_input(lbl,value=st.session_state.get(k,""),placeholder=ph,key=f"i_{k}")
+        def si(k,lbl,opts):
+            cur=st.session_state.get(k,opts[0]); idx=opts.index(cur) if cur in opts else 0
+            st.session_state[k]=st.selectbox(lbl,opts,index=idx,key=f"s_{k}")
+
+        if step==2:
+            if _is_crt_step:
+                # ── COURTIER PA0 — Étape 1/3 : Souscripteur ─────────────────────
+                section("Étape 1 / 3 — Souscripteur","PRÉVOYANCE AUTO · INFORMATIONS PERSONNELLES")
+
+                # Afficher logo courtier en haut de chaque étape
+                _crt_n2 = st.session_state.get("f_courtier_nom","")
+                if _crt_n2:
+                    _s2_slug = _crt_n2.strip().lower().replace(" ","").replace(".","").replace("-","")
+                    _s2_logo = f"https://logo.clearbit.com/{_s2_slug}.com"
+                    _s2_fbk  = f"https://ui-avatars.com/api/?name={_crt_n2.replace(' ','+')}&background=003366&color=fff&size=80&bold=true&format=png"
+                    st.image(_s2_logo, width=55)
+
+                # Champs souscripteur (sans adresse, agence, code/nom apporteur)
+                c1,c2,c3 = st.columns([1,2,2])
+                with c1: si("f_c_tit","Civilité *",["","M.","Mme","Mlle"])
+                with c2: ti("f_c_nom","Nom *","NOM EN MAJUSCULES")
+                with c3: ti("f_c_prn","Prénoms *","Prénoms")
+
+                c4,c5 = st.columns(2)
+                with c4:
+                    _ddn_v = st.session_state.get("f_c_ddn", date(1985,1,1))
+                    if isinstance(_ddn_v, str):
+                        try: _ddn_v = date.fromisoformat(_ddn_v)
+                        except: _ddn_v = date(1985,1,1)
+                    st.session_state["f_c_ddn"] = st.date_input(
+                        "Date de naissance *", value=_ddn_v,
+                        min_value=date(1920,1,1), max_value=today, key="ddn_pa2")
+                with c5:
+                    ti("f_c_tel","Téléphone *","+229 97…")
+
+                # Valeurs par défaut silencieuses
+                if not st.session_state.get("f_c_nat"):
+                    st.session_state["f_c_nat"] = "Béninoise"
+                st.session_state["f_ass_meme"] = True
+                st.session_state["f_bc"]       = True
+
+                st.markdown("")
+                b1,b2 = st.columns(2)
+                if b1.button("← Retour", key="ret2_pa"):
+                    st.session_state.pop("bia_prod",None)
+                    st.session_state.pop("bia_step",None); st.rerun()
+                if b2.button("Étape suivante ▶", type="primary", key="nxt2_pa"):
+                    _errs = []
+                    if not st.session_state.get("f_c_nom","").strip():  _errs.append("Le nom est obligatoire.")
+                    if not st.session_state.get("f_c_tel","").strip():  _errs.append("Le téléphone est obligatoire.")
+                    if _errs:
+                        for _e in _errs: st.error(_e)
+                    else:
+                        st.session_state["bia_step"] = 5; st.rerun()
+            else:
+                section("Étape 2 — Identification & Agence")
+                c1,c2,c3=st.columns(3)
+            with c1: si("f_agence","Agence",AGENCES)
+            with c2: ti("f_code_appo","Code apporteur","Ex : AFG001")
+            with c3: ti("f_nom_appo","Nom apporteur")
+            c4,c5=st.columns(2)
+            with c4: ti("f_realis","Réalisateur",user["nom"])
+            with c5: si("f_deja","Déjà assuré AFGVie ?",["Non","Oui"])
+            if st.session_state.get("f_deja")=="Oui": ti("f_num_ct","N° contrat existant")
+            if st.button("Suivant ▶",type="primary"): st.session_state["bia_step"]=3; st.rerun()
+
+        elif step==3:
+            if _is_crt_step:
+                # COURTIER PA0 — Étape 2/4 : Bénéficiaires (optionnel)
+                section("Étape 2 / 4 — Bénéficiaires","OPTIONNEL — vous pouvez passer cette étape")
+                st.info("Les informations bénéficiaires sont optionnelles pour ce produit.")
+                section("Bénéficiaires")
+                _bc_opts = ["Oui","Non"]
+                _cur_bc  = "Oui" if st.session_state.get("f_bc", True) else "Non"
+                _bc_sel  = st.radio("Le conjoint est bénéficiaire ?",
+                                    _bc_opts, horizontal=True,
+                                    index=_bc_opts.index(_cur_bc), key="bc_r_pa")
+                st.session_state["f_bc"] = (_bc_sel == "Oui")
+                ti("f_ba","Autres bénéficiaires (nom, lien de parenté)","Ex: Jean MARTIN, fils")
+                st.markdown("")
+                b1,b2,b3 = st.columns(3)
+                if b1.button("← Retour", key="ret3_pa"):
+                    st.session_state["bia_step"] = 2; st.rerun()
+                if b3.button("Suivant ▶", type="primary", key="nxt3_pa"):
+                    st.session_state["bia_step"] = 4; st.rerun()
+                if b2.button("Passer cette étape", key="skip3_pa"):
+                    st.session_state["f_bc"] = True
+                    st.session_state["bia_step"] = 4; st.rerun()
+            else:
+                section("Étape 3 — Souscripteur / Contractant")
+                c1,c2,c3=st.columns([1,2,2])
+            with c1: si("f_c_tit","Civilité *",["","M.","Mme","Mlle"])
+            with c2: ti("f_c_nom","Nom *","NOM (majuscules)")
+            with c3: ti("f_c_prn","Prénoms *")
+            c4,c5,c6=st.columns(3)
+            with c4:
+                cur_d=st.session_state.get("f_c_ddn",date(1985,1,1))
+                if isinstance(cur_d,str):
+                    try: cur_d=date.fromisoformat(cur_d)
+                    except: cur_d=date(1985,1,1)
+                st.session_state["f_c_ddn"]=st.date_input("Date naissance *",value=cur_d,min_value=date(1930,1,1),max_value=today,key="ddn_c")
+            with c5: ti("f_c_lieu","Lieu naissance *","Cotonou")
+            with c6: ti("f_c_nat","Nationalité","Béninoise")
+            if not st.session_state.get("f_c_nat"): st.session_state["f_c_nat"]="Béninoise"
+            c7,c8,c9=st.columns(3)
+            with c7: si("f_c_mat","Sit. matrimoniale",["","Célibataire","Marié(e)","Divorcé(e)","Veuf(ve)"])
+            with c8: ti("f_c_prof","Profession *")
+            with c9: ti("f_c_adr","Adresse *","Quartier, rue")
+            c10,c11,c12=st.columns(3)
+            with c10: ti("f_c_tel","Tél. cel. *","+229 97…")
+            with c11: ti("f_c_wapp","WhatsApp *","+229 97…")
+            with c12: ti("f_c_npi","N°NPI / Passeport *","BJ123456")
+            c13,c14=st.columns(2)
+            with c13: ti("f_c_eml","Email","exemple@mail.com")
+            with c14: ti("f_c_bp","Boîte postale","01 BP…")
+            st.session_state["f_ass_meme"]=st.checkbox("✓ L'assuré(e) est identique au souscripteur",value=st.session_state.get("f_ass_meme",True))
+            b1,b2=st.columns(2)
+            if b1.button("← Retour"): st.session_state["bia_step"]=2; st.rerun()
+            if b2.button("Suivant ▶",type="primary"):
+                if not st.session_state.get("f_c_nom","").strip(): st.error("Nom obligatoire")
+                elif not st.session_state.get("f_c_prn","").strip(): st.error("Prénom obligatoire")
+                else: st.session_state["bia_step"]=4; st.rerun()
+
+        elif step==4:
+            if _is_crt_step:
+                # COURTIER PA0 — Étape 3/4 : Caractéristiques du contrat
+                # Rediriger vers step==5 où est défini le bloc PA0 contrat
+                st.session_state["bia_step"] = 5; st.rerun()
+            if not _is_crt_step:
+                section("Étape 4 — Assuré(e) & Bénéficiaires")
+            if st.session_state.get("f_ass_meme",True):
+                st.success(f"✅ Assuré(e) = {st.session_state.get('f_c_tit','')} {st.session_state.get('f_c_nom','').upper()} {st.session_state.get('f_c_prn','')} — reprises du souscripteur.")
+            else:
+                c1,c2,c3=st.columns([1,2,2])
+                with c1: si("f_a_tit","Civilité",["","M.","Mme","Mlle"])
+                with c2:
+                    st.session_state["f_a_nom"]=st.text_input("Nom *",value=st.session_state.get("f_a_nom",""),key="an")
+                with c3:
+                    st.session_state["f_a_prn"]=st.text_input("Prénoms *",value=st.session_state.get("f_a_prn",""),key="ap")
+                c4,c5=st.columns(2)
+                with c4:
+                    cur_a=st.session_state.get("f_a_ddn",date(1990,1,1))
+                    if isinstance(cur_a,str):
+                        try: cur_a=date.fromisoformat(cur_a)
+                        except: cur_a=date(1990,1,1)
+                    st.session_state["f_a_ddn"]=st.date_input("Date naissance",value=cur_a,key="ddn_a")
+                with c5:
+                    st.session_state["f_a_npi"]=st.text_input("NPI",value=st.session_state.get("f_a_npi",""),key="ani")
+            section("Bénéficiaires")
+            st.session_state["f_bc"]=st.checkbox("Mon conjoint, mes enfants nés et à naître, à défaut mes ayants droits",value=st.session_state.get("f_bc",True))
+            st.session_state["f_ba"]=st.text_input("Autres bénéficiaires",value=st.session_state.get("f_ba",""),key="ba_t")
+            b1,b2=st.columns(2)
+            if b1.button("← Retour"): st.session_state["bia_step"]=3; st.rerun()
+            if b2.button("Suivant ▶",type="primary"): st.session_state["bia_step"]=5; st.rerun()
+
+        elif step==5:
+
+            # ── Date d'effet commune ──────────────────────────────────────────────
+            cur_e = st.session_state.get("f_deff", today)
+            if isinstance(cur_e, str):
+                try:    cur_e = date.fromisoformat(cur_e)
+                except: cur_e = today
+
+            # ══════════════════════════════════════════════════════════════════════
+            # CAS 1 — Courtier PA0 : Étape 3/4 — Caractéristiques du contrat
+            # ══════════════════════════════════════════════════════════════════════
+            if _is_crt_step:
+                section("Étape 2 / 3 — Contrat","PRÉVOYANCE AUTO · DATE · PRIME · MODE RÈGLEMENT")
+                # Logo courtier en haut
+                _crt_n5 = st.session_state.get("f_courtier_nom","")
+                if _crt_n5:
+                    _s5_slug = _crt_n5.strip().lower().replace(" ","").replace(".","").replace("-","")
+                    _s5_fbk  = f"https://ui-avatars.com/api/?name={_crt_n5.replace(' ','+')}&background=003366&color=fff&size=80&bold=true&format=png"
+                    st.image("https://logo.clearbit.com/" + _s5_slug + ".com", width=60)
+                from dateutil.relativedelta import relativedelta
+
+                # Prime annuelle — sélection parmi les 4 tranches
+                st.markdown(f"<div style='font-weight:700;color:{NAVY};margin-bottom:4px'>Prime annuelle *</div>",
+                            unsafe_allow_html=True)
+                _pa_opts   = {"500 FCFA":(500,100_000), "1 000 FCFA":(1000,225_000),
+                              "1 500 FCFA":(1500,350_000), "2 000 FCFA":(2000,500_000)}
+                _pa_labels = list(_pa_opts.keys())
+                _cur_lbl   = st.session_state.get("f_pa_lbl", _pa_labels[0])
+                if _cur_lbl not in _pa_labels: _cur_lbl = _pa_labels[0]
+                _pa_sel    = st.radio("Prime", _pa_labels,
+                                      index=_pa_labels.index(_cur_lbl),
+                                      horizontal=True, key="pa_prime_r5",
+                                      label_visibility="collapsed")
+                st.session_state["f_pa_lbl"]  = _pa_sel
+                _pa_prime, _pa_capital        = _pa_opts[_pa_sel]
+                st.session_state["f_coti"]    = _pa_prime
+                st.session_state["f_cap"]     = _pa_capital
+                st.session_state["f_peri"]    = "Annuelle"
+                st.session_state["f_duree"]   = 1
+                st.session_state["f_gar"]     = "Avec garantie décès"
+
+                # Badge prime / capital
+                st.markdown(f"""
+                <div style="background:linear-gradient(135deg,{RED},{AMBER});border-radius:10px;
+                     padding:14px 20px;margin:10px 0;display:flex;gap:28px;align-items:center">
+                  <div>
+                    <div style="color:rgba(255,255,255,.7);font-size:9px;text-transform:uppercase">Prime annuelle</div>
+                    <div style="color:white;font-size:22px;font-weight:800">{_pa_prime:,} FCFA</div>
+                  </div>
+                  <div style="background:rgba(255,255,255,.25);width:1px;height:48px"></div>
+                  <div>
+                    <div style="color:rgba(255,255,255,.7);font-size:9px;text-transform:uppercase">Capital garanti décès</div>
+                    <div style="color:white;font-size:22px;font-weight:800">{_pa_capital:,} FCFA</div>
+                  </div>
+                </div>""", unsafe_allow_html=True)
+
+                # Date d'effet + terme automatique
+                c1, c2 = st.columns(2)
+                with c1:
+                    _d_eff = st.date_input("Date d'effet *", value=cur_e, key="eff_d_pa")
+                    st.session_state["f_deff"] = _d_eff
+                _deff_pa = _d_eff if isinstance(_d_eff, date) else today
+                try:    _terme_pa = _deff_pa + relativedelta(years=1)
+                except: _terme_pa = _deff_pa.replace(year=_deff_pa.year+1)
+                st.session_state["f_terme_auto"] = str(_terme_pa)
+                with c2:
+                    st.markdown(f"""
+                    <div style="background:{GREEN}12;border:1.5px solid {GREEN};border-radius:8px;
+                         padding:10px 14px;margin-top:4px">
+                      <div style="font-size:9px;color:#888;text-transform:uppercase">Date terme (auto)</div>
+                      <div style="font-size:18px;font-weight:800;color:{NAVY}">{_terme_pa.strftime("%d/%m/%Y")}</div>
+                      <div style="font-size:10px;color:{GREEN}">Date d'effet + 1 an</div>
+                    </div>""", unsafe_allow_html=True)
+
+                # Mode de règlement
+                st.markdown("---")
+                st.markdown(f"<div style='font-weight:700;color:{NAVY};margin-bottom:4px'>Mode de règlement *</div>",
+                            unsafe_allow_html=True)
+                _modes   = ["Mobile Monnaie","Par chèque","Par virement bancaire","Par Espèce"]
+                _cur_m   = st.session_state.get("f_mode", _modes[0])
+                if _cur_m not in _modes: _cur_m = _modes[0]
+                st.session_state["f_mode"] = st.radio(
+                    "Mode", _modes, horizontal=True,
+                    index=_modes.index(_cur_m), key="mode_r_pa5",
+                    label_visibility="collapsed")
+                _refs = {"Mobile Monnaie":"N° Téléphone Mobile Money",
+                         "Par chèque":"N° Chèque",
+                         "Par virement bancaire":"N° Compte bancaire",
+                         "Par Espèce":"Référence reçu"}
+                st.session_state["f_mref"] = st.text_input(
+                    _refs.get(st.session_state["f_mode"],"Référence"),
+                    value=st.session_state.get("f_mref",""),
+                    key="mref_pa5")
+
+                st.markdown("")
+                b1, b2 = st.columns(2)
+                if b1.button("← Retour", key="ret5_pa"):
+                    st.session_state["bia_step"] = 3; st.rerun()
+                if b2.button("Suivant ▶", type="primary", key="nxt5_pa"):
+                    st.session_state["bia_step"] = 7; st.rerun()  #  Validation
+
+            # ══════════════════════════════════════════════════════════════════════
+            # CAS 2 — Non-courtier : produits AVIGBO / VIGNINOU / Épargne
+            # ══════════════════════════════════════════════════════════════════════
+            else:
+                section("Étape 5 — Caractéristiques du Contrat")
+
+                # ── AVIGBO (221) ─────────────────────────────────────────────────
+                if prod["code"] == "221":
+                    alert("AVIGBO : capital et cotisation unique déterminés automatiquement.","info")
+                    opt_map = {
+                        "100 F/mois  Capital 100 000 F":  (100,  100_000,  1_000),
+                        "200 F/mois  Capital 200 000 F":  (200,  200_000,  2_000),
+                        "300 F/mois  Capital 300 000 F":  (300,  300_000,  3_000),
+                    }
+                    opts_l = list(opt_map.keys())
+                    cur_o  = st.session_state.get("f_avigbo_opt", opts_l[0])
+                    if cur_o not in opts_l: cur_o = opts_l[0]
+                    sel_o  = st.radio("Barème *", opts_l,
+                                      index=opts_l.index(cur_o), key="avigbo_opt_r5")
+                    st.session_state["f_avigbo_opt"] = sel_o
+                    pm, cg, pu = opt_map[sel_o]
+
+                    c1,c2 = st.columns(2)
+                    with c1:
+                        pav = ["Mensuelle","Unique"]
+                        cpv = st.session_state.get("f_peri","Mensuelle")
+                        if cpv not in pav: cpv = "Mensuelle"
+                        st.session_state["f_peri"] = st.radio("Périodicité *",pav,
+                            horizontal=True,index=pav.index(cpv),key="peri_av_r5")
+                    with c2:
+                        st.session_state["f_deff"] = st.date_input("Date d'effet *",
+                            value=cur_e, key="eff_av")
+                    coti_a = pm if st.session_state["f_peri"]=="Mensuelle" else pu
+                    st.session_state["f_coti"] = coti_a
+                    st.session_state["f_cap"]  = cg
+                    st.markdown(f"""
+                    <div style="background:{GREEN}12;border:1.5px solid {GREEN};border-radius:10px;
+                         padding:12px 16px;margin:10px 0;display:grid;
+                         grid-template-columns:1fr 1fr 1fr;gap:12px">
+                      <div><div style="font-size:9px;color:#888">Cotisation</div>
+                           <div style="font-weight:700">{coti_a:,} FCFA/{st.session_state["f_peri"].lower()}</div></div>
+                      <div><div style="font-size:9px;color:#888">Capital décès</div>
+                           <div style="font-weight:700;color:{RED}">{cg:,} FCFA</div></div>
+                      <div><div style="font-size:9px;color:#888">Garantie</div>
+                           <div style="font-weight:700">Avec garantie décès</div></div>
+                    </div>""", unsafe_allow_html=True)
+                    st.session_state["f_gar"] = "Avec garantie décès"
+                    st.session_state["f_duree"] = st.number_input("Durée (ans) *",
+                        min_value=1, max_value=40,
+                        value=int(st.session_state.get("f_duree",5)), key="dur_av5")
+
+                # ── VIGNINOU (220) ───────────────────────────────────────────────
+                elif prod["code"] == "220":
+                    alert("VIGNINOU : durée maximale 12 mois.","warn")
+                    opt_v = {
+                        "400 F/mois  Capital 500 000 F":       (400,  500_000,   48_000),
+                        "800 F/mois  Capital 1 000 000 F":     (800,  1_000_000, 96_000),
+                        "1 200 F/mois  Capital 1 500 000 F":   (1200, 1_500_000, 144_000),
+                    }
+                    opts_v = list(opt_v.keys())
+                    cur_v  = st.session_state.get("f_vigninou_opt", opts_v[0])
+                    if cur_v not in opts_v: cur_v = opts_v[0]
+                    sel_v  = st.radio("Barème *", opts_v,
+                                      index=opts_v.index(cur_v), key="vign_opt_r5")
+                    st.session_state["f_vigninou_opt"] = sel_v
+                    pmv, cgv, puv = opt_v[sel_v]
+
+                    c1,c2,c3 = st.columns(3)
+                    with c1:
+                        pvv = ["Mensuelle","Unique"]
+                        cpvv = st.session_state.get("f_peri","Mensuelle")
+                        if cpvv not in pvv: cpvv = "Mensuelle"
+                        st.session_state["f_peri"] = st.radio("Périodicité *",pvv,
+                            horizontal=True,index=pvv.index(cpvv),key="peri_v_r5")
+                    with c2:
+                        dv = st.number_input("Durée (mois, max 12) *",min_value=1,max_value=12,
+                            value=int(st.session_state.get("f_duree_mois_v",12)),key="dur_v_m5")
+                        st.session_state["f_duree_mois_v"] = dv
+                        st.session_state["f_duree"] = 1
+                    with c3:
+                        st.session_state["f_deff"] = st.date_input("Date d'effet *",
+                            value=cur_e, key="eff_vg")
+                    cotiv = pmv if st.session_state["f_peri"]=="Mensuelle" else puv
+                    st.session_state["f_coti"] = cotiv
+                    st.session_state["f_cap"]  = cgv
+                    st.session_state["f_gar"]  = "Avec garantie décès"
+
+                # ── ÉPARGNE (EP0) ────────────────────────────────────────────────
+                elif prod["code"] == "EP0":
+                    peri_ep_opts = ["Journalière","Hebdomadaire","Mensuelle",
+                                    "Trimestrielle","Semestrielle","Annuelle","Unique"]
+                    c1,c2,c3 = st.columns(3)
+                    with c1:
+                        st.session_state["f_coti"] = st.number_input(
+                            "Cotisation *", min_value=1000, step=500,
+                            value=int(st.session_state.get("f_coti",5000)), key="coti_ep5")
+                    with c2:
+                        st.session_state["f_duree"] = st.number_input(
+                            "Durée (ans) *", min_value=1, max_value=40,
+                            value=int(st.session_state.get("f_duree",10)), key="dur_ep5")
+                    with c3:
+                        st.session_state["f_deff"] = st.date_input("Date d'effet *",
+                            value=cur_e, key="eff_ep5")
+                    cur_pep = st.session_state.get("f_peri","Mensuelle")
+                    if cur_pep not in peri_ep_opts: cur_pep = "Mensuelle"
+                    st.session_state["f_peri"] = st.selectbox(
+                        "Périodicité *", peri_ep_opts,
+                        index=peri_ep_opts.index(cur_pep), key="peri_ep_s5")
+
+                    # Capital affiché (simple lookup, pas de calcul actuariel ici)
+                    P_ep  = float(st.session_state.get("f_coti",5000))
+                    n_ep  = int(st.session_state.get("f_duree",10))
+                    pep   = st.session_state.get("f_peri","Mensuelle")
+                    res_ep = calcul_capital_epargne(P_ep, pep, n_ep)
+                    cap_ep = res_ep["capital_brut"]
+                    st.session_state["f_cap"] = int(cap_ep)
+
+                    st.markdown(f"""
+                    <div style="background:{GREEN}10;border:1.5px solid {GREEN};border-radius:10px;
+                         padding:12px 16px;margin:10px 0;text-align:center">
+                      <div style="font-size:10px;color:#888;text-transform:uppercase">Capital au terme estimé</div>
+                      <div style="font-size:24px;font-weight:800;color:{GREEN}">{cap_ep:,.0f} FCFA</div>
+                      <div style="font-size:10px;color:#888">Taux technique 3,5% · α=1% · β=0,5%</div>
+                    </div>""", unsafe_allow_html=True)
+
+                # ── Mode de règlement (commun AVIGBO/VIGNINOU/EP0) ───────────────
+                st.markdown("---")
+                section("Mode de règlement")
+                m_o  = ["","Mobile Monnaie","Par chèque","Par virement bancaire","Par prélèvement sur salaire"]
+                cur_m = st.session_state.get("f_mode","")
+                st.session_state["f_mode"] = st.radio("Mode *", m_o, horizontal=True,
+                    index=m_o.index(cur_m) if cur_m in m_o else 0, key="mode_r_gen",
+                    format_func=lambda x:"— Choisir —" if x=="" else x)
+                if st.session_state["f_mode"]:
+                    _ref_gen = {"Mobile Monnaie":"N° Mobile Money",
+                                "Par chèque":"N° Chèque",
+                                "Par virement bancaire":"N° Compte/RIB",
+                                "Par prélèvement sur salaire":"N° Matricule"
+                                }.get(st.session_state["f_mode"],"Référence")
+                    st.session_state["f_mref"] = st.text_input(
+                        _ref_gen, value=st.session_state.get("f_mref",""),
+                        key="mref_gen5")
+
+                b1,b2 = st.columns(2)
+                if b1.button("← Retour", key="ret5_gen"):
+                    st.session_state["bia_step"] = 4; st.rerun()
+                if b2.button("Suivant ▶", type="primary", key="nxt5_gen"):
+                    st.session_state["bia_step"] = 6; st.rerun()
+
+        elif step==6:
+            # Courtier PA0 : pas de questionnaire médical  rediriger vers validation
+            if _is_crt_step:
+                st.session_state["bia_step"] = 7; st.rerun()
+            section("Étape 6 — Questionnaire Médical CIMA")
+            alert("Art. 18 CIMA : Toute fausse déclaration est sanctionnée par la nullité du contrat.","warn")
+            c1,c2,c3=st.columns(3)
+            st.session_state["f_taille"]=c1.text_input("Taille (m)",value=st.session_state.get("f_taille",""),placeholder="1.72",key="taille_t")
+            st.session_state["f_poids"]=c2.text_input("Poids (kg)",value=st.session_state.get("f_poids",""),placeholder="75",key="poids_t")
+            per_m=["Non","Oui"]
+            cur_pp=st.session_state.get("f_perte","Non")
+            st.session_state["f_perte"]=c3.radio("Grossi/maigri >5 kg (6 mois) ?",per_m,horizontal=True,index=per_m.index(cur_pp) if cur_pp in per_m else 0,key="perte_r")
+            MED=[
+                ("q1","Maladie ou séquelles — surveillance médicale requise (10 ans) ?",False),
+                ("q2","Arrêts de travail >21 jours (5 dernières années) ?",False),
+                ("q3","Traitement médical >21 jours (5 ans, hors contraception) ?",False),
+                ("q4","Actuellement en arrêt de travail sur prescription médicale ?",False),
+                ("q5","Traitement médical en cours (hors contraception) ?",False),
+                ("q6","Hospitalisation ou analyses dans les 12 prochains mois ?",True),
+                ("q7","Méningite, hépatite B, VIH/Sida, cancer ou maladie grave ?",False),
+            ]
+            for qk,qtxt,special in MED:
+                with st.container(border=True):
+                    qa,qb=st.columns([3.5,1])
+                    qa.markdown(f"<div style='font-size:11px;line-height:1.4'><b>{qk[1:]}.</b> {qtxt}</div>",unsafe_allow_html=True)
+                    r_o=["Non","Oui"]
+                    cur_r=st.session_state.get(f"f_{qk}","Non")
+                    st.session_state[f"f_{qk}"]=qb.radio("",r_o,horizontal=True,index=r_o.index(cur_r) if cur_r in r_o else 0,key=f"r_{qk}")
+                    if st.session_state[f"f_{qk}"]=="Oui":
+                        st.session_state[f"f_{qk}d"]=st.text_input("Précisions :",value=st.session_state.get(f"f_{qk}d",""),placeholder="Soyez précis(e)",key=f"d_{qk}")
+            b1,b2=st.columns(2)
+            if b1.button("← Retour"): st.session_state["bia_step"]=5; st.rerun()
+            if b2.button("Suivant ▶",type="primary"): st.session_state["bia_step"]=7; st.rerun()
+
+        elif step==7 or (step==5 and _is_crt_step):
+            if _is_crt_step:
+                section("Étape 3 / 3 — Signatures & Validation","PRÉVOYANCE AUTO")
+                # Logo courtier en haut de la page de validation
+                _crt_n7 = st.session_state.get("f_courtier_nom","")
+                if _crt_n7:
+                    _s7_slug = _crt_n7.strip().lower().replace(" ","").replace(".","").replace("-","")
+                    _s7_fbk  = f"https://ui-avatars.com/api/?name={_crt_n7.replace(' ','+')}&background=003366&color=fff&size=80&bold=true&format=png"
+                    st.image("https://logo.clearbit.com/" + _s7_slug + ".com", width=60)
+            else:
+                section("Étape 7 — Déclaration & Validation")
+
+            # ── Récapitulatif compact ─────────────────────────────────────────────
+            with st.expander("📋 Récapitulatif du contrat", expanded=True):
+                _cap_r = int(st.session_state.get("f_cap", 0))
+                _dur_r = st.session_state.get("f_duree", 1)
+                _dur_l = (f"{st.session_state.get('f_duree_mois_v',12)} mois"
+                          if is_vigninou else f"{_dur_r} an(s)")
+                _terme_r = st.session_state.get("f_terme_auto","")
+                st.markdown(f"""| Champ | Valeur |
+    |---|---|
+    |**Souscripteur**|{st.session_state.get('f_c_tit','')} {st.session_state.get('f_c_nom','').upper()} {st.session_state.get('f_c_prn','')}|
+    |**Produit**|{prod['nom']} — {prod['code']}|
+    |**Prime / Cotisation**|{int(st.session_state.get('f_coti',0)):,} FCFA / {st.session_state.get('f_peri','—')}|
+    |**Capital garanti**|**{_cap_r:,} FCFA**|
+    |**Date d'effet**|{ds(st.session_state.get('f_deff',today))}|
+    |**Date terme**|{_terme_r if _terme_r else _dur_l}|
+    |**Mode règlement**|{st.session_state.get('f_mode','—')}|
+    |**Apporteur / Courtier**|{st.session_state.get('f_nom_appo','—')}|""")
+
+            st.markdown("---")
+
+            # ── Déclaration ───────────────────────────────────────────────────────
+            st.markdown("""<div style="background:#f8f9fa;border:1px solid #ddd;border-radius:8px;
+                padding:12px;font-size:11px;line-height:1.8;margin-bottom:12px">
+                Je reconnais avoir reçu la notice d'information du produit et les conditions générales.
+                Je certifie exactes et sincères toutes les informations renseignées.
+                Conformément à l'article 18 du code CIMA, toute fausse déclaration
+                entraîne la nullité du contrat.</div>""", unsafe_allow_html=True)
+
+            st.session_state["f_dc"] = st.checkbox(
+                "☑ J'accepte les conditions de souscription *",
+                value=st.session_state.get("f_dc", False), key="chk_dc")
+            st.session_state["f_dd"] = st.checkbox(
+                "☑ J'accepte la politique de protection des données *",
+                value=st.session_state.get("f_dd", False), key="chk_dd")
+
+            st.markdown("---")
+
+            # ── Signatures ────────────────────────────────────────────────────────
+            section("Signatures")
+            st.markdown(f"""
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:10px 0">
+              <div style="border:1.5px dashed #888;border-radius:8px;padding:14px;
+                   min-height:90px;text-align:center;background:#fafafa">
+                <div style="font-size:10px;color:#888;font-weight:600;text-transform:uppercase;
+                     margin-bottom:4px">Signature du souscripteur</div>
+                <div style="font-size:11px;color:{NAVY};font-weight:700;margin-top:8px">
+                  {st.session_state.get('f_c_tit','')} {st.session_state.get('f_c_nom','').upper()}
+                  {st.session_state.get('f_c_prn','')}
+                </div>
+              </div>
+              <div style="border:1.5px dashed #888;border-radius:8px;padding:14px;
+                   min-height:90px;text-align:center;background:#fafafa">
+                <div style="font-size:10px;color:#888;font-weight:600;text-transform:uppercase;
+                     margin-bottom:4px">Cachet & Signature</div>
+                <div style="font-size:11px;color:{NAVY};font-weight:700;margin-top:8px">
+                  {st.session_state.get('f_nom_appo','AFG Assurances Bénin Vie')}
+                </div>
+              </div>
+            </div>""", unsafe_allow_html=True)
+
+            # Upload signature souscripteur (optionnel)
+            _sig_file = st.file_uploader(
+                "📎 Joindre la signature du souscripteur (image optionnelle)",
+                type=["png","jpg","jpeg","pdf"],
+                key="sig_upload")
+            if _sig_file is not None:
+                st.success(f"✅ Fichier joint : {_sig_file.name}")
+                st.session_state["f_sig_file"] = _sig_file.name
+
+            st.markdown("---")
+
+            # ── Statut & Observations ─────────────────────────────────────────────
+            c1, c2 = st.columns(2)
+            stat_o  = ["Brouillon","En cours","Validé"]
+            cur_st  = st.session_state.get("f_stat", "Brouillon")
+            st.session_state["f_stat"] = c1.selectbox(
+                "Statut", stat_o,
+                index=stat_o.index(cur_st) if cur_st in stat_o else 0,
+                key="stat_s")
+            st.session_state["f_obs"] = c2.text_input(
+                "Observations", value=st.session_state.get("f_obs",""),
+                key="obs_t")
+
+
+            def save_bia(statut_ov=None):
+                ass = st.session_state.get("f_ass_meme", True)
+                _crt_n = st.session_state.get("f_courtier_nom", "").strip()
+                _num_bia = gen_bia(_crt_n) if (_crt_n and prod["code"] == "PA0") else gen_bia()
+                st.session_state["_last_bia_num"] = _num_bia
+                data = {
+                    "numero_bia":       _num_bia,
+                    "date_saisie":      today.isoformat(),
+                    "saisi_par":        user["nom"],
+                    "agence":           st.session_state.get("f_agence",""),
+                    "code_apporteur":   st.session_state.get("f_code_appo",""),
+                    "nom_apporteur":    st.session_state.get("f_nom_appo",""),
+                    "realisateur":      st.session_state.get("f_realis",""),
+                    "deja_assure":      st.session_state.get("f_deja","Non"),
+                    "num_ct_exist":     st.session_state.get("f_num_ct",""),
+                    "c_titre":          st.session_state.get("f_c_tit",""),
+                    "c_nom":            st.session_state.get("f_c_nom","").upper().strip(),
+                    "c_prenom":         st.session_state.get("f_c_prn","").strip(),
+                    "c_ddn":            str(st.session_state.get("f_c_ddn", date(1985,1,1))),
+                    "c_lieu":           st.session_state.get("f_c_lieu",""),
+                    "c_nat":            st.session_state.get("f_c_nat","Béninoise"),
+                    "c_mat":            st.session_state.get("f_c_mat",""),
+                    "c_prof":           st.session_state.get("f_c_prof",""),
+                    "c_adr":            st.session_state.get("f_c_adr",""),
+                    "c_bp":             st.session_state.get("f_c_bp",""),
+                    "c_email":          st.session_state.get("f_c_eml",""),
+                    "c_wapp":           st.session_state.get("f_c_wapp",""),
+                    "c_tel":            st.session_state.get("f_c_tel",""),
+                    "c_fixe":           st.session_state.get("f_c_fixe",""),
+                    "c_npi":            st.session_state.get("f_c_npi",""),
+                    "ass_meme":         1 if ass else 0,
+                    "a_titre":          "" if ass else st.session_state.get("f_a_tit",""),
+                    "a_nom":            "" if ass else st.session_state.get("f_a_nom","").upper(),
+                    "a_prenom":         "" if ass else st.session_state.get("f_a_prn",""),
+                    "a_ddn":            "" if ass else str(st.session_state.get("f_a_ddn","")),
+                    "a_npi":            "" if ass else st.session_state.get("f_a_npi",""),
+                    "benef_conj":       1 if st.session_state.get("f_bc", True) else 0,
+                    "benef_autres":     st.session_state.get("f_ba",""),
+                    "code_produit":     prod["code"],
+                    "produit":          prod["nom"],
+                    "groupe_produit":   prod["grp"],
+                    "cotisation":       float(st.session_state.get("f_coti", 0)),
+                    "cotisation_lettres": st.session_state.get("f_cotil",""),
+                    "periodicite":      st.session_state.get("f_peri","Mensuelle"),
+                    "date_effet":       str(st.session_state.get("f_deff", today)),
+                    "duree":            (st.session_state.get("f_duree_mois_v", 12)
+                                         if is_vigninou
+                                         else int(st.session_state.get("f_duree", 10))),
+                    "option_gar":       st.session_state.get("f_gar","Sans garantie décès"),
+                    "mode_reglement":   st.session_state.get("f_mode",""),
+                    "mode_ref":         st.session_state.get("f_mref",""),
+                    "capital_terme":    float(st.session_state.get("f_cap", 0) or 0),
+                    **{f"q{qi}":  st.session_state.get(f"f_q{qi}","Non") for qi in range(1,8)},
+                    **{f"q{qi}d": st.session_state.get(f"f_q{qi}d","")  for qi in range(1,8)},
+                    "decl_cond":        1 if st.session_state.get("f_dc") else 0,
+                    "decl_data":        1 if st.session_state.get("f_dd") else 0,
+                    "statut":           statut_ov or st.session_state.get("f_stat","Brouillon"),
+                    "obs":              st.session_state.get("f_obs",""),
+                }
+                # insert_bia() gère PG (%s) et SQLite (?) automatiquement
+                ok = insert_bia(data)
+                if ok:
+                    for k in [k for k in list(st.session_state.keys()) if k.startswith("f_")]:
+                        del st.session_state[k]
+                    st.session_state.pop("bia_prod", None)
+                    st.session_state.pop("bia_step", None)
+                    return data["numero_bia"]
+                return None
+            # ── Impression BIA (courtier PA0 uniquement) ─────────────────────────
+            if st.button("🖨️ Imprimer le BIA — 2 exemplaires",
+                                           use_container_width=True, key="print_bia_btn"):
                 try:
                     from reportlab.lib.pagesizes import A4
                     from reportlab.lib.units import cm
-                    from reportlab.lib import colors as _rlc
+                    from reportlab.lib import colors as rl_colors
                     from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
                         Table, TableStyle, HRFlowable, Image as _RLImg)
                     from reportlab.lib.styles import ParagraphStyle
                     from reportlab.lib.enums import TA_CENTER
-                    import io as _io2, base64 as _b64_2
-                    from datetime import datetime as _dt2
-                    _buf2 = _io2.BytesIO()
-                    _doc2 = SimpleDocTemplate(_buf2, pagesize=A4,
-                        leftMargin=1.5*cm, rightMargin=1.5*cm,
-                        topMargin=1.5*cm, bottomMargin=1.5*cm)
-                    _CN=_rlc.HexColor("#0D1F3C"); _CG=_rlc.HexColor("#1A7F6E")
-                    _CR=_rlc.HexColor("#C0392B"); _CW=_rlc.white; _CL=_rlc.HexColor("#F3F6FA")
-                    _st_ti=ParagraphStyle("T",fontName="Helvetica-Bold",fontSize=11,textColor=_CW,alignment=TA_CENTER)
-                    _st_su=ParagraphStyle("S",fontName="Helvetica",fontSize=8.5,textColor=_rlc.HexColor("#A9DFBF"),alignment=TA_CENTER)
-                    _st_bd=ParagraphStyle("B",fontName="Helvetica",fontSize=8.5,textColor=_rlc.HexColor("#2C3E50"),leading=12)
-                    _st_sm=ParagraphStyle("M",fontName="Helvetica",fontSize=7.5,textColor=_rlc.grey,alignment=TA_CENTER)
-                    _nom_sous_g = f"{st.session_state.get('f_c_tit','')} {st.session_state.get('f_c_nom','').upper()} {st.session_state.get('f_c_prn','')}".strip()
-                    def _gen_bia_ex(lbl):
-                        _it=[]
-                        try:
-                            _img=_RLImg(_io2.BytesIO(_b64_2.b64decode(LOGO_B64)),width=3.5*cm,height=1.5*cm)
-                            _img.hAlign="CENTER"; _it.append(_img); _it.append(Spacer(1,.15*cm))
-                        except Exception: pass
-                        _h=Table([[Paragraph("BULLETIN INDIVIDUEL D'ADHÉSION",_st_ti)],
-                                  [Paragraph(f"{prod['nom']} — AFG Assurances Bénin Vie",_st_su)],
-                                  [Paragraph(f"Exemplaire : {lbl}",_st_su)]],colWidths=[17*cm])
-                        _h.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,-1),_CN),
-                            ("ALIGN",(0,0),(-1,-1),"CENTER"),
-                            ("TOPPADDING",(0,0),(-1,-1),7),("BOTTOMPADDING",(0,0),(-1,-1),7)]))
-                        _it.append(_h); _it.append(Spacer(1,.2*cm))
-                        _rows=[
-                            ["N° BIA",st.session_state.get("_last_bia_num","—"),"Date",_dt2.now().strftime("%d/%m/%Y")],
-                            ["Produit",prod["nom"],"Code",prod["code"]],
-                            ["Souscripteur",_nom_sous_g,"Téléphone",st.session_state.get("f_c_tel","—")],
-                            ["Cotisation",f"{int(st.session_state.get('f_coti',0)):,} FCFA / {st.session_state.get('f_peri','—')}","Capital",f"{int(st.session_state.get('f_cap',0)):,} FCFA"],
-                            ["Date effet",str(st.session_state.get("f_deff","—")),"Durée",f"{st.session_state.get('f_duree','—')} an(s)"],
-                            ["Mode règlement",st.session_state.get("f_mode","—"),"Référence",st.session_state.get("f_mref","—") or "—"],
-                            ["Apporteur",st.session_state.get("f_nom_appo","—") or "—","Code",str(st.session_state.get("f_code_appo","—"))],
-                        ]
-                        _t=Table(_rows,colWidths=[4*cm,4.5*cm,4*cm,4.5*cm])
-                        _t.setStyle(TableStyle([
-                            ("FONTNAME",(0,0),(0,-1),"Helvetica-Bold"),("FONTNAME",(2,0),(2,-1),"Helvetica-Bold"),
-                            ("FONTSIZE",(0,0),(-1,-1),8.5),("ROWBACKGROUNDS",(0,0),(-1,-1),[_CL,_CW]),
-                            ("GRID",(0,0),(-1,-1),.3,_rlc.HexColor("#DDE3EE")),
-                            ("TOPPADDING",(0,0),(-1,-1),5),("BOTTOMPADDING",(0,0),(-1,-1),5),("LEFTPADDING",(0,0),(-1,-1),6),
-                        ]))
-                        _it.append(_t); _it.append(Spacer(1,.3*cm))
-                        _it.append(Paragraph("Je soussigné(e) certifie l'exactitude des informations ci-dessus et reconnais avoir reçu les conditions générales.",_st_bd))
-                        _it.append(Spacer(1,.5*cm))
-                        _sig=Table([["Signature souscripteur","Cachet & Signature AFG"],["",""],["",""]],colWidths=[8.5*cm,8.5*cm])
-                        _sig.setStyle(TableStyle([("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
-                            ("FONTSIZE",(0,0),(-1,-1),8),("ALIGN",(0,0),(-1,-1),"CENTER"),
-                            ("BOX",(0,1),(0,2),.5,_CN),("BOX",(1,1),(1,2),.5,_CN),
-                            ("BOTTOMPADDING",(0,1),(-1,2),22)]))
-                        _it.append(_sig); _it.append(Spacer(1,.15*cm))
-                        _it.append(Paragraph("AFG Assurances Bénin Vie · Groupe AFG Holding · Conforme CIMA",_st_sm))
-                        return _it
-                    _st2=[]
-                    _st2.extend(_gen_bia_ex("EXEMPLAIRE CLIENT"))
-                    _st2.append(Spacer(1,.3*cm))
-                    _st2.append(HRFlowable(width="100%",thickness=.7,color=_CR,dash=[3,3],spaceAfter=3))
-                    _st2.append(Paragraph("✂  —  —  Découper ici  —  —  ✂",
-                        ParagraphStyle("CUT",fontName="Helvetica",fontSize=7.5,textColor=_rlc.grey,alignment=TA_CENTER)))
-                    _st2.append(Spacer(1,.3*cm))
-                    _st2.extend(_gen_bia_ex("EXEMPLAIRE AFG ASSURANCES BÉNIN VIE"))
-                    _doc2.build(_st2)
-                    _pdf2=_buf2.getvalue()
-                    _fn2=f"BIA_{prod['code']}_{_nom_sous_g.replace(' ','_')}_{_dt2.now().strftime('%Y%m%d')}.pdf"
-                    st.success(f"✅ BIA généré — {len(_pdf2)//1024} Ko")
-                    st.download_button("📥 Télécharger le BIA PDF",data=_pdf2,file_name=_fn2,
-                        mime="application/pdf",use_container_width=True,type="primary",key="dl_bia_pdf_final_b")
-                except ImportError:
-                    alert("La bibliothèque <b>reportlab</b> n'est pas installée.","danger")
-                except Exception as _ep_g:
-                    alert(f"Erreur génération PDF : {_ep_g}","danger")
-
-        st.markdown("")
-        b1,b2,b3=st.columns([1,1,1.4])
-        if b1.button("← Retour", key=f"ret7_{4157}"): st.session_state["bia_step"] = 5 if _is_crt_step else 6; st.rerun()
-        if b2.button("💾 Brouillon"):
-            num=save_bia("Brouillon")
-            if num: st.info(f"💾 Brouillon **{num}** enregistré. Retrouvez-le dans la Base BIA.")
-        if b3.button("✅ VALIDER LE BIA",type="primary"):
-            errs=[]
-            if not st.session_state.get("f_c_nom","").strip(): errs.append("Nom souscripteur obligatoire")
-            if not st.session_state.get("f_dc"): errs.append("Conditions de souscription requises")
-            if not st.session_state.get("f_dd"): errs.append("Politique données requise")
-            if errs:
-                for e in errs: st.error(f"❌ {e}")
-            else:
-                num=save_bia("Validé")
-                if num: st.balloons(); st.success(f"🎉 BIA **{num}** validé ! {st.session_state.get('f_c_tit','')} {st.session_state.get('f_c_nom','').upper()}")
-                if num:
-                    st.session_state["bia_saved_id"] = num
-                    st.session_state["_bia_print_ready"] = True
-
-            # ── Bouton impression PDF (pour courtier PA0) ─────────────────
-            if st.session_state.get("_bia_print_ready"):
-                st.markdown("---")
-                if st.button("🖨️ Imprimer le BIA (2 exemplaires)", type="primary",
-                             use_container_width=True, key="print_bia_pa0"):
-                    try:
-                        from reportlab.lib.pagesizes import A4
-                        from reportlab.lib.styles import ParagraphStyle
-                        from reportlab.lib.units import cm
-                        from reportlab.lib import colors as _rc
-                        from reportlab.platypus import (SimpleDocTemplate, Paragraph,
-                            Spacer, Table, TableStyle, HRFlowable)
-                        from reportlab.lib.enums import TA_CENTER
-                        import io as _io, base64 as _b64
-                        from datetime import datetime as _dt
-
-                        def _bloc_bia(story, label_expl):
-                            """Génère un exemplaire du BIA."""
-                            C_N = _rc.HexColor("#0D1F3C"); C_G = _rc.HexColor("#1A7F6E")
-                            C_R = _rc.HexColor("#C0392B"); C_L = _rc.HexColor("#F3F6FA")
-                            st_ti  = ParagraphStyle("T",fontName="Helvetica-Bold",fontSize=12,textColor=_rc.white,alignment=TA_CENTER)
-                            st_su  = ParagraphStyle("S",fontName="Helvetica",fontSize=8,textColor=_rc.HexColor("#A9DFBF"),alignment=TA_CENTER)
-                            st_lbl = ParagraphStyle("L",fontName="Helvetica-Bold",fontSize=8,textColor=C_N)
-                            st_val = ParagraphStyle("V",fontName="Helvetica",fontSize=9,textColor=_rc.HexColor("#2C3E50"))
-                            st_sm  = ParagraphStyle("Sm",fontName="Helvetica",fontSize=7,textColor=_rc.grey)
-                            ss     = st.session_state
-                            # Bandeau exemplaire
-                            col_band = C_R if label_expl=="CLIENT" else C_N
-                            band = Table([[Paragraph(f"EXEMPLAIRE {label_expl}",
-                                ParagraphStyle("EX",fontName="Helvetica-Bold",fontSize=9,
-                                textColor=_rc.white,alignment=TA_CENTER))]],colWidths=[17*cm])
-                            band.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,-1),col_band),
-                                ("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4)]))
-                            story.append(band)
-                            # Logo
-                            try:
-                                _img = __import__("reportlab.platypus",fromlist=["Image"]).Image
-                                story.append(_img(_io.BytesIO(_b64.b64decode(LOGO_B64)),
-                                    width=4*cm,height=1.6*cm))
-                            except Exception: pass
-                            # En-tête
-                            hdr = Table([[Paragraph("AFG ASSURANCES BÉNIN VIE",st_ti)],
-                                [Paragraph("BULLETIN D'ADHÉSION — PRÉVOYANCE AUTO",st_su)],
-                                [Paragraph(f"N° : {ss.get('bia_saved_id','—')}  ·  {_dt.now().strftime('%d/%m/%Y')}",st_su)]],
-                                colWidths=[17*cm])
-                            hdr.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,-1),C_N),
-                                ("ALIGN",(0,0),(-1,-1),"CENTER"),
-                                ("TOPPADDING",(0,0),(-1,-1),8),("BOTTOMPADDING",(0,0),(-1,-1),8)]))
-                            story.append(hdr); story.append(Spacer(1,0.2*cm))
-                            def _sec(t):
-                                s=Table([[Paragraph(t,ParagraphStyle("SH",fontName="Helvetica-Bold",
-                                    fontSize=9,textColor=_rc.white))]],colWidths=[17*cm])
-                                s.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,-1),C_G),
-                                    ("LEFTPADDING",(0,0),(-1,-1),8),("TOPPADDING",(0,0),(-1,-1),4),
-                                    ("BOTTOMPADDING",(0,0),(-1,-1),4)]))
-                                return s
-                            def _tbl(rows):
-                                t=Table([[Paragraph(r[0],st_lbl),
-                                    Paragraph(str(r[1]) if r[1] else "—",st_val)]
-                                    for r in rows],colWidths=[5.5*cm,11.5*cm])
-                                t.setStyle(TableStyle([
-                                    ("ROWBACKGROUNDS",(0,0),(-1,-1),[C_L,_rc.white]),
-                                    ("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4),
-                                    ("LEFTPADDING",(0,0),(-1,-1),6),
-                                    ("GRID",(0,0),(-1,-1),0.3,_rc.HexColor("#DDE3EE"))]))
-                                return t
-                            # Courtier
-                            story.append(_sec("COURTIER / INTERMÉDIAIRE"))
-                            story.append(_tbl([["Courtier :",ss.get("f_courtier_nom","—")],
-                                               ["Date de saisie :",_dt.now().strftime("%d/%m/%Y")]]))
-                            story.append(Spacer(1,0.15*cm))
-                            # Souscripteur
-                            story.append(_sec("SOUSCRIPTEUR / ASSURÉ"))
-                            ddn_s = ss.get("f_c_ddn","")
-                            try: ddn_s = _dt.strptime(str(ddn_s),"%Y-%m-%d").strftime("%d/%m/%Y")
-                            except: pass
-                            story.append(_tbl([
-                                ["Nom complet :",f"{ss.get('f_c_tit','')} {ss.get('f_c_nom','').upper()} {ss.get('f_c_prn','')}".strip()],
-                                ["Date de naissance :",ddn_s],
-                                ["Téléphone :",ss.get("f_c_tel","—")],
-                                ["Adresse :",ss.get("f_c_adr","—")],
-                                ["Nationalité :",ss.get("f_c_nat","Béninoise")]]))
-                            story.append(Spacer(1,0.15*cm))
-                            # Contrat
-                            story.append(_sec("CONTRAT"))
-                            prime_v = float(ss.get("f_coti",0))
-                            cap_v   = float(ss.get("f_cap",0))
-                            deff_s  = ss.get("f_deff","")
-                            term_s  = ss.get("f_terme_auto","")
-                            try: deff_s = _dt.strptime(str(deff_s),"%Y-%m-%d").strftime("%d/%m/%Y")
-                            except: pass
-                            try: term_s = _dt.strptime(str(term_s),"%Y-%m-%d").strftime("%d/%m/%Y")
-                            except: pass
-                            story.append(_tbl([
-                                ["Produit :","Prévoyance Auto (PA0)"],
-                                ["Prime annuelle :",f"{prime_v:,.0f} FCFA"],
-                                ["Capital garanti décès :",f"{cap_v:,.0f} FCFA"],
-                                ["Date d'effet :",deff_s],
-                                ["Date terme :",term_s],
-                                ["Mode de règlement :",ss.get("f_mode","—")],
-                                ["Référence paiement :",ss.get("f_mref","—")]]))
-                            story.append(Spacer(1,0.2*cm))
-                            # Signatures
-                            story.append(_sec("SIGNATURES"))
-                            sig = Table([[Paragraph("Signature du souscripteur",st_lbl),
-                                         Paragraph("Cachet & Signature AFG",st_lbl)],
-                                        [Paragraph("\n\n\n",st_val),Paragraph("\n\n\n",st_val)]],
-                                colWidths=[8.5*cm,8.5*cm])
-                            sig.setStyle(TableStyle([
-                                ("BOX",(0,1),(0,1),1,_rc.HexColor("#CCCCCC")),
-                                ("BOX",(1,1),(1,1),1,_rc.HexColor("#CCCCCC")),
-                                ("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4),
-                                ("LEFTPADDING",(0,0),(-1,-1),6),("ALIGN",(0,0),(-1,-1),"CENTER")]))
-                            story.append(sig)
-                            story.append(Spacer(1,0.1*cm))
-                            story.append(Paragraph(
-                                "<i>AFG Assurances Bénin Vie · Groupe AFG Holding · Conforme CIMA</i>",st_sm))
-                            story.append(HRFlowable(width="100%",thickness=0.5,color=C_G,spaceAfter=3))
-
-                        _buf = _io.BytesIO()
-                        doc  = SimpleDocTemplate(_buf, pagesize=A4,
-                            leftMargin=1.5*cm, rightMargin=1.5*cm,
-                            topMargin=1.5*cm, bottomMargin=1.5*cm)
-                        story = []
-                        _bloc_bia(story, "CLIENT")
-                        story.append(Spacer(1,0.3*cm))
-                        story.append(Table([[Paragraph(
-                            "✂ — — — — — — — — — — — — — — — — — — — — — — — — ✂",
-                            ParagraphStyle("cut",fontName="Helvetica",fontSize=8,
-                            textColor=__import__("reportlab.lib.colors",fromlist=["grey"]).grey,
-                            alignment=TA_CENTER))]],colWidths=[17*cm]))
-                        story.append(Spacer(1,0.3*cm))
-                        _bloc_bia(story, "AFG")
-                        doc.build(story)
-                        _pdf = _buf.getvalue()
-                        _nom = f"{st.session_state.get('f_c_nom','').upper()}_{st.session_state.get('f_c_prn','')}"
-                        st.success(f"✅ BIA généré — {len(_pdf)//1024} Ko")
-                        st.download_button("📥 Télécharger le BIA (PDF 2 exemplaires)",
-                            data=_pdf,
-                            file_name=f"BIA_PA0_{_nom}_{_dt.now().strftime('%Y%m%d')}.pdf",
-                            mime="application/pdf",
-                            use_container_width=True, type="primary",
-                            key="dl_bia_pdf")
-                    except ImportError:
-                        alert("reportlab non installé.","danger")
-                    except Exception as _e_bp:
-                        alert(f"Erreur PDF : {_e_bp}","danger")
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# PAGE — BASE BIA
-# ═══════════════════════════════════════════════════════════════════════════════
-elif "Base BIA" in page:
-    df_bia = bia_all()
-    section("🗂️ Base BIA — Registre des contrats","CONSULTATION · EXPORT · GESTION")
-
-    if df_bia.empty:
-        alert("Aucun BIA enregistré. Utilisez l'onglet <b>Saisie BIA</b>.","info"); st.stop()
-
-    # KPIs
-    nb_all = len(df_bia)
-    nb_val = int((df_bia["statut"] == "Validé").sum())
-    nb_bro = int((df_bia["statut"] == "Brouillon").sum())
-    cot_t  = float(df_bia["cotisation"].fillna(0).astype(float).sum())
-
-    c1,c2,c3,c4 = st.columns(4)
-    kpi(c1,"Total contrats", str(nb_all), "Base complète","teal", icon="📋")
-    kpi(c2,"Cotisations",    fmt(cot_t),  "Total FCFA",   "",    icon="💰")
-    kpi(c3,"Validés",        str(nb_val), f"{nb_val/max(nb_all,1)*100:.0f}%","", icon="✅")
-    kpi(c4,"Brouillons",     str(nb_bro), "À compléter","amber", icon="💾")
-
-    st.markdown("---")
-
-    # Filtres
-    fc1, fc2, fc3 = st.columns(3)
-    with fc1:
-        _prod_opts = ["Tous"] + sorted(df_bia["produit"].dropna().unique().tolist()) if "produit" in df_bia.columns else ["Tous"]
-        _prod_sel  = st.selectbox("Produit", _prod_opts, key="bia_filt_prod")
-    with fc2:
-        _stat_opts = ["Tous","Validé","Brouillon","En cours"]
-        _stat_sel  = st.selectbox("Statut", _stat_opts, key="bia_filt_stat")
-    with fc3:
-        _srch = st.text_input("🔍 Recherche (nom, numéro…)", key="bia_srch", placeholder="Nom, N° BIA…")
-
-    # Appliquer filtres
-    df_show = df_bia.copy()
-    if _prod_sel != "Tous" and "produit" in df_show.columns:
-        df_show = df_show[df_show["produit"] == _prod_sel]
-    if _stat_sel != "Tous":
-        df_show = df_show[df_show["statut"] == _stat_sel]
-    if _srch.strip():
-        _q = _srch.strip().lower()
-        df_show = df_show[df_show.apply(lambda r: _q in str(r).lower(), axis=1)]
-
-    st.markdown(f"**{len(df_show):,} contrat(s) affiché(s)**")
-
-    # Colonnes à afficher (ordre logique)
-    _display_cols = [c for c in [
-        "numero_bia","date_saisie","statut","produit",
-        "nom_souscripteur","prenom_souscripteur",
-        "telephone_souscripteur","adresse_souscripteur",
-        "date_naissance_souscripteur","nationalite_souscripteur",
-        "cotisation","capital_garanti","periodicite",
-        "date_effet","date_echeance","duree",
-        "mode_reglement","reference_reglement",
-        "nom_apporteur","code_apporteur","agence",
-        "saisi_par","obs"
-    ] if c in df_show.columns]
-
-    # Renommer pour affichage lisible
-    _rename = {
-        "numero_bia":"N° BIA","date_saisie":"Date saisie","statut":"Statut",
-        "produit":"Produit","nom_souscripteur":"Nom","prenom_souscripteur":"Prénoms",
-        "telephone_souscripteur":"Téléphone","adresse_souscripteur":"Adresse",
-        "date_naissance_souscripteur":"Date naissance","nationalite_souscripteur":"Nationalité",
-        "cotisation":"Cotisation (FCFA)","capital_garanti":"Capital (FCFA)",
-        "periodicite":"Périodicité","date_effet":"Date effet","date_echeance":"Date terme",
-        "duree":"Durée","mode_reglement":"Mode règlement","reference_reglement":"Référence",
-        "nom_apporteur":"Apporteur","code_apporteur":"Code apporteur",
-        "agence":"Agence","saisi_par":"Saisi par","obs":"Observations",
-    }
-    df_disp = df_show[_display_cols].rename(columns=_rename)
-
-    # Formater les montants
-    for col in ["Cotisation (FCFA)","Capital (FCFA)"]:
-        if col in df_disp.columns:
-            df_disp[col] = df_disp[col].apply(lambda x: fmt(x,"") if pd.notna(x) and x != "" else "—")
-
-    st.dataframe(df_disp, use_container_width=True, hide_index=True, height=450)
-
-    # Exports
-    st.markdown("---")
-    ea, eb, ec = st.columns(3)
-    ea.download_button("📥 CSV complet",
-        dl_csv(df_show), "base_bia.csv", "text/csv",
-        use_container_width=True, key="dl_bia_csv")
-    eb.download_button("📥 Excel complet",
-        dl_xlsx(df_show), "base_bia.xlsx",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True, key="dl_bia_xl")
-    ec.download_button("📥 Export affiché",
-        dl_csv(df_show), f"bia_{_prod_sel}_{_stat_sel}.csv", "text/csv",
-        use_container_width=True, key="dl_bia_filt")
-
-    # Graphiques synthèse
-    if nb_all > 0:
-        st.markdown("---")
-        g1,g2 = st.columns(2)
-        with g1:
-            by_st = df_bia["statut"].value_counts().reset_index()
-            by_st.columns = ["Statut","Nb"]
-            fig = go.Figure(go.Pie(labels=by_st["Statut"],values=by_st["Nb"],hole=.44,
-                marker_colors=[GREEN,AMBER,RED,BLUE],
-                textinfo="percent+label+value", textfont=dict(size=12)))
-            fig_style(fig,260,"Répartition par statut")
-            st.plotly_chart(fig,use_container_width=True)
-        with g2:
-            if "produit" in df_bia.columns:
-                by_p = (df_bia.groupby("produit")
-                        .agg(Nb=("produit","count"),Cot=("cotisation","sum"))
-                        .reset_index().sort_values("Cot",ascending=False).head(8))
-                fig2 = go.Figure(go.Bar(
-                    x=by_p["Cot"], y=by_p["produit"].str[:20],
-                    orientation="h", marker_color=GREEN,
-                    text=[fmt(v,"") for v in by_p["Cot"]],
-                    textposition="outside", textfont=dict(size=10)))
-                fig2.update_layout(yaxis=dict(autorange="reversed"))
-                fig_style(fig2,260,"CA cotisations par produit")
-                st.plotly_chart(fig2,use_container_width=True)
-
-
-elif "Rapport PDF" in page:
-    section("📄 Rapport DG — Génération PDF",
-            "DÉPARTEMENT TECHNIQUE · SYNTHÈSE ACTUARIELLE · CIMA")
-    st.markdown(f"""
-    <div style="background:linear-gradient(135deg,{NAVY},{GREEN2});border-radius:12px;
-         padding:1.2rem 1.5rem;margin-bottom:16px">
-      <div style="color:{MINT};font-size:11px;font-weight:700;text-transform:uppercase;
-           letter-spacing:.08em;margin-bottom:4px">📄 Rapport confidentiel</div>
-      <div style="color:white;font-size:14px;font-weight:700">
-        AFG Assurances Bénin Vie — Rapport de Gestion · {period_lbl}</div>
-      <div style="color:rgba(255,255,255,.5);font-size:10px;margin-top:3px">
-        À l'attention de la Direction Générale · Rédigé par le Département Technique
-        · Conforme CIMA</div>
-    </div>""", unsafe_allow_html=True)
-
-    rc1,rc2,rc3 = st.columns(3)
-    s_kpis  = rc1.checkbox("📊 KPIs Portefeuille", value=True, key="rp_kpis")
-    s_ca    = rc1.checkbox("💰 Chiffre d'Affaires", value=True, key="rp_ca")
-    s_com   = rc2.checkbox("👥 Commerciaux",        value=True, key="rp_com")
-    s_sin   = rc2.checkbox("⚠️ Sinistres",           value=True, key="rp_sin")
-    s_cima  = rc3.checkbox("🏛️ Scorecard CIMA",     value=True, key="rp_cima")
-    dest    = st.text_input("Destinataire", value="M. le Directeur Général", key="rp_dest")
-    auteur  = st.text_input("Rédigé par", value="Département Technique", key="rp_auteur")
-    st.caption("Le rapport porte exclusivement sur la période filtrée "
-               f"(**{period_lbl}**) — les données globales ne sont pas incluses.")
-    st.markdown("---")
-
-    if pf is None and ca is None:
-        alert("Chargez au moins une base de données pour générer le rapport.", "warn")
-    else:
-        # ── Données de la PÉRIODE FILTRÉE (jamais le global) ──────────────
-        _pf_r  = pf_f()  if pf  is not None else None
-        _ca_r  = ca_f()  if ca  is not None else None
-        _sin_r = sin_f() if sin is not None else None
-        if _pf_r  is not None and _pf_r.empty:  _pf_r  = pf
-        if _ca_r  is not None and _ca_r.empty:  _ca_r  = ca
-        if _sin_r is not None and _sin_r.empty: _sin_r = sin
-        # Aperçu
-        ap1,ap2,ap3,ap4 = st.columns(4)
-        if _pf_r is not None:
-            _act_r = int((_pf_r["ETAT_POLICE"].str.strip().isin(["ACTIF"])).sum()) if "ETAT_POLICE" in _pf_r.columns else 0
-            ap1.metric("Polices", f"{len(_pf_r):,}")
-            ap2.metric("Actives", f"{_act_r:,}")
-        if _ca_r is not None:
-            ap3.metric("CA global", fmt(float(_ca_r["CHIFAFFA"].fillna(0).sum()) if "CHIFAFFA" in _ca_r.columns else 0))
-        if _sin_r is not None:
-            ap4.metric("Sinistres", fmt(float(_sin_r["Réglement Total"].fillna(0).sum()) if "Réglement Total" in _sin_r.columns else 0))
-        st.markdown("")
-
-        if st.button("🖨️ Générer le rapport PDF", type="primary",
-                     use_container_width=True, key="gen_pdf_btn"):
-            with st.spinner("⏳ Génération du rapport PDF en cours…"):
-                try:
-                    from reportlab.lib.pagesizes import A4
-                    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-                    from reportlab.lib.units import cm
-                    from reportlab.lib import colors as rl_colors
-                    from reportlab.platypus import (SimpleDocTemplate, Paragraph,
-                        Spacer, Table, TableStyle, HRFlowable,
-                        Image as _RLImage, PageBreak)
-                    from reportlab.lib.enums import TA_CENTER, TA_RIGHT
-                    from reportlab.graphics.shapes import Drawing, String, Rect
-                    from reportlab.graphics.charts.barcharts import (
-                        VerticalBarChart, HorizontalBarChart)
-                    from reportlab.graphics.charts.piecharts import Pie
-                    from reportlab.graphics.charts.legends import Legend
-                    import io as _io
+                    import io as _io, base64 as _b64
                     from datetime import datetime as _dt
-
-                    # ── Fabriques de graphiques natifs ReportLab ─────────
-                    _PAL = [rl_colors.HexColor(c) for c in
-                            ("#1A7F6E","#0D1F3C","#C0392B","#CA6F1E",
-                             "#2E86C1","#7D3C98","#16A085","#5D6D7E")]
-
-                    def _g_pie(labels, values, titre, w=17*cm, h=6.2*cm):
-                        """Camembert avec legende laterale."""
-                        d  = Drawing(w, h)
-                        pc = Pie()
-                        pc.x, pc.y = 12, 8
-                        pc.width = pc.height = h - 26
-                        pc.data   = [max(float(v), 0) for v in values]
-                        pc.labels = [f"{p:.0f}%" for p in
-                                     (100*np.array(values, dtype=float) /
-                                      max(sum(values), 1))]
-                        pc.slices.strokeWidth    = .5
-                        pc.slices.strokeColor    = rl_colors.white
-                        pc.slices.fontName       = "Helvetica-Bold"
-                        pc.slices.fontSize       = 7
-                        pc.sideLabels            = False
-                        for k in range(len(pc.data)):
-                            pc.slices[k].fillColor = _PAL[k % len(_PAL)]
-                        d.add(pc)
-                        lg = Legend()
-                        lg.x, lg.y        = pc.width + 40, h - 22
-                        lg.alignment      = "right"
-                        lg.fontName       = "Helvetica"
-                        lg.fontSize       = 7.5
-                        lg.dxTextSpace    = 4
-                        lg.deltay         = 10
-                        lg.colorNamePairs = [
-                            (_PAL[k % len(_PAL)],
-                             f"{str(labels[k])[:26]} · {int(values[k]):,}".replace(",", " "))
-                            for k in range(len(labels))]
-                        d.add(lg)
-                        d.add(String(6, h - 10, titre, fontName="Helvetica-Bold",
-                                     fontSize=8.5, fillColor=C_N))
-                        return d
-
-                    # ══════════════════════════════════════════════════════════
-                    #  Graphiques du rapport : rendus en PNG haute definition
-                    #  par matplotlib puis inseres comme images. Le rendu est
-                    #  nettement plus lisible que les graphiques vectoriels
-                    #  natifs de ReportLab, et ne depend d'aucun navigateur.
-                    # ══════════════════════════════════════════════════════════
-                    import matplotlib
-                    matplotlib.use("Agg")
-                    import matplotlib.pyplot as _plt
-                    from matplotlib.ticker import FuncFormatter as _FF
-
-                    _MPL = ["#1A7F6E","#0D1F3C","#C0392B","#CA6F1E",
-                            "#2E86C1","#7D3C98","#16A085","#616A6B"]
-
-                    def _espace(v, _p=None):
-                        """Sépare les milliers par une espace insécable fine."""
-                        return f"{v:,.0f}".replace(",", " ")
-
-                    def _mpl_img(fig, larg=17*cm):
-                        """Convertit une figure matplotlib en image ReportLab."""
-                        _b = _io.BytesIO()
-                        fig.savefig(_b, format="png", dpi=170,
-                                    bbox_inches="tight", facecolor="white")
-                        _plt.close(fig)
-                        _b.seek(0)
-                        from PIL import Image as _PILImg
-                        _w, _h = _PILImg.open(_b).size
-                        _b.seek(0)
-                        _img = _RLImage(_b, width=larg, height=larg * _h / _w)
-                        _img.hAlign = "CENTER"
-                        return _img
-
-                    def _mpl_barh(labels, values, titre, coul="#1A7F6E", haut=4.2):
-                        """Barres horizontales, valeurs annotées en bout."""
-                        _n  = max(len(labels), 1)
-                        fig, ax = _plt.subplots(figsize=(10, max(haut, 0.42*_n + 1.1)))
-                        _y  = range(len(labels))
-                        ax.barh(list(_y), values, color=coul, height=.64,
-                                edgecolor="white", linewidth=.6)
-                        ax.set_yticks(list(_y))
-                        ax.set_yticklabels([str(l)[:34] for l in labels], fontsize=9)
-                        ax.invert_yaxis()
-                        _mx = max(values) if len(values) and max(values) else 1
-                        for _i, _v in enumerate(values):
-                            ax.text(_v + _mx*.012, _i, _espace(_v),
-                                    va="center", fontsize=8.2, color="#2C3E50")
-                        ax.set_xlim(0, _mx*1.18)
-                        ax.xaxis.set_major_formatter(_FF(_espace))
-                        ax.tick_params(axis="x", labelsize=8, colors="#667")
-                        ax.set_title(titre, fontsize=11, fontweight="bold",
-                                     color="#0D1F3C", loc="left", pad=11)
-                        ax.grid(axis="x", color="#E8ECF3", linewidth=.7)
-                        ax.set_axisbelow(True)
-                        for _s in ("top","right","left"): ax.spines[_s].set_visible(False)
-                        ax.spines["bottom"].set_color("#D5DBE5")
-                        return _mpl_img(fig)
-
-                    def _mpl_barv(labels, series, noms, titre, haut=4.4):
-                        """Barres verticales groupées, une à trois séries."""
-                        fig, ax = _plt.subplots(figsize=(10, haut))
-                        _n   = len(series)
-                        _x   = np.arange(len(labels))
-                        _lgr = .78 / _n
-                        for _i, (_s, _nm) in enumerate(zip(series, noms)):
-                            ax.bar(_x + _i*_lgr - .39 + _lgr/2, _s, _lgr*.92,
-                                   label=str(_nm), color=_MPL[_i % len(_MPL)],
-                                   edgecolor="white", linewidth=.5)
-                        ax.set_xticks(_x)
-                        ax.set_xticklabels([str(l)[:14] for l in labels],
-                                           fontsize=8.5, rotation=0)
-                        ax.yaxis.set_major_formatter(_FF(_espace))
-                        ax.tick_params(axis="y", labelsize=8, colors="#667")
-                        ax.set_title(titre, fontsize=11, fontweight="bold",
-                                     color="#0D1F3C", loc="left", pad=11)
-                        if _n > 1:
-                            ax.legend(fontsize=8.5, frameon=False, ncol=_n,
-                                      loc="upper center", bbox_to_anchor=(.5, -.09))
-                        ax.grid(axis="y", color="#E8ECF3", linewidth=.7)
-                        ax.set_axisbelow(True)
-                        for _s2 in ("top","right"): ax.spines[_s2].set_visible(False)
-                        for _s2 in ("left","bottom"): ax.spines[_s2].set_color("#D5DBE5")
-                        return _mpl_img(fig)
-
-                    def _mpl_pie(labels, values, titre, haut=4.4):
-                        """Anneau avec légende latérale et pourcentages."""
-                        fig, ax = _plt.subplots(figsize=(10, haut))
-                        _tot = float(sum(values)) or 1.0
-                        _w, _t, _a = ax.pie(
-                            values, startangle=90, counterclock=False,
-                            colors=[_MPL[_i % len(_MPL)] for _i in range(len(values))],
-                            wedgeprops=dict(width=.42, edgecolor="white", linewidth=1.6),
-                            autopct=lambda p: f"{p:.1f} %" if p >= 4 else "",
-                            pctdistance=.79, textprops=dict(fontsize=8.6, color="white",
-                                                            fontweight="bold"))
-                        ax.legend(_w, [f"{_l}  ·  {_espace(_v)}"
-                                       for _l, _v in zip(labels, values)],
-                                  loc="center left", bbox_to_anchor=(1.02, .5),
-                                  fontsize=9, frameon=False)
-                        ax.set_title(titre, fontsize=11, fontweight="bold",
-                                     color="#0D1F3C", loc="left", pad=11)
-                        ax.axis("equal")
-                        return _mpl_img(fig)
-
-                    def _mpl_treemap(labels, values, titre, haut=4.6):
-                        """Carte proportionnelle par pavage récursif."""
-                        fig, ax = _plt.subplots(figsize=(10, haut))
-                        _tot = float(sum(values)) or 1.0
-                        _x, _y, _lw, _lh = 0., 0., 1., 1.
-                        _rest = float(_tot)
-                        _hz   = True
-                        for _i, (_lb, _vl) in enumerate(zip(labels, values)):
-                            _p = float(_vl) / _rest if _rest else 0
-                            if _i == len(labels) - 1: _p = 1.0
-                            if _hz:
-                                _cw, _cht = _lw*_p, _lh
-                            else:
-                                _cw, _cht = _lw, _lh*_p
-                            ax.add_patch(_plt.Rectangle(
-                                (_x, _y), _cw, _cht,
-                                facecolor=_MPL[_i % len(_MPL)],
-                                edgecolor="white", linewidth=2.2))
-                            if _cw > .11 and _cht > .13:
-                                ax.text(_x + _cw/2, _y + _cht/2 + .045,
-                                        str(_lb)[:22], ha="center", va="center",
-                                        fontsize=9, fontweight="bold", color="white")
-                                ax.text(_x + _cw/2, _y + _cht/2 - .035,
-                                        f"{float(_vl)/_tot*100:.1f} %",
-                                        ha="center", va="center",
-                                        fontsize=8.2, color="white")
-                                ax.text(_x + _cw/2, _y + _cht/2 - .105,
-                                        _espace(_vl), ha="center", va="center",
-                                        fontsize=7.4, color="#FFFFFFCC")
-                            if _hz:
-                                _x += _cw; _lw -= _cw
-                            else:
-                                _y += _cht; _lh -= _cht
-                            _rest -= float(_vl)
-                            _hz = not _hz
-                        ax.set_xlim(0,1); ax.set_ylim(0,1); ax.axis("off")
-                        ax.set_title(titre, fontsize=11, fontweight="bold",
-                                     color="#0D1F3C", loc="left", pad=11)
-                        return _mpl_img(fig)
-
-                    def _g_carte(labels, values, titre, w=17*cm, h=7.2*cm):
-                        """Carte proportionnelle : chaque nature occupe une
-                        surface proportionnelle a son poids dans la charge.
-                        Equivalent statique du treemap de l'application."""
-                        d = Drawing(w, h)
-                        d.add(String(4, h-11, titre, fontName="Helvetica-Bold",
-                                     fontSize=9, fillColor=C_N))
-                        _tot = float(sum(values)) or 1.0
-                        _y0, _hh = 6, h - 30
-                        _x = 2.0
-                        _wd = w - 4.0
-                        # Pavage en bandes verticales de largeur proportionnelle
-                        for _i, (_lb, _vl) in enumerate(zip(labels, values)):
-                            _part = float(_vl) / _tot
-                            _lw   = max(_wd * _part, 14)
-                            _col  = _PAL[_i % len(_PAL)]
-                            d.add(Rect(_x, _y0, _lw, _hh,
-                                       fillColor=_col, strokeColor=rl_colors.white,
-                                       strokeWidth=1.2))
-                            # Libelle : seulement si la bande est assez large
-                            if _lw > 46:
-                                _txt = str(_lb)[:int(_lw/5.2)]
-                                d.add(String(_x + 5, _y0 + _hh - 14, _txt,
-                                             fontName="Helvetica-Bold", fontSize=7.5,
-                                             fillColor=rl_colors.white))
-                                d.add(String(_x + 5, _y0 + _hh - 25,
-                                             f"{_part*100:.1f} %",
-                                             fontName="Helvetica", fontSize=7,
-                                             fillColor=rl_colors.white))
-                                d.add(String(_x + 5, _y0 + 6,
-                                             f"{float(_vl):,.0f}".replace(",", " "),
-                                             fontName="Helvetica", fontSize=6.5,
-                                             fillColor=rl_colors.white))
-                            _x += _lw
-                        return d
-
-                    def _g_barh(labels, values, titre, w=17*cm, h=7.5*cm, coul=None):
-                        """Barres horizontales avec valeurs completes."""
-                        d  = Drawing(w, h)
-                        bc = HorizontalBarChart()
-                        bc.x, bc.y     = 118, 18
-                        bc.width       = w - 150
-                        bc.height      = h - 44
-                        bc.data        = [[float(v) for v in values]]
-                        bc.categoryAxis.categoryNames = [str(l)[:24] for l in labels]
-                        bc.categoryAxis.labels.fontName = "Helvetica"
-                        bc.categoryAxis.labels.fontSize = 7
-                        bc.categoryAxis.labels.dx       = -3
-                        bc.valueAxis.valueMin  = 0
-                        bc.valueAxis.valueMax  = max(values) * 1.15 if max(values) else 1
-                        bc.valueAxis.labels.fontName = "Helvetica"
-                        bc.valueAxis.labels.fontSize = 6.5
-                        bc.valueAxis.labelTextFormat = (
-                            lambda v: f"{v:,.0f}".replace(",", " "))
-                        bc.bars[0].fillColor   = coul or C_G
-                        bc.bars[0].strokeWidth = 0
-                        bc.barLabels.fontName  = "Helvetica-Bold"
-                        bc.barLabels.fontSize  = 6.5
-                        bc.barLabels.dx        = 12
-                        bc.barLabelFormat      = (
-                            lambda v: f"{v:,.0f}".replace(",", " "))
-                        bc.barLabels.boxAnchor = "w"
-                        d.add(bc)
-                        d.add(String(6, h - 10, titre, fontName="Helvetica-Bold",
-                                     fontSize=8.5, fillColor=C_N))
-                        return d
-
-                    def _g_barv(labels, series, noms, titre, w=17*cm, h=7*cm):
-                        """Barres verticales groupees (1 a 3 series)."""
-                        d  = Drawing(w, h)
-                        bc = VerticalBarChart()
-                        bc.x, bc.y = 55, 34
-                        bc.width   = w - 80
-                        bc.height  = h - 58
-                        bc.data    = [[float(v) for v in s] for s in series]
-                        bc.categoryAxis.categoryNames    = [str(l)[:16] for l in labels]
-                        bc.categoryAxis.labels.fontName  = "Helvetica"
-                        bc.categoryAxis.labels.fontSize  = 7
-                        bc.categoryAxis.labels.angle     = 20
-                        bc.categoryAxis.labels.boxAnchor = "ne"
-                        _mx = max((max(s) for s in series if len(s)), default=1)
-                        bc.valueAxis.valueMin = 0
-                        bc.valueAxis.valueMax = _mx * 1.2 if _mx else 1
-                        bc.valueAxis.labels.fontName   = "Helvetica"
-                        bc.valueAxis.labels.fontSize   = 6.5
-                        bc.valueAxis.labelTextFormat   = (
-                            lambda v: f"{v:,.0f}".replace(",", " "))
-                        for k in range(len(series)):
-                            bc.bars[k].fillColor   = _PAL[k % len(_PAL)]
-                            bc.bars[k].strokeWidth = 0
-                        bc.barLabels.fontName = "Helvetica-Bold"
-                        bc.barLabels.fontSize = 6
-                        bc.barLabels.dy       = 4
-                        bc.barLabelFormat     = (
-                            lambda v: f"{v:,.0f}".replace(",", " "))
-                        d.add(bc)
-                        if len(series) > 1:
-                            lg = Legend()
-                            lg.x, lg.y        = 55, 8
-                            lg.alignment      = "right"
-                            lg.fontName       = "Helvetica"
-                            lg.fontSize       = 7
-                            lg.columnMaximum  = 1
-                            lg.deltax         = 88
-                            lg.colorNamePairs = [
-                                (_PAL[k % len(_PAL)], noms[k])
-                                for k in range(len(series))]
-                            d.add(lg)
-                        d.add(String(6, h - 10, titre, fontName="Helvetica-Bold",
-                                     fontSize=8.5, fillColor=C_N))
-                        return d
 
                     _buf = _io.BytesIO()
                     doc  = SimpleDocTemplate(_buf, pagesize=A4,
-                        leftMargin=2*cm, rightMargin=2*cm,
-                        topMargin=2.5*cm, bottomMargin=2*cm)
+                        leftMargin=1.5*cm, rightMargin=1.5*cm,
+                        topMargin=1.5*cm, bottomMargin=1.5*cm)
 
-                    C_N = rl_colors.HexColor("#0D1F3C")
-                    C_G = rl_colors.HexColor("#1A7F6E")
-                    C_R = rl_colors.HexColor("#C0392B")
-                    C_A = rl_colors.HexColor("#CA6F1E")
-                    C_L = rl_colors.HexColor("#F3F6FA")
-                    C_W = rl_colors.white
-                    C_M = rl_colors.HexColor("#A9DFBF")
+                    C_N=rl_colors.HexColor("#0D1F3C"); C_G=rl_colors.HexColor("#1A7F6E")
+                    C_R=rl_colors.HexColor("#C0392B"); C_W=rl_colors.white
+                    C_L=rl_colors.HexColor("#F3F6FA")
 
-                    st_ti = ParagraphStyle("T",fontName="Helvetica-Bold",fontSize=16,
-                        textColor=C_W,alignment=TA_CENTER,spaceAfter=4)
-                    st_su = ParagraphStyle("S",fontName="Helvetica",fontSize=9,
-                        textColor=C_M,alignment=TA_CENTER,spaceAfter=4)
-                    st_h1 = ParagraphStyle("H1",fontName="Helvetica-Bold",fontSize=12,
-                        textColor=C_N,spaceBefore=12,spaceAfter=5)
-                    st_h2 = ParagraphStyle("H2",fontName="Helvetica-Bold",fontSize=10,
-                        textColor=C_G,spaceBefore=8,spaceAfter=4)
-                    st_bd = ParagraphStyle("B",fontName="Helvetica",fontSize=9,
-                        textColor=rl_colors.HexColor("#2C3E50"),spaceAfter=4,leading=13)
-                    st_bld= ParagraphStyle("Bo",fontName="Helvetica-Bold",fontSize=9,
-                        textColor=C_N,spaceAfter=3)
-                    st_sm = ParagraphStyle("Sm",fontName="Helvetica",fontSize=8,
-                        textColor=rl_colors.grey,spaceAfter=3)
+                    st_ti = ParagraphStyle("T",fontName="Helvetica-Bold",fontSize=12,textColor=C_W,alignment=TA_CENTER)
+                    st_su = ParagraphStyle("S",fontName="Helvetica",fontSize=9,textColor=rl_colors.HexColor("#A9DFBF"),alignment=TA_CENTER)
+                    st_bd = ParagraphStyle("B",fontName="Helvetica",fontSize=9,textColor=rl_colors.HexColor("#2C3E50"),leading=13)
+                    st_sm = ParagraphStyle("Sm",fontName="Helvetica",fontSize=8,textColor=rl_colors.grey,alignment=TA_CENTER)
+                    st_bf = ParagraphStyle("Bf",fontName="Helvetica-Bold",fontSize=9,textColor=C_N)
 
-                    def _tbl_style(data, col_widths, header_bg=None):
-                        t = Table(data, colWidths=col_widths)
-                        _bg = header_bg or C_N
+                    def _exemplaire(label):
+                        items = []
+                        # Logo
+                        try:
+                            _img = _RLImg(_io.BytesIO(_b64.b64decode(LOGO_B64)), width=3.5*cm, height=1.5*cm)
+                            _img.hAlign = "CENTER"; items.append(_img); items.append(Spacer(1,0.15*cm))
+                        except Exception: pass
+                        # En-tête adapté au produit
+                        h = Table([[Paragraph("BULLETIN INDIVIDUEL D'ADHÉSION",st_ti)],
+                                    [Paragraph(f"{prod['nom']} · AFG Assurances Bénin Vie",st_su)],
+                                    [Paragraph(f"Exemplaire : {label}",st_su)]],
+                                   colWidths=[17*cm])
+                        h.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,-1),C_N),
+                            ("ALIGN",(0,0),(-1,-1),"CENTER"),
+                            ("TOPPADDING",(0,0),(-1,-1),7),("BOTTOMPADDING",(0,0),(-1,-1),7)]))
+                        items.append(h); items.append(Spacer(1,0.25*cm))
+                        # Données
+                        _n = f"{st.session_state.get('f_c_tit','')} {st.session_state.get('f_c_nom','').upper()} {st.session_state.get('f_c_prn','')}".strip()
+                        _appo_lbl = (st.session_state.get("f_courtier_nom")
+                                     or st.session_state.get("f_nom_appo") or "—")
+                        rows = [
+                            ["N° BIA", st.session_state.get("_last_bia_num","—"),
+                             "Date de saisie", _dt.now().strftime("%d/%m/%Y")],
+                            ["Apporteur", _appo_lbl, "Produit", prod["nom"]],
+                            ["Souscripteur", _n, "Téléphone", st.session_state.get("f_c_tel","—")],
+                            ["Prime annuelle", f"{int(st.session_state.get('f_coti',0)):,} FCFA", "Capital garanti", f"{int(st.session_state.get('f_cap',0)):,} FCFA"],
+                            ["Date effet", ds(st.session_state.get("f_deff","")), "Date terme", str(st.session_state.get("f_terme_auto","—"))],
+                            ["Mode règlement", st.session_state.get("f_mode","—"), "Référence", st.session_state.get("f_mref","—") or "—"],
+                        ]
+                        t = Table(rows, colWidths=[4*cm,4.5*cm,4*cm,4.5*cm])
                         t.setStyle(TableStyle([
-                            ("BACKGROUND",(0,0),(-1,0),_bg),
-                            ("TEXTCOLOR",(0,0),(-1,0),C_W),
-                            ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
+                            ("FONTNAME",(0,0),(0,-1),"Helvetica-Bold"),("FONTNAME",(2,0),(2,-1),"Helvetica-Bold"),
                             ("FONTSIZE",(0,0),(-1,-1),8.5),
-                            ("ROWBACKGROUNDS",(0,1),(-1,-1),[C_L, C_W]),
-                            ("ALIGN",(1,0),(-1,-1),"RIGHT"),
+                            ("ROWBACKGROUNDS",(0,0),(-1,-1),[C_L,C_W]),
                             ("GRID",(0,0),(-1,-1),0.3,rl_colors.HexColor("#DDE3EE")),
-                            ("TOPPADDING",(0,0),(-1,-1),4),
-                            ("BOTTOMPADDING",(0,0),(-1,-1),4),
-                            ("LEFTPADDING",(0,0),(-1,-1),7),
+                            ("TOPPADDING",(0,0),(-1,-1),5),("BOTTOMPADDING",(0,0),(-1,-1),5),("LEFTPADDING",(0,0),(-1,-1),6),
                         ]))
-                        return t
-
-                    def _sec(txt):
-                        t = Table([[Paragraph(txt, ParagraphStyle("SH",
-                            fontName="Helvetica-Bold",fontSize=11,textColor=C_W))]],
-                            colWidths=[17*cm])
-                        t.setStyle(TableStyle([
-                            ("BACKGROUND",(0,0),(-1,-1),C_G),
-                            ("LEFTPADDING",(0,0),(-1,-1),10),
-                            ("TOPPADDING",(0,0),(-1,-1),6),
-                            ("BOTTOMPADDING",(0,0),(-1,-1),6),
+                        items.append(t); items.append(Spacer(1,0.3*cm))
+                        items.append(Paragraph("Je soussigné(e) certifie l'exactitude des informations ci-dessus et reconnais avoir reçu les conditions générales du contrat.",st_bd))
+                        items.append(Spacer(1,0.5*cm))
+                        sig = Table([["Signature souscripteur","Cachet & Signature AFG"],["",""],["",""]],
+                                     colWidths=[8.5*cm,8.5*cm])
+                        sig.setStyle(TableStyle([
+                            ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("FONTSIZE",(0,0),(-1,-1),8),
+                            ("ALIGN",(0,0),(-1,-1),"CENTER"),
+                            ("BOX",(0,1),(0,2),0.5,C_N),("BOX",(1,1),(1,2),0.5,C_N),
+                            ("BOTTOMPADDING",(0,1),(-1,2),25),
                         ]))
-                        return t
+                        items.append(sig)
+                        items.append(Spacer(1,0.15*cm))
+                        items.append(Paragraph("AFG Assurances Bénin Vie · Groupe AFG Holding · Conforme CIMA",st_sm))
+                        return items
 
                     story = []
-
-                    # En-tête
-                    # En-tête avec logo AFG encodé base64
-                    import base64 as _b64
-                    try:
-                        from reportlab.platypus import Image as RLImage
-                        from io import BytesIO as _BIO
-                        # Logo AFG depuis le code
-                        _logo_b64_pdf = LOGO_B64  # variable globale
-                        _logo_bytes = _b64.b64decode(_logo_b64_pdf)
-                        _logo_img = RLImage(_BIO(_logo_bytes), width=4*cm, height=1.8*cm)
-                        _logo_img.hAlign = 'CENTER'
-                        story.append(_logo_img)
-                        story.append(Spacer(1, 0.2*cm))
-                    except Exception:
-                        pass
-                    hdr_t = Table([[Paragraph("AFG ASSURANCES BÉNIN VIE", st_ti)],
-                        [Paragraph("RAPPORT DE GESTION", st_su)],
-                        [Paragraph(f"Période d'analyse : {period_lbl}  ·  Édité le {_dt.now().strftime('%d %B %Y')}", st_su)]],
-                        colWidths=[17*cm])
-                    hdr_t.setStyle(TableStyle([
-                        ("BACKGROUND",(0,0),(-1,-1),C_N),
-                        ("ALIGN",(0,0),(-1,-1),"CENTER"),
-                        ("TOPPADDING",(0,0),(-1,-1),14),
-                        ("BOTTOMPADDING",(0,0),(-1,-1),14),
-                    ]))
-                    story.append(hdr_t)
+                    story.extend(_exemplaire("EXEMPLAIRE CLIENT"))
                     story.append(Spacer(1,0.3*cm))
-                    info_t = Table([
-                        ["Destinataire :", dest],
-                        ["Rédigé par :", auteur],
-                        ["Classification :", "Confidentiel · Usage interne"],
-                        ["Référence :", f"AFG-RPT-{_dt.now().strftime('%Y%m%d')}"],
-                    ], colWidths=[5*cm,12*cm])
-                    info_t.setStyle(TableStyle([
-                        ("FONTNAME",(0,0),(0,-1),"Helvetica-Bold"),
-                        ("FONTSIZE",(0,0),(-1,-1),9),
-                        ("TEXTCOLOR",(0,0),(0,-1),C_N),
-                        ("ROWBACKGROUNDS",(0,0),(-1,-1),[C_L,C_W]),
-                        ("TOPPADDING",(0,0),(-1,-1),5),
-                        ("BOTTOMPADDING",(0,0),(-1,-1),5),
-                        ("LEFTPADDING",(0,0),(-1,-1),8),
-                    ]))
-                    story.append(info_t)
-                    story.append(Spacer(1,0.35*cm))
+                    story.append(HRFlowable(width="100%",thickness=0.8,color=C_R,dash=[3,3],spaceAfter=3))
+                    story.append(Paragraph("✂ — — — Découper ici — — — ✂",
+                        ParagraphStyle("C",fontName="Helvetica",fontSize=8,textColor=rl_colors.grey,alignment=TA_CENTER)))
+                    story.append(Spacer(1,0.3*cm))
+                    story.extend(_exemplaire("EXEMPLAIRE AFG ASSURANCES"))
 
-                    # ── Synthese executive : les chiffres cles en un coup d'oeil ──
-                    _sx_nb  = len(_pf_r) if _pf_r is not None else 0
-                    _sx_act = (int((_pf_r["ETAT_POLICE"].str.strip()=="ACTIF").sum())
-                               if (_pf_r is not None and "ETAT_POLICE" in _pf_r.columns) else 0)
-                    _sx_ca  = (float(_ca_r["CHIFAFFA"].fillna(0).sum())
-                               if (_ca_r is not None and "CHIFAFFA" in _ca_r.columns) else 0)
-                    _sx_nq  = len(_ca_r) if _ca_r is not None else 0
-                    _sx_cr  = next((c for c in (_sin_r.columns if _sin_r is not None else [])
-                                    if "glement" in c.lower() and "otal" in c.lower()), None)
-                    _sx_sin = float(_sin_r[_sx_cr].fillna(0).sum()) if _sx_cr else 0
-                    _sx_sp  = (_sx_sin/_sx_ca*100) if _sx_ca else 0
+                    doc.build(story)
+                    _pdf_bia = _buf.getvalue()
+                    _nom_bia = st.session_state.get("f_c_nom","").upper()
+                    st.success(f"✅ BIA généré — {len(_pdf_bia)//1024} Ko")
+                    st.download_button("📥 Télécharger le BIA (PDF — 2 exemplaires)",
+                        data=_pdf_bia,
+                        file_name=f"BIA_PA0_{_nom_bia}_{_dt.now().strftime('%Y%m%d')}.pdf",
+                        mime="application/pdf", use_container_width=True,
+                        type="primary", key="dl_bia_pdf_final")
+                except ImportError:
+                    alert("La bibliothèque <b>reportlab</b> n'est pas installée.","danger")
+                except Exception as _ep_bia:
+                    alert(f"Erreur impression BIA : {_ep_bia}","danger")
 
-                    story.append(Paragraph("SYNTHÈSE", st_h1))
-                    _sx_rows = [
-                        ["Polices du périmètre", nb_full(_sx_nb),
-                         "Polices actives", nb_full(_sx_act)],
-                        ["Chiffre d'affaires", fmt_full(_sx_ca),
-                         "Quittances émises", nb_full(_sx_nq)],
-                        ["Sinistres réglés", fmt_full(_sx_sin),
-                         "Ratio S/P", f"{_sx_sp:.1f} %"],
-                    ]
-                    _sx_t = Table(_sx_rows, colWidths=[4.6*cm,3.9*cm,4.6*cm,3.9*cm])
-                    _sx_t.setStyle(TableStyle([
-                        ("FONTNAME",(0,0),(0,-1),"Helvetica"),
-                        ("FONTNAME",(2,0),(2,-1),"Helvetica"),
-                        ("FONTNAME",(1,0),(1,-1),"Helvetica-Bold"),
-                        ("FONTNAME",(3,0),(3,-1),"Helvetica-Bold"),
-                        ("FONTSIZE",(0,0),(-1,-1),9),
-                        ("TEXTCOLOR",(1,0),(1,-1),C_G),
-                        ("TEXTCOLOR",(3,0),(3,-1),C_G),
-                        ("ROWBACKGROUNDS",(0,0),(-1,-1),[C_L,C_W]),
-                        ("BOX",(0,0),(-1,-1),.6,C_N),
-                        ("INNERGRID",(0,0),(-1,-1),.25,rl_colors.HexColor("#DDE3EE")),
-                        ("TOPPADDING",(0,0),(-1,-1),6),
-                        ("BOTTOMPADDING",(0,0),(-1,-1),6),
-                        ("LEFTPADDING",(0,0),(-1,-1),8),
-                    ]))
-                    story.append(_sx_t)
-                    story.append(Spacer(1,0.2*cm))
-                    story.append(Paragraph(
-                        f"Le périmètre retenu pour ce rapport est <b>{period_lbl}</b>. "
-                        f"Les montants sont exprimés en francs CFA et arrondis à l'unité. "
-                        f"Chaque section présente les indicateurs, la représentation "
-                        f"graphique associée et une note de lecture.", st_bd))
-                    story.append(Spacer(1,0.35*cm))
-                    story.append(HRFlowable(width="100%",thickness=2,color=C_G,spaceAfter=6))
+            # ── Bouton PDF universel (tous produits) ────────────────────────────────
+            if False:
+                if st.button("🖨️ Télécharger le BIA (PDF — 2 exemplaires)",
+                             use_container_width=True, key="dl_bia_btn_all"):
+                    try:
+                        from reportlab.lib.pagesizes import A4
+                        from reportlab.lib.units import cm
+                        from reportlab.lib import colors as _rlc
+                        from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
+                            Table, TableStyle, HRFlowable, Image as _RLImg)
+                        from reportlab.lib.styles import ParagraphStyle
+                        from reportlab.lib.enums import TA_CENTER
+                        import io as _io2, base64 as _b64_2
+                        from datetime import datetime as _dt2
+                        _buf2 = _io2.BytesIO()
+                        _doc2 = SimpleDocTemplate(_buf2, pagesize=A4,
+                            leftMargin=1.5*cm, rightMargin=1.5*cm,
+                            topMargin=1.5*cm, bottomMargin=1.5*cm)
+                        _CN=_rlc.HexColor("#0D1F3C"); _CG=_rlc.HexColor("#1A7F6E")
+                        _CR=_rlc.HexColor("#C0392B"); _CW=_rlc.white; _CL=_rlc.HexColor("#F3F6FA")
+                        _st_ti=ParagraphStyle("T",fontName="Helvetica-Bold",fontSize=11,textColor=_CW,alignment=TA_CENTER)
+                        _st_su=ParagraphStyle("S",fontName="Helvetica",fontSize=8.5,textColor=_rlc.HexColor("#A9DFBF"),alignment=TA_CENTER)
+                        _st_bd=ParagraphStyle("B",fontName="Helvetica",fontSize=8.5,textColor=_rlc.HexColor("#2C3E50"),leading=12)
+                        _st_sm=ParagraphStyle("M",fontName="Helvetica",fontSize=7.5,textColor=_rlc.grey,alignment=TA_CENTER)
+                        _nom_sous_g = f"{st.session_state.get('f_c_tit','')} {st.session_state.get('f_c_nom','').upper()} {st.session_state.get('f_c_prn','')}".strip()
+                        def _gen_bia_ex(lbl):
+                            _it=[]
+                            try:
+                                _img=_RLImg(_io2.BytesIO(_b64_2.b64decode(LOGO_B64)),width=3.5*cm,height=1.5*cm)
+                                _img.hAlign="CENTER"; _it.append(_img); _it.append(Spacer(1,.15*cm))
+                            except Exception: pass
+                            _h=Table([[Paragraph("BULLETIN INDIVIDUEL D'ADHÉSION",_st_ti)],
+                                      [Paragraph(f"{prod['nom']} — AFG Assurances Bénin Vie",_st_su)],
+                                      [Paragraph(f"Exemplaire : {lbl}",_st_su)]],colWidths=[17*cm])
+                            _h.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,-1),_CN),
+                                ("ALIGN",(0,0),(-1,-1),"CENTER"),
+                                ("TOPPADDING",(0,0),(-1,-1),7),("BOTTOMPADDING",(0,0),(-1,-1),7)]))
+                            _it.append(_h); _it.append(Spacer(1,.2*cm))
+                            _rows=[
+                                ["N° BIA",st.session_state.get("_last_bia_num","—"),"Date",_dt2.now().strftime("%d/%m/%Y")],
+                                ["Produit",prod["nom"],"Code",prod["code"]],
+                                ["Souscripteur",_nom_sous_g,"Téléphone",st.session_state.get("f_c_tel","—")],
+                                ["Cotisation",f"{int(st.session_state.get('f_coti',0)):,} FCFA / {st.session_state.get('f_peri','—')}","Capital",f"{int(st.session_state.get('f_cap',0)):,} FCFA"],
+                                ["Date effet",str(st.session_state.get("f_deff","—")),"Durée",f"{st.session_state.get('f_duree','—')} an(s)"],
+                                ["Mode règlement",st.session_state.get("f_mode","—"),"Référence",st.session_state.get("f_mref","—") or "—"],
+                                ["Apporteur",st.session_state.get("f_nom_appo","—") or "—","Code",str(st.session_state.get("f_code_appo","—"))],
+                            ]
+                            _t=Table(_rows,colWidths=[4*cm,4.5*cm,4*cm,4.5*cm])
+                            _t.setStyle(TableStyle([
+                                ("FONTNAME",(0,0),(0,-1),"Helvetica-Bold"),("FONTNAME",(2,0),(2,-1),"Helvetica-Bold"),
+                                ("FONTSIZE",(0,0),(-1,-1),8.5),("ROWBACKGROUNDS",(0,0),(-1,-1),[_CL,_CW]),
+                                ("GRID",(0,0),(-1,-1),.3,_rlc.HexColor("#DDE3EE")),
+                                ("TOPPADDING",(0,0),(-1,-1),5),("BOTTOMPADDING",(0,0),(-1,-1),5),("LEFTPADDING",(0,0),(-1,-1),6),
+                            ]))
+                            _it.append(_t); _it.append(Spacer(1,.3*cm))
+                            _it.append(Paragraph("Je soussigné(e) certifie l'exactitude des informations ci-dessus et reconnais avoir reçu les conditions générales.",_st_bd))
+                            _it.append(Spacer(1,.5*cm))
+                            _sig=Table([["Signature souscripteur","Cachet & Signature AFG"],["",""],["",""]],colWidths=[8.5*cm,8.5*cm])
+                            _sig.setStyle(TableStyle([("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
+                                ("FONTSIZE",(0,0),(-1,-1),8),("ALIGN",(0,0),(-1,-1),"CENTER"),
+                                ("BOX",(0,1),(0,2),.5,_CN),("BOX",(1,1),(1,2),.5,_CN),
+                                ("BOTTOMPADDING",(0,1),(-1,2),22)]))
+                            _it.append(_sig); _it.append(Spacer(1,.15*cm))
+                            _it.append(Paragraph("AFG Assurances Bénin Vie · Groupe AFG Holding · Conforme CIMA",_st_sm))
+                            return _it
+                        _st2=[]
+                        _st2.extend(_gen_bia_ex("EXEMPLAIRE CLIENT"))
+                        _st2.append(Spacer(1,.3*cm))
+                        _st2.append(HRFlowable(width="100%",thickness=.7,color=_CR,dash=[3,3],spaceAfter=3))
+                        _st2.append(Paragraph("✂  —  —  Découper ici  —  —  ✂",
+                            ParagraphStyle("CUT",fontName="Helvetica",fontSize=7.5,textColor=_rlc.grey,alignment=TA_CENTER)))
+                        _st2.append(Spacer(1,.3*cm))
+                        _st2.extend(_gen_bia_ex("EXEMPLAIRE AFG ASSURANCES BÉNIN VIE"))
+                        _doc2.build(_st2)
+                        _pdf2=_buf2.getvalue()
+                        _fn2=f"BIA_{prod['code']}_{_nom_sous_g.replace(' ','_')}_{_dt2.now().strftime('%Y%m%d')}.pdf"
+                        st.success(f"✅ BIA généré — {len(_pdf2)//1024} Ko")
+                        st.download_button("📥 Télécharger le BIA PDF",data=_pdf2,file_name=_fn2,
+                            mime="application/pdf",use_container_width=True,type="primary",key="dl_bia_pdf_final_b")
+                    except ImportError:
+                        alert("La bibliothèque <b>reportlab</b> n'est pas installée.","danger")
+                    except Exception as _ep_g:
+                        alert(f"Erreur génération PDF : {_ep_g}","danger")
 
-                    # 1. KPIs
-                    if s_kpis and _pf_r is not None:
-                        story.append(_sec("1.  PORTEFEUILLE DE POLICES"))
-                        story.append(Spacer(1,0.2*cm))
-                        _nb  = len(_pf_r); _ek="ETAT_POLICE"
-                        _act = int((_pf_r[_ek].str.strip().isin(["ACTIF"])).sum()) if _ek in _pf_r.columns else 0
-                        _res = int((_pf_r[_ek].str.strip()=="RESILIE").sum()) if _ek in _pf_r.columns else 0
-                        _ina = int((_pf_r[_ek].str.strip()=="INACTIF").sum()) if _ek in _pf_r.columns else 0
-                        _ec  = int((_pf_r[_ek].str.strip().isin(["ECHU","ASSURE ECHU"])).sum()) if _ek in _pf_r.columns else 0
-                        _mon = float(_pf_r["MONTENCA"].fillna(0).sum()) if "MONTENCA" in _pf_r.columns else 0
-                        _txa = _act/_nb*100 if _nb else 0
-                        _txr = _res/max(_nb-_ina,1)*100
-                        kd   = [["Indicateur","Valeur","Note"],
-                            ["Total polices",         nb_full(_nb),   "Ensemble du portefeuille"],
-                            ["Polices actives",        nb_full(_act), f"Taux activité : {_txa:.1f}%"],
-                            ["Polices résiliées",      nb_full(_res), f"Tx CIMA : {_txr:.1f}% (seuil ≤25%)"],
-                            ["Polices échues",         nb_full(_ec),  "ECHU + ASSURE ECHU"],
-                            ["Encaissements (MONTENCA)",fmt_full(_mon),  "Total encaissements FCFA"]]
-                        story.append(_tbl_style(kd,[7*cm,4*cm,6*cm]))
-                        story.append(Spacer(1,0.2*cm))
-                        # Graphique : repartition des etats
-                        _lab_e = ["Actives","Résiliées","Échues","Inactives"]
-                        _val_e = [_act, _res, _ec, _ina]
-                        _pair  = [(l,v) for l,v in zip(_lab_e,_val_e) if v > 0]
-                        if _pair:
-                            story.append(Spacer(1,0.15*cm))
-                            story.append(_mpl_pie([p[0] for p in _pair],
-                                                [p[1] for p in _pair],
-                                                f"Structure du portefeuille · {period_lbl}"))
-                            story.append(Spacer(1,0.18*cm))
-                            story.append(_mpl_treemap([p[0] for p in _pair],
-                                                  [p[1] for p in _pair],
-                                                  "Poids relatif de chaque état"))
+            st.markdown("")
+            b1,b2,b3=st.columns([1,1,1.4])
+            if b1.button("← Retour", key=f"ret7_{4157}"): st.session_state["bia_step"] = 5 if _is_crt_step else 6; st.rerun()
+            if b2.button("💾 Brouillon"):
+                num=save_bia("Brouillon")
+                if num: st.info(f"💾 Brouillon **{num}** enregistré. Retrouvez-le dans la Base BIA.")
+            if b3.button("✅ VALIDER LE BIA",type="primary"):
+                errs=[]
+                if not st.session_state.get("f_c_nom","").strip(): errs.append("Nom souscripteur obligatoire")
+                if not st.session_state.get("f_dc"): errs.append("Conditions de souscription requises")
+                if not st.session_state.get("f_dd"): errs.append("Politique données requise")
+                if errs:
+                    for e in errs: st.error(f"❌ {e}")
+                else:
+                    num=save_bia("Validé")
+                    if num: st.balloons(); st.success(f"🎉 BIA **{num}** validé ! {st.session_state.get('f_c_tit','')} {st.session_state.get('f_c_nom','').upper()}")
+                    if num:
+                        st.session_state["bia_saved_id"] = num
+                        st.session_state["_bia_print_ready"] = True
 
-                        # Top produits du portefeuille
-                        if "LIBECATE" in _pf_r.columns:
-                            _tp = (_pf_r["LIBECATE"].astype(str).str.strip()
-                                     .value_counts().head(8))
-                            if not _tp.empty:
+                # ── Bouton impression PDF (pour courtier PA0) ─────────────────
+                if st.session_state.get("_bia_print_ready"):
+                    st.markdown("---")
+                    if st.button("🖨️ Imprimer le BIA (2 exemplaires)", type="primary",
+                                 use_container_width=True, key="print_bia_pa0"):
+                        try:
+                            from reportlab.lib.pagesizes import A4
+                            from reportlab.lib.styles import ParagraphStyle
+                            from reportlab.lib.units import cm
+                            from reportlab.lib import colors as _rc
+                            from reportlab.platypus import (SimpleDocTemplate, Paragraph,
+                                Spacer, Table, TableStyle, HRFlowable)
+                            from reportlab.lib.enums import TA_CENTER
+                            import io as _io, base64 as _b64
+                            from datetime import datetime as _dt
+
+                            def _bloc_bia(story, label_expl):
+                                """Génère un exemplaire du BIA."""
+                                C_N = _rc.HexColor("#0D1F3C"); C_G = _rc.HexColor("#1A7F6E")
+                                C_R = _rc.HexColor("#C0392B"); C_L = _rc.HexColor("#F3F6FA")
+                                st_ti  = ParagraphStyle("T",fontName="Helvetica-Bold",fontSize=12,textColor=_rc.white,alignment=TA_CENTER)
+                                st_su  = ParagraphStyle("S",fontName="Helvetica",fontSize=8,textColor=_rc.HexColor("#A9DFBF"),alignment=TA_CENTER)
+                                st_lbl = ParagraphStyle("L",fontName="Helvetica-Bold",fontSize=8,textColor=C_N)
+                                st_val = ParagraphStyle("V",fontName="Helvetica",fontSize=9,textColor=_rc.HexColor("#2C3E50"))
+                                st_sm  = ParagraphStyle("Sm",fontName="Helvetica",fontSize=7,textColor=_rc.grey)
+                                ss     = st.session_state
+                                # Bandeau exemplaire
+                                col_band = C_R if label_expl=="CLIENT" else C_N
+                                band = Table([[Paragraph(f"EXEMPLAIRE {label_expl}",
+                                    ParagraphStyle("EX",fontName="Helvetica-Bold",fontSize=9,
+                                    textColor=_rc.white,alignment=TA_CENTER))]],colWidths=[17*cm])
+                                band.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,-1),col_band),
+                                    ("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4)]))
+                                story.append(band)
+                                # Logo
+                                try:
+                                    _img = __import__("reportlab.platypus",fromlist=["Image"]).Image
+                                    story.append(_img(_io.BytesIO(_b64.b64decode(LOGO_B64)),
+                                        width=4*cm,height=1.6*cm))
+                                except Exception: pass
+                                # En-tête
+                                hdr = Table([[Paragraph("AFG ASSURANCES BÉNIN VIE",st_ti)],
+                                    [Paragraph("BULLETIN D'ADHÉSION — PRÉVOYANCE AUTO",st_su)],
+                                    [Paragraph(f"N° : {ss.get('bia_saved_id','—')}  ·  {_dt.now().strftime('%d/%m/%Y')}",st_su)]],
+                                    colWidths=[17*cm])
+                                hdr.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,-1),C_N),
+                                    ("ALIGN",(0,0),(-1,-1),"CENTER"),
+                                    ("TOPPADDING",(0,0),(-1,-1),8),("BOTTOMPADDING",(0,0),(-1,-1),8)]))
+                                story.append(hdr); story.append(Spacer(1,0.2*cm))
+                                def _sec(t):
+                                    s=Table([[Paragraph(t,ParagraphStyle("SH",fontName="Helvetica-Bold",
+                                        fontSize=9,textColor=_rc.white))]],colWidths=[17*cm])
+                                    s.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,-1),C_G),
+                                        ("LEFTPADDING",(0,0),(-1,-1),8),("TOPPADDING",(0,0),(-1,-1),4),
+                                        ("BOTTOMPADDING",(0,0),(-1,-1),4)]))
+                                    return s
+                                def _tbl(rows):
+                                    t=Table([[Paragraph(r[0],st_lbl),
+                                        Paragraph(str(r[1]) if r[1] else "—",st_val)]
+                                        for r in rows],colWidths=[5.5*cm,11.5*cm])
+                                    t.setStyle(TableStyle([
+                                        ("ROWBACKGROUNDS",(0,0),(-1,-1),[C_L,_rc.white]),
+                                        ("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4),
+                                        ("LEFTPADDING",(0,0),(-1,-1),6),
+                                        ("GRID",(0,0),(-1,-1),0.3,_rc.HexColor("#DDE3EE"))]))
+                                    return t
+                                # Courtier
+                                story.append(_sec("COURTIER / INTERMÉDIAIRE"))
+                                story.append(_tbl([["Courtier :",ss.get("f_courtier_nom","—")],
+                                                   ["Date de saisie :",_dt.now().strftime("%d/%m/%Y")]]))
+                                story.append(Spacer(1,0.15*cm))
+                                # Souscripteur
+                                story.append(_sec("SOUSCRIPTEUR / ASSURÉ"))
+                                ddn_s = ss.get("f_c_ddn","")
+                                try: ddn_s = _dt.strptime(str(ddn_s),"%Y-%m-%d").strftime("%d/%m/%Y")
+                                except: pass
+                                story.append(_tbl([
+                                    ["Nom complet :",f"{ss.get('f_c_tit','')} {ss.get('f_c_nom','').upper()} {ss.get('f_c_prn','')}".strip()],
+                                    ["Date de naissance :",ddn_s],
+                                    ["Téléphone :",ss.get("f_c_tel","—")],
+                                    ["Adresse :",ss.get("f_c_adr","—")],
+                                    ["Nationalité :",ss.get("f_c_nat","Béninoise")]]))
+                                story.append(Spacer(1,0.15*cm))
+                                # Contrat
+                                story.append(_sec("CONTRAT"))
+                                prime_v = float(ss.get("f_coti",0))
+                                cap_v   = float(ss.get("f_cap",0))
+                                deff_s  = ss.get("f_deff","")
+                                term_s  = ss.get("f_terme_auto","")
+                                try: deff_s = _dt.strptime(str(deff_s),"%Y-%m-%d").strftime("%d/%m/%Y")
+                                except: pass
+                                try: term_s = _dt.strptime(str(term_s),"%Y-%m-%d").strftime("%d/%m/%Y")
+                                except: pass
+                                story.append(_tbl([
+                                    ["Produit :","Prévoyance Auto (PA0)"],
+                                    ["Prime annuelle :",f"{prime_v:,.0f} FCFA"],
+                                    ["Capital garanti décès :",f"{cap_v:,.0f} FCFA"],
+                                    ["Date d'effet :",deff_s],
+                                    ["Date terme :",term_s],
+                                    ["Mode de règlement :",ss.get("f_mode","—")],
+                                    ["Référence paiement :",ss.get("f_mref","—")]]))
                                 story.append(Spacer(1,0.2*cm))
+                                # Signatures
+                                story.append(_sec("SIGNATURES"))
+                                sig = Table([[Paragraph("Signature du souscripteur",st_lbl),
+                                             Paragraph("Cachet & Signature AFG",st_lbl)],
+                                            [Paragraph("\n\n\n",st_val),Paragraph("\n\n\n",st_val)]],
+                                    colWidths=[8.5*cm,8.5*cm])
+                                sig.setStyle(TableStyle([
+                                    ("BOX",(0,1),(0,1),1,_rc.HexColor("#CCCCCC")),
+                                    ("BOX",(1,1),(1,1),1,_rc.HexColor("#CCCCCC")),
+                                    ("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4),
+                                    ("LEFTPADDING",(0,0),(-1,-1),6),("ALIGN",(0,0),(-1,-1),"CENTER")]))
+                                story.append(sig)
+                                story.append(Spacer(1,0.1*cm))
                                 story.append(Paragraph(
-                                    "Composition du portefeuille par produit :", st_h2))
-                                _tpr = [["Produit","Polices","Part"]]
-                                for _n, _v in _tp.items():
-                                    _tpr.append([str(_n)[:42], nb_full(int(_v)),
-                                                 f"{_v/_nb*100:.1f} %"])
-                                story.append(_tbl_style(_tpr,[9.5*cm,3.5*cm,4*cm]))
-                                story.append(Spacer(1,0.15*cm))
-                                story.append(_mpl_barh(
-                                    _tp.index.astype(str).tolist(),
-                                    _tp.values.tolist(),
-                                    f"Nombre de polices par produit · {period_lbl}",
-                                    haut=4.2))
-                        # Commentaire analytique
-                        _cm_cima = ("conforme aux exigences du Code CIMA (seuil ≤ 25 %)"
-                                    if _txr <= 25 else
-                                    "supérieur au seuil réglementaire CIMA de 25 %, "
-                                    "ce qui appelle un plan de rétention")
-                        _cm_act  = ("un niveau d'activité satisfaisant" if _txa >= 50
-                                    else "un niveau d'activité à consolider")
-                        story.append(Spacer(1,0.15*cm))
-                        story.append(Paragraph(
-                            f"<b>Lecture.</b> Sur la période <b>{period_lbl}</b>, le portefeuille "
-                            f"comprend <b>{_nb:,}</b> polices, dont <b>{_act:,}</b> actives, "
-                            f"soit un taux d'activité de <b>{_txa:.1f} %</b> traduisant {_cm_act}. "
-                            f"Le taux de résiliation ressort à <b>{_txr:.1f} %</b>, {_cm_cima}. "
-                            f"Les encaissements cumulés atteignent <b>{fmt_full(_mon)}</b>.".replace(",", " "),
-                            st_bd))
+                                    "<i>AFG Assurances Bénin Vie · Groupe AFG Holding · Conforme CIMA</i>",st_sm))
+                                story.append(HRFlowable(width="100%",thickness=0.5,color=C_G,spaceAfter=3))
 
-                    # 2. CA
-                    if s_ca and _ca_r is not None:
-                        story.append(Spacer(1,0.3*cm))
-                        story.append(_sec("2.  CHIFFRE D'AFFAIRES"))
-                        story.append(Spacer(1,0.2*cm))
-                        _cat = float(_ca_r["CHIFAFFA"].fillna(0).sum()) if "CHIFAFFA" in _ca_r.columns else 0
-                        _cm  = float(_ca_r["COMMAPPO"].fillna(0).sum()) if "COMMAPPO" in _ca_r.columns else 0
-                        _pr  = float(_ca_r["PRIMNETT"].fillna(0).sum()) if "PRIMNETT" in _ca_r.columns else 0
-                        _nq  = len(_ca_r); _tk = _cat/_nq if _nq else 0
-                        cd   = [["Indicateur","Valeur","Note"],
-                            ["CA brut total",      fmt_full(_cat),   "CHIFAFFA total"],
-                            ["Prime nette totale", fmt_full(_pr),    "Après chargements"],
-                            ["Commissions",        fmt_full(_cm),    f"Taux : {_cm/_cat*100:.1f}%" if _cat else "—"],
-                            ["Nb quittances",      nb_full(_nq), "Émissions totales"],
-                            ["Ticket moyen",       fmt_full(_tk),   "CA/quittance"]]
-                        story.append(_tbl_style(cd,[7*cm,4*cm,6*cm]))
-                        if "LIBECATE" in _ca_r.columns:
-                            story.append(Spacer(1,0.2*cm))
-                            story.append(Paragraph("Répartition par produit (Top 8) :", st_h2))
-                            _cp = _ca_r.groupby("LIBECATE")["CHIFAFFA"].sum().reset_index()
-                            _cp = _cp.sort_values("CHIFAFFA",ascending=False).head(8)
-                            _cp["Part"] = (_cp["CHIFAFFA"]/_cat*100).round(1)
-                            pd_   = [["Produit","CA (FCFA)","Part %"]] + [
-                                [str(r["LIBECATE"])[:38],
-                                 fmt_full(r["CHIFAFFA"],""),
-                                 f"{r['Part']:.1f}%"]
-                                for _,r in _cp.iterrows()]
-                            story.append(_tbl_style(pd_,[9*cm,4.5*cm,3.5*cm]))
-                            story.append(Spacer(1,0.15*cm))
-                            story.append(_mpl_barh(
-                                _cp["LIBECATE"].astype(str).tolist(),
-                                _cp["CHIFAFFA"].tolist(),
-                                f"Chiffre d'affaires par produit · {period_lbl}"))
-                            _p1n = str(_cp.iloc[0]["LIBECATE"])[:34]
-                            _p1p = float(_cp.iloc[0]["Part"])
-                            _c3  = float(_cp.head(3)["CHIFAFFA"].sum())/_cat*100 if _cat else 0
-                            story.append(Spacer(1,0.15*cm))
-                            story.append(Paragraph(
-                                f"<b>Lecture.</b> Le chiffre d'affaires de la période s'établit à "
-                                f"<b>{fmt_full(_cat)}</b> pour <b>{_nq:,}</b> quittances, "
-                                f"soit un ticket moyen de <b>{fmt_full(_tk)}</b>. "
-                                f"Le produit <b>{_p1n}</b> concentre <b>{_p1p:.1f} %</b> du CA ; "
-                                f"les trois premiers produits en représentent <b>{_c3:.1f} %</b>, "
-                                f"{'traduisant une concentration marquée à surveiller' if _c3 >= 70 else 'ce qui reflète une répartition équilibrée'}."
-                                .replace(",", " "), st_bd))
+                            _buf = _io.BytesIO()
+                            doc  = SimpleDocTemplate(_buf, pagesize=A4,
+                                leftMargin=1.5*cm, rightMargin=1.5*cm,
+                                topMargin=1.5*cm, bottomMargin=1.5*cm)
+                            story = []
+                            _bloc_bia(story, "CLIENT")
+                            story.append(Spacer(1,0.3*cm))
+                            story.append(Table([[Paragraph(
+                                "✂ — — — — — — — — — — — — — — — — — — — — — — — — ✂",
+                                ParagraphStyle("cut",fontName="Helvetica",fontSize=8,
+                                textColor=__import__("reportlab.lib.colors",fromlist=["grey"]).grey,
+                                alignment=TA_CENTER))]],colWidths=[17*cm]))
+                            story.append(Spacer(1,0.3*cm))
+                            _bloc_bia(story, "AFG")
+                            doc.build(story)
+                            _pdf = _buf.getvalue()
+                            _nom = f"{st.session_state.get('f_c_nom','').upper()}_{st.session_state.get('f_c_prn','')}"
+                            st.success(f"✅ BIA généré — {len(_pdf)//1024} Ko")
+                            st.download_button("📥 Télécharger le BIA (PDF 2 exemplaires)",
+                                data=_pdf,
+                                file_name=f"BIA_PA0_{_nom}_{_dt.now().strftime('%Y%m%d')}.pdf",
+                                mime="application/pdf",
+                                use_container_width=True, type="primary",
+                                key="dl_bia_pdf")
+                        except ImportError:
+                            alert("reportlab non installé.","danger")
+                        except Exception as _e_bp:
+                            alert(f"Erreur PDF : {_e_bp}","danger")
 
-                        # Evolution mensuelle du CA sur le perimetre
-                        _cdt = next((c for c in ["DATECOMP","DATEEFFE"]
-                                     if c in _ca_r.columns), None)
-                        if _cdt:
-                            _ev = _ca_r[[_cdt,"CHIFAFFA"]].copy()
-                            _ev["_M"] = pd.to_datetime(_ev[_cdt], errors="coerce")
-                            _ev = _ev.dropna(subset=["_M"])
-                            if not _ev.empty:
-                                _ev["_ML"] = _ev["_M"].dt.strftime("%Y-%m")
-                                _evg = (_ev.groupby("_ML")["CHIFAFFA"].sum()
-                                          .reset_index().sort_values("_ML"))
-                                if len(_evg) >= 2:
-                                    _evg = _evg.tail(12)
-                                    story.append(Spacer(1,0.2*cm))
-                                    story.append(_mpl_barv(
-                                        _evg["_ML"].tolist(),
-                                        [_evg["CHIFAFFA"].tolist()],
-                                        ["Chiffre d'affaires"],
-                                        f"Évolution mensuelle du chiffre d'affaires · {period_lbl}"))
-                                    _mx = _evg.loc[_evg["CHIFAFFA"].idxmax()]
-                                    _mn = _evg.loc[_evg["CHIFAFFA"].idxmin()]
-                                    _moy = float(_evg["CHIFAFFA"].mean())
-                                    story.append(Spacer(1,0.12*cm))
-                                    story.append(Paragraph(
-                                        f"<b>Lecture.</b> Sur les {len(_evg)} mois observés, "
-                                        f"la production mensuelle moyenne ressort à "
-                                        f"<b>{fmt_full(_moy)}</b>. Le mois le plus actif est "
-                                        f"<b>{_mx['_ML']}</b> ({fmt_full(_mx['CHIFAFFA'])}), "
-                                        f"le plus faible <b>{_mn['_ML']}</b> "
-                                        f"({fmt_full(_mn['CHIFAFFA'])}), soit un rapport de "
-                                        f"<b>{_mx['CHIFAFFA']/max(_mn['CHIFAFFA'],1):.1f}</b> "
-                                        f"entre les deux extrêmes.", st_bd))
 
-                    # 3. Commerciaux
-                    if s_com and _ca_r is not None:
-                        story.append(Spacer(1,0.3*cm))
-                        story.append(_sec("3.  PERFORMANCE COMMERCIALE & PARTENAIRES"))
-                        story.append(Spacer(1,0.2*cm))
-                        # Nom de l'apporteur : CODEAPPO (CA) enrichi par NOM_APP (Portefeuille)
-                        _agk = next((c for c in ["NOM_APPORT","NOM_APPO",
-                                                 "NOM_INTERMEDIAIRE","NOM_APP"]
-                                     if c in _ca_r.columns), None)
-                        if _agk is None:
-                            _cd_r = next((c for c in ["CODEAPPO","CODE_APPO"]
-                                          if c in _ca_r.columns), None)
-                            _cd_p = next((c for c in ["CODEAPPO","CODE_APPO"]
-                                          if pf is not None and c in pf.columns), None)
-                            _nm_p = next((c for c in ["NOM_APP","NOM_APPORT","NOM_APPO"]
-                                          if pf is not None and c in pf.columns), None)
-                            if _cd_r and _cd_p and _nm_p:
-                                _rf = (pf[[_cd_p,_nm_p]].dropna(subset=[_cd_p])
-                                         .astype({_cd_p:str}).drop_duplicates(_cd_p)
-                                         .rename(columns={_cd_p:_cd_r, _nm_p:"_NOM_R"}))
-                                _ca_r = _ca_r.astype({_cd_r:str}).merge(_rf, on=_cd_r, how="left")
-                                _ca_r["_NOM_R"] = _ca_r["_NOM_R"].fillna(
-                                    "Code " + _ca_r[_cd_r].astype(str))
-                                _agk = "_NOM_R"
-                            elif _cd_r:
-                                _ca_r = _ca_r.copy()
-                                _ca_r["_NOM_R"] = "Code " + _ca_r[_cd_r].astype(str)
-                                _agk = "_NOM_R"
-                        if _agk and _agk in _ca_r.columns:
-                            _g = _ca_r.groupby(_agk).agg(CA=("CHIFAFFA","sum"),NbQ=("CHIFAFFA","count")).reset_index()
-                            if "COMMAPPO" in _ca_r.columns:
-                                _gc = _ca_r.groupby(_agk)["COMMAPPO"].sum()
-                                _g["Comm"] = _gc.reindex(_g[_agk]).values
-                            else:
-                                _g["Comm"] = 0
-                            _gtot = float(_g["CA"].sum())
-                            _g = _g.sort_values("CA",ascending=False).head(10)
-                            _g["Part"] = (_g["CA"]/max(_gtot,1)*100).round(1)
-                            comD = [["Commercial / Apporteur","CA (FCFA)","Nb affaires","Commission","Part %"]]
-                            for _,r in _g.iterrows():
-                                comD.append([str(r[_agk])[:28],
-                                    fmt_full(r["CA"],""),
-                                    f"{int(r['NbQ']):,}".replace(",", " "),
-                                    fmt_full(r["Comm"],""), f"{r['Part']:.1f}%"])
-                            story.append(_tbl_style(comD,[7*cm,3.5*cm,2.2*cm,2.5*cm,1.8*cm]))
-                            story.append(Spacer(1,0.15*cm))
-                            story.append(_mpl_barh(
-                                _g[_agk].astype(str).tolist(), _g["CA"].tolist(),
-                                f"Top 10 apporteurs par chiffre d'affaires · {period_lbl}"))
-                            _t1n = str(_g.iloc[0][_agk])[:30]
-                            _t1p = float(_g.iloc[0]["Part"])
-                            _t5p = float(_g.head(5)["Part"].sum())
-                            story.append(Spacer(1,0.15*cm))
-                            story.append(Paragraph(
-                                f"<b>Lecture.</b> Le réseau de distribution est mené par "
-                                f"<b>{_t1n}</b>, qui réalise <b>{_t1p:.1f} %</b> du chiffre "
-                                f"d'affaires de la période. Les cinq premiers apporteurs "
-                                f"cumulent <b>{_t5p:.1f} %</b> du CA, "
-                                f"{'une concentration élevée qui expose la compagnie au départ d un partenaire majeur' if _t5p >= 80 else 'une répartition qui limite le risque de dépendance commerciale'}.",
-                                st_bd))
-                            story.append(Spacer(1,0.2*cm))
-                            # Partenaires financiers (code intermédiaire 3 chiffres, hors 100)
-                            _col_ci = next((c for c in ["CODEINTE","CODEAPPO","CODE_INTER"] if c in _ca_r.columns), None)
-                            _col_ni = next((c for c in ["NOM_APPORT","NOM_APPO","NOM_INTERMEDIAIRE"] if c in _ca_r.columns), None)
-                            if _col_ci:
-                                _ca_part = _ca_r.copy()   # période filtrée
-                                _ca_part[_col_ci] = _ca_part[_col_ci].astype(str).str.strip()
-                                _ca_part = _ca_part[
-                                    (_ca_part[_col_ci].str.len() == 3) &
-                                    (_ca_part[_col_ci] != "100") &
-                                    (_ca_part[_col_ci].str.isdigit())
-                                ]
-                                if not _ca_part.empty:
-                                    _grp_part_key = _col_ci if _col_ni is None else [_col_ci, _col_ni]
-                                    _gp = _ca_part.groupby(_grp_part_key).agg(
-                                        CA=("CHIFAFFA","sum"), NbAff=("CHIFAFFA","count")
-                                    ).reset_index().sort_values("CA",ascending=False).head(10)
-                                    story.append(Paragraph("Partenaires financiers (codes 3 chiffres, hors 100) :", st_h2))
-                                    _pD_hdr = ["Code","Partenaire","CA (FCFA)","Nb affaires"] if _col_ni else ["Code","CA (FCFA)","Nb affaires"]
-                                    _pD = [_pD_hdr]
-                                    for _,r in _gp.iterrows():
-                                        if _col_ni and isinstance(_grp_part_key, list):
-                                            _pD.append([str(r[_col_ci]), str(r[_col_ni])[:25],
-                                                        fmt_full(r["CA"],""),
-                                                        f"{int(r['NbAff']):,}".replace(",", " ")])
-                                        else:
-                                            _pD.append([str(r[_col_ci]), fmt_full(r["CA"],""),
-                                                        f"{int(r['NbAff']):,}".replace(",", " ")])
-                                    _pw = [2*cm,6*cm,4.5*cm,4.5*cm] if _col_ni else [3*cm,8*cm,6*cm]
-                                    story.append(_tbl_style(_pD, _pw))
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # PAGE — BASE BIA
+    # ═══════════════════════════════════════════════════════════════════════════════
+    except Exception as _e_page:
+        _erreur_onglet(_e_page, "Saisie BIA")
 
-                        # ── Comparaison de production N / N-1 ─────────────────
-                        # Etablie sur la base CA complete : une comparaison
-                        # annuelle suppose de disposer des deux exercices.
-                        _cd_r = next((c for c in ["DATECOMP","DATEEFFE","DATESOUS"]
-                                      if c in ca.columns), None)
-                        if _cd_r:
-                            _rb = ca.copy()
-                            _rb["_DT"] = pd.to_datetime(_rb[_cd_r], errors="coerce")
-                            _rb = _rb.dropna(subset=["_DT"])
-                            _rb["_AN"] = _rb["_DT"].dt.year
-                            _cak_r = "CHIFAFFA" if "CHIFAFFA" in _rb.columns else "MONTENCA"
-                            _ans_r = sorted(_rb["_AN"].unique().tolist())
-                            if len(_ans_r) >= 2:
-                                _aN, _aN1 = int(_ans_r[-1]), int(_ans_r[-2])
-                                _mN  = (_rb[_rb["_AN"]==_aN ].groupby(_rb["_DT"].dt.month)[_cak_r]
-                                          .sum().reindex(range(1,13), fill_value=0))
-                                _mN1 = (_rb[_rb["_AN"]==_aN1].groupby(_rb["_DT"].dt.month)[_cak_r]
-                                          .sum().reindex(range(1,13), fill_value=0))
-                                _MFR = ["Jan","Fév","Mar","Avr","Mai","Juin",
-                                        "Juil","Août","Sep","Oct","Nov","Déc"]
-                                story.append(Spacer(1,0.25*cm))
-                                story.append(Paragraph(
-                                    f"Production mensuelle comparée · {_aN} face à {_aN1} :", st_h2))
-                                story.append(_mpl_barv(
-                                    _MFR, [_mN1.tolist(), _mN.tolist()],
-                                    [str(_aN1), str(_aN)],
-                                    f"Chiffre d'affaires mensuel · {_aN} face à {_aN1}",
-                                    haut=4.4))
+elif "Base BIA" in page:
+    try:
+        df_bia = bia_all()
+        section("🗂️ Base BIA — Registre des contrats","CONSULTATION · EXPORT · GESTION")
 
-                                _tN_r, _tN1_r = float(_mN.sum()), float(_mN1.sum())
-                                _vr = ((_tN_r-_tN1_r)/_tN1_r*100) if _tN1_r else 0
-                                _cmpR = [["Mois", f"{_aN1} (FCFA)", f"{_aN} (FCFA)",
-                                          "Écart", "Var."]]
-                                for _k in range(12):
-                                    _v1, _v0 = float(_mN.iloc[_k]), float(_mN1.iloc[_k])
-                                    _vv = ((_v1-_v0)/_v0*100) if _v0 else None
-                                    _cmpR.append([_MFR[_k], fmt_full(_v0,""), fmt_full(_v1,""),
-                                                  fmt_full(_v1-_v0,""),
-                                                  "—" if _vv is None else f"{_vv:+.0f} %"])
-                                _cmpR.append(["TOTAL", fmt_full(_tN1_r,""), fmt_full(_tN_r,""),
-                                              fmt_full(_tN_r-_tN1_r,""), f"{_vr:+.1f} %"])
-                                story.append(Spacer(1,0.15*cm))
-                                story.append(_tbl_style(_cmpR,
-                                    [2.4*cm,3.9*cm,3.9*cm,3.6*cm,2.7*cm]))
+        if df_bia.empty:
+            alert("Aucun BIA enregistré. Utilisez l'onglet <b>Saisie BIA</b>.","info"); st.stop()
 
-                                _nb_h = int(sum(1 for _k in range(12)
-                                                if _mN.iloc[_k] > _mN1.iloc[_k]))
-                                _sens = "progresse" if _vr >= 0 else "recule"
-                                story.append(Spacer(1,0.15*cm))
-                                story.append(Paragraph(
-                                    f"<b>Lecture.</b> La production {_sens} de "
-                                    f"<b>{abs(_vr):.1f} %</b> entre {_aN1} et {_aN}, "
-                                    f"passant de <b>{fmt_full(_tN1_r)}</b> à "
-                                    f"<b>{fmt_full(_tN_r)}</b>. "
-                                    f"<b>{_nb_h} mois sur 12</b> affichent une production "
-                                    f"supérieure à celle de l'exercice précédent"
-                                    + (", ce qui traduit une dynamique installée."
-                                       if _nb_h >= 8 else
-                                       ", signe d'une reprise encore inégale."
-                                       if _nb_h >= 5 else
-                                       ", ce qui appelle un examen des causes du retrait."),
-                                    st_bd))
+        # KPIs
+        nb_all = len(df_bia)
+        nb_val = int((df_bia["statut"] == "Validé").sum())
+        nb_bro = int((df_bia["statut"] == "Brouillon").sum())
+        cot_t  = float(df_bia["cotisation"].fillna(0).astype(float).sum())
 
-                    # 4. Sinistres
-                    if s_sin and _sin_r is not None:
-                        story.append(Spacer(1,0.3*cm))
-                        story.append(_sec("4.  SINISTRES ET PRESTATIONS"))
-                        story.append(Spacer(1,0.2*cm))
-                        _st  = float(_sin_r["Réglement Total"].fillna(0).sum()) if "Réglement Total" in _sin_r.columns else 0
-                        _ss  = float(_sin_r["SAP au 31/12/2025"].fillna(0).sum()) if "SAP au 31/12/2025" in _sin_r.columns else 0
-                        _sh  = float(_sin_r["Réglement Honoraires"].fillna(0).sum()) if "Réglement Honoraires" in _sin_r.columns else 0
-                        _sc  = int((_sin_r["Sort Sinistre"]=="Cloturé").sum()) if "Sort Sinistre" in _sin_r.columns else 0
-                        _so  = int((_sin_r["Sort Sinistre"]=="Ouvert").sum()) if "Sort Sinistre" in _sin_r.columns else 0
-                        _sn  = len(_sin_r)
-                        _ca2 = float(_ca_r["CHIFAFFA"].fillna(0).sum()) if _ca_r is not None and "CHIFAFFA" in _ca_r.columns else 1
-                        _sp  = _st/_ca2*100
-                        _cu  = _st+_ss+_sh
-                        sd   = [["Indicateur","Valeur","Note"],
-                            ["Total réglé",       fmt_full(_st,""), "Montant total règlements"],
-                            ["SAP (provisions)",  fmt_full(_ss,""), "Sinistres à payer"],
-                            ["Honoraires",        fmt_full(_sh,""), "Experts médicaux"],
-                            ["Charge ultime",     fmt_full(_cu,""), "Réglé + SAP + Honoraires"],
-                            ["Ratio S/P",         f"{_sp:.1f}%", f"Seuil CIMA ≤80% {'✓' if _sp<=80 else '⚠'}"],
-                            ["Dossiers ouverts",  nb_full(_so),    f"Sur {_sn:,} dossiers"],
-                            ["Dossiers clos",     nb_full(_sc),    f"Taux clôture : {_sc/_sn*100:.1f}%" if _sn else "—"]]
-                        story.append(_tbl_style(sd,[6*cm,4*cm,7*cm]))
+        c1,c2,c3,c4 = st.columns(4)
+        kpi(c1,"Total contrats", str(nb_all), "Base complète","teal", icon="📋")
+        kpi(c2,"Cotisations",    fmt(cot_t),  "Total FCFA",   "",    icon="💰")
+        kpi(c3,"Validés",        str(nb_val), f"{nb_val/max(nb_all,1)*100:.0f}%","", icon="✅")
+        kpi(c4,"Brouillons",     str(nb_bro), "À compléter","amber", icon="💾")
 
-                        # Graphique : structure de la charge
-                        _lab_s = ["Réglé","SAP","Honoraires"]
-                        _val_s = [_st, _ss, _sh]
-                        if sum(_val_s) > 0:
-                            story.append(Spacer(1,0.15*cm))
-                            story.append(_mpl_barv(_lab_s, [_val_s], ["Montant"],
-                                f"Décomposition de la charge sinistres · {period_lbl}",
-                                haut=4.0))
+        st.markdown("---")
 
-                        # Structure de la charge par nature de sinistre
-                        # Les variantes de deces sont regroupees sous un libelle unique
-                        _c_nat_r = next((c for c in _sin_r.columns
-                                         if "ature" in c.lower() and "ini" in c.lower()), None)
-                        _c_reg_r = next((c for c in _sin_r.columns
-                                         if "glement" in c.lower() and "otal" in c.lower()), None)
-                        _c_sap_r = next((c for c in _sin_r.columns
-                                         if c.upper().startswith("SAP")), None)
-                        if _c_nat_r and _c_reg_r:
-                            _sr = _sin_r.copy()
-                            _sr[_c_nat_r] = normaliser_nature(_sr[_c_nat_r])
-                            _agg_n = {"Nb": (_c_nat_r,"count"), "Regle": (_c_reg_r,"sum")}
-                            if _c_sap_r: _agg_n["SAP"] = (_c_sap_r,"sum")
-                            _gnat = _sr.groupby(_c_nat_r).agg(**_agg_n).reset_index()
-                            if "SAP" not in _gnat.columns: _gnat["SAP"] = 0.0
-                            _gnat["Charge"] = _gnat["Regle"] + _gnat["SAP"]
-                            _gnat = _gnat.sort_values("Charge", ascending=False)
-                            _tot_ch = float(_gnat["Charge"].sum())
+        # Filtres
+        fc1, fc2, fc3 = st.columns(3)
+        with fc1:
+            _prod_opts = ["Tous"] + sorted(df_bia["produit"].dropna().unique().tolist()) if "produit" in df_bia.columns else ["Tous"]
+            _prod_sel  = st.selectbox("Produit", _prod_opts, key="bia_filt_prod")
+        with fc2:
+            _stat_opts = ["Tous","Validé","Brouillon","En cours"]
+            _stat_sel  = st.selectbox("Statut", _stat_opts, key="bia_filt_stat")
+        with fc3:
+            _srch = st.text_input("🔍 Recherche (nom, numéro…)", key="bia_srch", placeholder="Nom, N° BIA…")
 
-                            if not _gnat.empty and _tot_ch > 0:
-                                # Tableau : poids de chaque nature dans la charge
-                                _nt = [["Nature de sinistre","Dossiers","Réglé (FCFA)",
-                                        "SAP (FCFA)","Charge","Part"]]
-                                for _, _r in _gnat.head(8).iterrows():
-                                    _nt.append([
-                                        str(_r[_c_nat_r])[:30],
-                                        nb_full(int(_r["Nb"])),
-                                        fmt_full(_r["Regle"], ""),
-                                        fmt_full(_r["SAP"], ""),
-                                        fmt_full(_r["Charge"], ""),
-                                        f"{_r['Charge']/_tot_ch*100:.1f} %"])
-                                story.append(Spacer(1,0.2*cm))
-                                story.append(Paragraph(
-                                    "Décomposition de la charge par nature "
-                                    "(décès regroupés) :", st_h2))
-                                story.append(_tbl_style(_nt,
-                                    [4.3*cm,2*cm,2.9*cm,2.6*cm,2.9*cm,1.8*cm]))
+        # Appliquer filtres
+        df_show = df_bia.copy()
+        if _prod_sel != "Tous" and "produit" in df_show.columns:
+            df_show = df_show[df_show["produit"] == _prod_sel]
+        if _stat_sel != "Tous":
+            df_show = df_show[df_show["statut"] == _stat_sel]
+        if _srch.strip():
+            _q = _srch.strip().lower()
+            df_show = df_show[df_show.apply(lambda r: _q in str(r).lower(), axis=1)]
 
-                                # Carte proportionnelle : poids visuel de chaque nature
-                                _g6 = _gnat.head(6)
-                                story.append(Spacer(1,0.18*cm))
-                                story.append(_mpl_treemap(
-                                    _g6[_c_nat_r].astype(str).tolist(),
-                                    _g6["Charge"].tolist(),
-                                    f"Répartition de la charge par nature · {period_lbl}"))
+        st.markdown(f"**{len(df_show):,} contrat(s) affiché(s)**")
 
-                                # Barres : montants comparés
-                                _g8 = _gnat.head(8)
-                                story.append(Spacer(1,0.18*cm))
-                                story.append(_mpl_barh(
-                                    _g8[_c_nat_r].astype(str).tolist(),
-                                    _g8["Charge"].tolist(),
-                                    f"Charge par nature de sinistre · {period_lbl}",
-                                    coul="#C0392B"))
+        # Colonnes à afficher (ordre logique)
+        _display_cols = [c for c in [
+            "numero_bia","date_saisie","statut","produit",
+            "nom_souscripteur","prenom_souscripteur",
+            "telephone_souscripteur","adresse_souscripteur",
+            "date_naissance_souscripteur","nationalite_souscripteur",
+            "cotisation","capital_garanti","periodicite",
+            "date_effet","date_echeance","duree",
+            "mode_reglement","reference_reglement",
+            "nom_apporteur","code_apporteur","agence",
+            "saisi_par","obs"
+        ] if c in df_show.columns]
 
-                                # Note de lecture sur la concentration
-                                _n1  = _gnat.iloc[0]
-                                _p1  = float(_n1["Charge"])/_tot_ch*100
-                                _p3  = float(_gnat.head(3)["Charge"].sum())/_tot_ch*100
-                                _dc  = _gnat[_gnat[_c_nat_r].astype(str)
-                                             .str.upper().str.startswith("DÉCÈS")]
-                                _pdc = (float(_dc["Charge"].sum())/_tot_ch*100
-                                        if not _dc.empty else 0)
-                                _ndc = int(_dc["Nb"].sum()) if not _dc.empty else 0
-                                story.append(Spacer(1,0.15*cm))
-                                story.append(Paragraph(
-                                    f"<b>Lecture.</b> La charge se concentre sur "
-                                    f"<b>{str(_n1[_c_nat_r])[:32]}</b>, qui absorbe "
-                                    f"<b>{_p1:.1f} %</b> du total ; les trois premières "
-                                    f"natures en cumulent <b>{_p3:.1f} %</b>. "
-                                    + (f"Le risque décès, toutes garanties confondues, "
-                                       f"représente <b>{_ndc:,} dossiers</b> pour "
-                                       f"<b>{_pdc:.1f} %</b> de la charge."
-                                       .replace(",", " ") if _ndc else ""),
-                                    st_bd))
+        # Renommer pour affichage lisible
+        _rename = {
+            "numero_bia":"N° BIA","date_saisie":"Date saisie","statut":"Statut",
+            "produit":"Produit","nom_souscripteur":"Nom","prenom_souscripteur":"Prénoms",
+            "telephone_souscripteur":"Téléphone","adresse_souscripteur":"Adresse",
+            "date_naissance_souscripteur":"Date naissance","nationalite_souscripteur":"Nationalité",
+            "cotisation":"Cotisation (FCFA)","capital_garanti":"Capital (FCFA)",
+            "periodicite":"Périodicité","date_effet":"Date effet","date_echeance":"Date terme",
+            "duree":"Durée","mode_reglement":"Mode règlement","reference_reglement":"Référence",
+            "nom_apporteur":"Apporteur","code_apporteur":"Code apporteur",
+            "agence":"Agence","saisi_par":"Saisi par","obs":"Observations",
+        }
+        df_disp = df_show[_display_cols].rename(columns=_rename)
 
-                        # Commentaire analytique
-                        _sp_msg = ("en conformité avec la norme CIMA (seuil ≤ 80 %)"
-                                   if _sp <= 80 else
-                                   "supérieur au seuil réglementaire CIMA de 80 %, "
-                                   "ce qui justifie une révision tarifaire")
-                        _tx_clo = _sc/_sn*100 if _sn else 0
-                        story.append(Spacer(1,0.15*cm))
-                        story.append(Paragraph(
-                            f"<b>Lecture.</b> Sur la période <b>{period_lbl}</b>, la charge ultime "
-                            f"des sinistres atteint <b>{fmt_full(_cu)}</b>, dont "
-                            f"<b>{fmt_full(_st)}</b> déjà réglés et <b>{fmt_full(_ss)}</b> "
-                            f"encore provisionnés en SAP. Le ratio Sinistres/Primes ressort à "
-                            f"<b>{_sp:.1f} %</b>, {_sp_msg}. "
-                            f"Sur <b>{_sn:,}</b> dossiers, <b>{_sc:,}</b> sont clos "
-                            f"(<b>{_tx_clo:.1f} %</b>) et <b>{_so:,}</b> restent ouverts."
-                            .replace(",", " "), st_bd))
+        # Formater les montants
+        for col in ["Cotisation (FCFA)","Capital (FCFA)"]:
+            if col in df_disp.columns:
+                df_disp[col] = df_disp[col].apply(lambda x: fmt(x,"") if pd.notna(x) and x != "" else "—")
 
-                    # 5. CIMA
-                    if s_cima and _pf_r is not None:
-                        story.append(Spacer(1,0.3*cm))
-                        story.append(_sec("5.  SCORECARD CONFORMITÉ CIMA"))
-                        story.append(Spacer(1,0.2*cm))
-                        _nb2 = len(_pf_r); _ek2="ETAT_POLICE"
-                        _a2  = int((_pf_r[_ek2].str.strip().isin(["ACTIF"])).sum()) if _ek2 in _pf_r.columns else 0
-                        _r2  = int((_pf_r[_ek2].str.strip()=="RESILIE").sum()) if _ek2 in _pf_r.columns else 0
-                        _i2  = int((_pf_r[_ek2].str.strip()=="INACTIF").sum()) if _ek2 in _pf_r.columns else 0
-                        _c2  = float(_ca_r["CHIFAFFA"].fillna(0).sum()) if _ca_r is not None and "CHIFAFFA" in _ca_r.columns else 1
-                        _s2  = float(_sin_r["Réglement Total"].fillna(0).sum()) if _sin_r is not None and "Réglement Total" in _sin_r.columns else 0
-                        _ta2 = _a2/_nb2*100 if _nb2 else 0
-                        _tr2 = _r2/max(_nb2-_i2,1)*100
-                        _sp2 = _s2/_c2*100
-                        _in2 = _i2/_nb2*100 if _nb2 else 0
-                        # Formules des taux CIMA
-                        _st_f = ParagraphStyle("Ff",fontName="Helvetica",fontSize=8,
-                            textColor=rl_colors.HexColor("#333"),leading=12,spaceAfter=2)
-                        story.append(Paragraph("<b>Formules de calcul des indicateurs :</b>", st_h2))
-                        _fd = [
-                            ["Indicateur","Formule","Valeur"],
-                            ["Taux activite net",
-                             f"Actifs / (Total - Inactifs) x 100 = {_a2:,} / {max(_nb2-_i2,1):,} x 100",
-                             f"{_ta2:.1f}%"],
-                            ["Taux resiliation",
-                             f"Resilies / (Total - Inactifs) x 100 = {_r2:,} / {max(_nb2-_i2,1):,} x 100",
-                             f"{_tr2:.1f}%"],
-                            ["Ratio S/P",
-                             f"Reglements / CA brut x 100 = {fmt_full(_s2)} / {fmt_full(_c2)} x 100",
-                             f"{_sp2:.1f}%"],
-                            ["Part inactifs",
-                             f"Inactifs / Total x 100 = {_i2:,} / {max(_nb2,1):,} x 100",
-                             f"{_in2:.1f}%"],
-                        ]
-                        _ft = Table(_fd, colWidths=[4*cm, 10*cm, 3*cm])
-                        _ft.setStyle(TableStyle([
-                            ("BACKGROUND",(0,0),(-1,0),C_N),("TEXTCOLOR",(0,0),(-1,0),C_W),
-                            ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
-                            ("FONTSIZE",(0,0),(-1,-1),8),
-                            ("ROWBACKGROUNDS",(0,1),(-1,-1),[C_L,C_W]),
-                            ("GRID",(0,0),(-1,-1),0.3,rl_colors.HexColor("#DDE3EE")),
-                            ("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4),
-                            ("LEFTPADDING",(0,0),(-1,-1),5),("VALIGN",(0,0),(-1,-1),"MIDDLE"),
-                            ("FONTNAME",(2,1),(2,-1),"Helvetica-Bold"),
-                            ("TEXTCOLOR",(2,1),(2,-1),C_G),
+        st.dataframe(df_disp, use_container_width=True, hide_index=True, height=450)
+
+        # Exports
+        st.markdown("---")
+        ea, eb, ec = st.columns(3)
+        ea.download_button("📥 CSV complet",
+            dl_csv(df_show), "base_bia.csv", "text/csv",
+            use_container_width=True, key="dl_bia_csv")
+        eb.download_button("📥 Excel complet",
+            dl_xlsx(df_show), "base_bia.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True, key="dl_bia_xl")
+        ec.download_button("📥 Export affiché",
+            dl_csv(df_show), f"bia_{_prod_sel}_{_stat_sel}.csv", "text/csv",
+            use_container_width=True, key="dl_bia_filt")
+
+        # Graphiques synthèse
+        if nb_all > 0:
+            st.markdown("---")
+            g1,g2 = st.columns(2)
+            with g1:
+                by_st = df_bia["statut"].value_counts().reset_index()
+                by_st.columns = ["Statut","Nb"]
+                fig = go.Figure(go.Pie(labels=by_st["Statut"],values=by_st["Nb"],hole=.44,
+                    marker_colors=[GREEN,AMBER,RED,BLUE],
+                    textinfo="percent+label+value", textfont=dict(size=12)))
+                fig_style(fig,260,"Répartition par statut")
+                st.plotly_chart(fig,use_container_width=True)
+            with g2:
+                if "produit" in df_bia.columns:
+                    by_p = (df_bia.groupby("produit")
+                            .agg(Nb=("produit","count"),Cot=("cotisation","sum"))
+                            .reset_index().sort_values("Cot",ascending=False).head(8))
+                    fig2 = go.Figure(go.Bar(
+                        x=by_p["Cot"], y=by_p["produit"].str[:20],
+                        orientation="h", marker_color=GREEN,
+                        text=[fmt(v,"") for v in by_p["Cot"]],
+                        textposition="outside", textfont=dict(size=10)))
+                    fig2.update_layout(yaxis=dict(autorange="reversed"))
+                    fig_style(fig2,260,"CA cotisations par produit")
+                    st.plotly_chart(fig2,use_container_width=True)
+    except Exception as _e_page:
+        _erreur_onglet(_e_page, "Base BIA")
+
+elif "Rapport PDF" in page:
+    try:
+        section("📄 Rapport DG — Génération PDF",
+                "DÉPARTEMENT TECHNIQUE · SYNTHÈSE ACTUARIELLE · CIMA")
+        st.markdown(f"""
+        <div style="background:linear-gradient(135deg,{NAVY},{GREEN2});border-radius:12px;
+             padding:1.2rem 1.5rem;margin-bottom:16px">
+          <div style="color:{MINT};font-size:11px;font-weight:700;text-transform:uppercase;
+               letter-spacing:.08em;margin-bottom:4px">📄 Rapport confidentiel</div>
+          <div style="color:white;font-size:14px;font-weight:700">
+            AFG Assurances Bénin Vie — Rapport de Gestion · {period_lbl}</div>
+          <div style="color:rgba(255,255,255,.5);font-size:10px;margin-top:3px">
+            À l'attention de la Direction Générale · Rédigé par le Département Technique
+            · Conforme CIMA</div>
+        </div>""", unsafe_allow_html=True)
+
+        rc1,rc2,rc3 = st.columns(3)
+        s_kpis  = rc1.checkbox("📊 KPIs Portefeuille", value=True, key="rp_kpis")
+        s_ca    = rc1.checkbox("💰 Chiffre d'Affaires", value=True, key="rp_ca")
+        s_com   = rc2.checkbox("👥 Commerciaux",        value=True, key="rp_com")
+        s_sin   = rc2.checkbox("⚠️ Sinistres",           value=True, key="rp_sin")
+        s_cima  = rc3.checkbox("🏛️ Scorecard CIMA",     value=True, key="rp_cima")
+        dest    = st.text_input("Destinataire", value="M. le Directeur Général", key="rp_dest")
+        auteur  = st.text_input("Rédigé par", value="Département Technique", key="rp_auteur")
+        st.caption("Le rapport porte exclusivement sur la période filtrée "
+                   f"(**{period_lbl}**) — les données globales ne sont pas incluses.")
+        st.markdown("---")
+
+        if pf is None and ca is None:
+            alert("Chargez au moins une base de données pour générer le rapport.", "warn")
+        else:
+            # ── Données de la PÉRIODE FILTRÉE (jamais le global) ──────────────
+            _pf_r  = pf_f()  if pf  is not None else None
+            _ca_r  = ca_f()  if ca  is not None else None
+            _sin_r = sin_f() if sin is not None else None
+            if _pf_r  is not None and _pf_r.empty:  _pf_r  = pf
+            if _ca_r  is not None and _ca_r.empty:  _ca_r  = ca
+            if _sin_r is not None and _sin_r.empty: _sin_r = sin
+            # Aperçu
+            ap1,ap2,ap3,ap4 = st.columns(4)
+            if _pf_r is not None:
+                _act_r = int((_pf_r["ETAT_POLICE"].str.strip().isin(["ACTIF"])).sum()) if "ETAT_POLICE" in _pf_r.columns else 0
+                ap1.metric("Polices", f"{len(_pf_r):,}")
+                ap2.metric("Actives", f"{_act_r:,}")
+            if _ca_r is not None:
+                ap3.metric("CA global", fmt(float(_ca_r["CHIFAFFA"].fillna(0).sum()) if "CHIFAFFA" in _ca_r.columns else 0))
+            if _sin_r is not None:
+                ap4.metric("Sinistres", fmt(float(_sin_r["Réglement Total"].fillna(0).sum()) if "Réglement Total" in _sin_r.columns else 0))
+            st.markdown("")
+
+            if st.button("🖨️ Générer le rapport PDF", type="primary",
+                         use_container_width=True, key="gen_pdf_btn"):
+                with st.spinner("⏳ Génération du rapport PDF en cours…"):
+                    try:
+                        from reportlab.lib.pagesizes import A4
+                        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+                        from reportlab.lib.units import cm
+                        from reportlab.lib import colors as rl_colors
+                        from reportlab.platypus import (SimpleDocTemplate, Paragraph,
+                            Spacer, Table, TableStyle, HRFlowable,
+                            Image as _RLImage, PageBreak)
+                        from reportlab.lib.enums import TA_CENTER, TA_RIGHT
+                        from reportlab.graphics.shapes import Drawing, String, Rect
+                        from reportlab.graphics.charts.barcharts import (
+                            VerticalBarChart, HorizontalBarChart)
+                        from reportlab.graphics.charts.piecharts import Pie
+                        from reportlab.graphics.charts.legends import Legend
+                        import io as _io
+                        from datetime import datetime as _dt
+
+                        # ── Fabriques de graphiques natifs ReportLab ─────────
+                        _PAL = [rl_colors.HexColor(c) for c in
+                                ("#1A7F6E","#0D1F3C","#C0392B","#CA6F1E",
+                                 "#2E86C1","#7D3C98","#16A085","#5D6D7E")]
+
+                        def _g_pie(labels, values, titre, w=17*cm, h=6.2*cm):
+                            """Camembert avec legende laterale."""
+                            d  = Drawing(w, h)
+                            pc = Pie()
+                            pc.x, pc.y = 12, 8
+                            pc.width = pc.height = h - 26
+                            pc.data   = [max(float(v), 0) for v in values]
+                            pc.labels = [f"{p:.0f}%" for p in
+                                         (100*np.array(values, dtype=float) /
+                                          max(sum(values), 1))]
+                            pc.slices.strokeWidth    = .5
+                            pc.slices.strokeColor    = rl_colors.white
+                            pc.slices.fontName       = "Helvetica-Bold"
+                            pc.slices.fontSize       = 7
+                            pc.sideLabels            = False
+                            for k in range(len(pc.data)):
+                                pc.slices[k].fillColor = _PAL[k % len(_PAL)]
+                            d.add(pc)
+                            lg = Legend()
+                            lg.x, lg.y        = pc.width + 40, h - 22
+                            lg.alignment      = "right"
+                            lg.fontName       = "Helvetica"
+                            lg.fontSize       = 7.5
+                            lg.dxTextSpace    = 4
+                            lg.deltay         = 10
+                            lg.colorNamePairs = [
+                                (_PAL[k % len(_PAL)],
+                                 f"{str(labels[k])[:26]} · {int(values[k]):,}".replace(",", " "))
+                                for k in range(len(labels))]
+                            d.add(lg)
+                            d.add(String(6, h - 10, titre, fontName="Helvetica-Bold",
+                                         fontSize=8.5, fillColor=C_N))
+                            return d
+
+                        # ══════════════════════════════════════════════════════════
+                        #  Graphiques du rapport : rendus en PNG haute definition
+                        #  par matplotlib puis inseres comme images. Le rendu est
+                        #  nettement plus lisible que les graphiques vectoriels
+                        #  natifs de ReportLab, et ne depend d'aucun navigateur.
+                        # ══════════════════════════════════════════════════════════
+                        import matplotlib
+                        matplotlib.use("Agg")
+                        import matplotlib.pyplot as _plt
+                        from matplotlib.ticker import FuncFormatter as _FF
+
+                        _MPL = ["#1A7F6E","#0D1F3C","#C0392B","#CA6F1E",
+                                "#2E86C1","#7D3C98","#16A085","#616A6B"]
+
+                        def _espace(v, _p=None):
+                            """Sépare les milliers par une espace insécable fine."""
+                            return f"{v:,.0f}".replace(",", " ")
+
+                        def _mpl_img(fig, larg=17*cm):
+                            """Convertit une figure matplotlib en image ReportLab."""
+                            _b = _io.BytesIO()
+                            fig.savefig(_b, format="png", dpi=170,
+                                        bbox_inches="tight", facecolor="white")
+                            _plt.close(fig)
+                            _b.seek(0)
+                            from PIL import Image as _PILImg
+                            _w, _h = _PILImg.open(_b).size
+                            _b.seek(0)
+                            _img = _RLImage(_b, width=larg, height=larg * _h / _w)
+                            _img.hAlign = "CENTER"
+                            return _img
+
+                        def _mpl_barh(labels, values, titre, coul="#1A7F6E", haut=4.2):
+                            """Barres horizontales, valeurs annotées en bout."""
+                            _n  = max(len(labels), 1)
+                            fig, ax = _plt.subplots(figsize=(10, max(haut, 0.42*_n + 1.1)))
+                            _y  = range(len(labels))
+                            ax.barh(list(_y), values, color=coul, height=.64,
+                                    edgecolor="white", linewidth=.6)
+                            ax.set_yticks(list(_y))
+                            ax.set_yticklabels([str(l)[:34] for l in labels], fontsize=9)
+                            ax.invert_yaxis()
+                            _mx = max(values) if len(values) and max(values) else 1
+                            for _i, _v in enumerate(values):
+                                ax.text(_v + _mx*.012, _i, _espace(_v),
+                                        va="center", fontsize=8.2, color="#2C3E50")
+                            ax.set_xlim(0, _mx*1.18)
+                            ax.xaxis.set_major_formatter(_FF(_espace))
+                            ax.tick_params(axis="x", labelsize=8, colors="#667")
+                            ax.set_title(titre, fontsize=11, fontweight="bold",
+                                         color="#0D1F3C", loc="left", pad=11)
+                            ax.grid(axis="x", color="#E8ECF3", linewidth=.7)
+                            ax.set_axisbelow(True)
+                            for _s in ("top","right","left"): ax.spines[_s].set_visible(False)
+                            ax.spines["bottom"].set_color("#D5DBE5")
+                            return _mpl_img(fig)
+
+                        def _mpl_barv(labels, series, noms, titre, haut=4.4):
+                            """Barres verticales groupées, une à trois séries."""
+                            fig, ax = _plt.subplots(figsize=(10, haut))
+                            _n   = len(series)
+                            _x   = np.arange(len(labels))
+                            _lgr = .78 / _n
+                            for _i, (_s, _nm) in enumerate(zip(series, noms)):
+                                ax.bar(_x + _i*_lgr - .39 + _lgr/2, _s, _lgr*.92,
+                                       label=str(_nm), color=_MPL[_i % len(_MPL)],
+                                       edgecolor="white", linewidth=.5)
+                            ax.set_xticks(_x)
+                            ax.set_xticklabels([str(l)[:14] for l in labels],
+                                               fontsize=8.5, rotation=0)
+                            ax.yaxis.set_major_formatter(_FF(_espace))
+                            ax.tick_params(axis="y", labelsize=8, colors="#667")
+                            ax.set_title(titre, fontsize=11, fontweight="bold",
+                                         color="#0D1F3C", loc="left", pad=11)
+                            if _n > 1:
+                                ax.legend(fontsize=8.5, frameon=False, ncol=_n,
+                                          loc="upper center", bbox_to_anchor=(.5, -.09))
+                            ax.grid(axis="y", color="#E8ECF3", linewidth=.7)
+                            ax.set_axisbelow(True)
+                            for _s2 in ("top","right"): ax.spines[_s2].set_visible(False)
+                            for _s2 in ("left","bottom"): ax.spines[_s2].set_color("#D5DBE5")
+                            return _mpl_img(fig)
+
+                        def _mpl_pie(labels, values, titre, haut=4.4):
+                            """Anneau avec légende latérale et pourcentages."""
+                            fig, ax = _plt.subplots(figsize=(10, haut))
+                            _tot = float(sum(values)) or 1.0
+                            _w, _t, _a = ax.pie(
+                                values, startangle=90, counterclock=False,
+                                colors=[_MPL[_i % len(_MPL)] for _i in range(len(values))],
+                                wedgeprops=dict(width=.42, edgecolor="white", linewidth=1.6),
+                                autopct=lambda p: f"{p:.1f} %" if p >= 4 else "",
+                                pctdistance=.79, textprops=dict(fontsize=8.6, color="white",
+                                                                fontweight="bold"))
+                            ax.legend(_w, [f"{_l}  ·  {_espace(_v)}"
+                                           for _l, _v in zip(labels, values)],
+                                      loc="center left", bbox_to_anchor=(1.02, .5),
+                                      fontsize=9, frameon=False)
+                            ax.set_title(titre, fontsize=11, fontweight="bold",
+                                         color="#0D1F3C", loc="left", pad=11)
+                            ax.axis("equal")
+                            return _mpl_img(fig)
+
+                        def _mpl_treemap(labels, values, titre, haut=4.6):
+                            """Carte proportionnelle par pavage récursif."""
+                            fig, ax = _plt.subplots(figsize=(10, haut))
+                            _tot = float(sum(values)) or 1.0
+                            _x, _y, _lw, _lh = 0., 0., 1., 1.
+                            _rest = float(_tot)
+                            _hz   = True
+                            for _i, (_lb, _vl) in enumerate(zip(labels, values)):
+                                _p = float(_vl) / _rest if _rest else 0
+                                if _i == len(labels) - 1: _p = 1.0
+                                if _hz:
+                                    _cw, _cht = _lw*_p, _lh
+                                else:
+                                    _cw, _cht = _lw, _lh*_p
+                                ax.add_patch(_plt.Rectangle(
+                                    (_x, _y), _cw, _cht,
+                                    facecolor=_MPL[_i % len(_MPL)],
+                                    edgecolor="white", linewidth=2.2))
+                                if _cw > .11 and _cht > .13:
+                                    ax.text(_x + _cw/2, _y + _cht/2 + .045,
+                                            str(_lb)[:22], ha="center", va="center",
+                                            fontsize=9, fontweight="bold", color="white")
+                                    ax.text(_x + _cw/2, _y + _cht/2 - .035,
+                                            f"{float(_vl)/_tot*100:.1f} %",
+                                            ha="center", va="center",
+                                            fontsize=8.2, color="white")
+                                    ax.text(_x + _cw/2, _y + _cht/2 - .105,
+                                            _espace(_vl), ha="center", va="center",
+                                            fontsize=7.4, color="#FFFFFFCC")
+                                if _hz:
+                                    _x += _cw; _lw -= _cw
+                                else:
+                                    _y += _cht; _lh -= _cht
+                                _rest -= float(_vl)
+                                _hz = not _hz
+                            ax.set_xlim(0,1); ax.set_ylim(0,1); ax.axis("off")
+                            ax.set_title(titre, fontsize=11, fontweight="bold",
+                                         color="#0D1F3C", loc="left", pad=11)
+                            return _mpl_img(fig)
+
+                        def _g_carte(labels, values, titre, w=17*cm, h=7.2*cm):
+                            """Carte proportionnelle : chaque nature occupe une
+                            surface proportionnelle a son poids dans la charge.
+                            Equivalent statique du treemap de l'application."""
+                            d = Drawing(w, h)
+                            d.add(String(4, h-11, titre, fontName="Helvetica-Bold",
+                                         fontSize=9, fillColor=C_N))
+                            _tot = float(sum(values)) or 1.0
+                            _y0, _hh = 6, h - 30
+                            _x = 2.0
+                            _wd = w - 4.0
+                            # Pavage en bandes verticales de largeur proportionnelle
+                            for _i, (_lb, _vl) in enumerate(zip(labels, values)):
+                                _part = float(_vl) / _tot
+                                _lw   = max(_wd * _part, 14)
+                                _col  = _PAL[_i % len(_PAL)]
+                                d.add(Rect(_x, _y0, _lw, _hh,
+                                           fillColor=_col, strokeColor=rl_colors.white,
+                                           strokeWidth=1.2))
+                                # Libelle : seulement si la bande est assez large
+                                if _lw > 46:
+                                    _txt = str(_lb)[:int(_lw/5.2)]
+                                    d.add(String(_x + 5, _y0 + _hh - 14, _txt,
+                                                 fontName="Helvetica-Bold", fontSize=7.5,
+                                                 fillColor=rl_colors.white))
+                                    d.add(String(_x + 5, _y0 + _hh - 25,
+                                                 f"{_part*100:.1f} %",
+                                                 fontName="Helvetica", fontSize=7,
+                                                 fillColor=rl_colors.white))
+                                    d.add(String(_x + 5, _y0 + 6,
+                                                 f"{float(_vl):,.0f}".replace(",", " "),
+                                                 fontName="Helvetica", fontSize=6.5,
+                                                 fillColor=rl_colors.white))
+                                _x += _lw
+                            return d
+
+                        def _g_barh(labels, values, titre, w=17*cm, h=7.5*cm, coul=None):
+                            """Barres horizontales avec valeurs completes."""
+                            d  = Drawing(w, h)
+                            bc = HorizontalBarChart()
+                            bc.x, bc.y     = 118, 18
+                            bc.width       = w - 150
+                            bc.height      = h - 44
+                            bc.data        = [[float(v) for v in values]]
+                            bc.categoryAxis.categoryNames = [str(l)[:24] for l in labels]
+                            bc.categoryAxis.labels.fontName = "Helvetica"
+                            bc.categoryAxis.labels.fontSize = 7
+                            bc.categoryAxis.labels.dx       = -3
+                            bc.valueAxis.valueMin  = 0
+                            bc.valueAxis.valueMax  = max(values) * 1.15 if max(values) else 1
+                            bc.valueAxis.labels.fontName = "Helvetica"
+                            bc.valueAxis.labels.fontSize = 6.5
+                            bc.valueAxis.labelTextFormat = (
+                                lambda v: f"{v:,.0f}".replace(",", " "))
+                            bc.bars[0].fillColor   = coul or C_G
+                            bc.bars[0].strokeWidth = 0
+                            bc.barLabels.fontName  = "Helvetica-Bold"
+                            bc.barLabels.fontSize  = 6.5
+                            bc.barLabels.dx        = 12
+                            bc.barLabelFormat      = (
+                                lambda v: f"{v:,.0f}".replace(",", " "))
+                            bc.barLabels.boxAnchor = "w"
+                            d.add(bc)
+                            d.add(String(6, h - 10, titre, fontName="Helvetica-Bold",
+                                         fontSize=8.5, fillColor=C_N))
+                            return d
+
+                        def _g_barv(labels, series, noms, titre, w=17*cm, h=7*cm):
+                            """Barres verticales groupees (1 a 3 series)."""
+                            d  = Drawing(w, h)
+                            bc = VerticalBarChart()
+                            bc.x, bc.y = 55, 34
+                            bc.width   = w - 80
+                            bc.height  = h - 58
+                            bc.data    = [[float(v) for v in s] for s in series]
+                            bc.categoryAxis.categoryNames    = [str(l)[:16] for l in labels]
+                            bc.categoryAxis.labels.fontName  = "Helvetica"
+                            bc.categoryAxis.labels.fontSize  = 7
+                            bc.categoryAxis.labels.angle     = 20
+                            bc.categoryAxis.labels.boxAnchor = "ne"
+                            _mx = max((max(s) for s in series if len(s)), default=1)
+                            bc.valueAxis.valueMin = 0
+                            bc.valueAxis.valueMax = _mx * 1.2 if _mx else 1
+                            bc.valueAxis.labels.fontName   = "Helvetica"
+                            bc.valueAxis.labels.fontSize   = 6.5
+                            bc.valueAxis.labelTextFormat   = (
+                                lambda v: f"{v:,.0f}".replace(",", " "))
+                            for k in range(len(series)):
+                                bc.bars[k].fillColor   = _PAL[k % len(_PAL)]
+                                bc.bars[k].strokeWidth = 0
+                            bc.barLabels.fontName = "Helvetica-Bold"
+                            bc.barLabels.fontSize = 6
+                            bc.barLabels.dy       = 4
+                            bc.barLabelFormat     = (
+                                lambda v: f"{v:,.0f}".replace(",", " "))
+                            d.add(bc)
+                            if len(series) > 1:
+                                lg = Legend()
+                                lg.x, lg.y        = 55, 8
+                                lg.alignment      = "right"
+                                lg.fontName       = "Helvetica"
+                                lg.fontSize       = 7
+                                lg.columnMaximum  = 1
+                                lg.deltax         = 88
+                                lg.colorNamePairs = [
+                                    (_PAL[k % len(_PAL)], noms[k])
+                                    for k in range(len(series))]
+                                d.add(lg)
+                            d.add(String(6, h - 10, titre, fontName="Helvetica-Bold",
+                                         fontSize=8.5, fillColor=C_N))
+                            return d
+
+                        _buf = _io.BytesIO()
+                        doc  = SimpleDocTemplate(_buf, pagesize=A4,
+                            leftMargin=2*cm, rightMargin=2*cm,
+                            topMargin=2.5*cm, bottomMargin=2*cm)
+
+                        C_N = rl_colors.HexColor("#0D1F3C")
+                        C_G = rl_colors.HexColor("#1A7F6E")
+                        C_R = rl_colors.HexColor("#C0392B")
+                        C_A = rl_colors.HexColor("#CA6F1E")
+                        C_L = rl_colors.HexColor("#F3F6FA")
+                        C_W = rl_colors.white
+                        C_M = rl_colors.HexColor("#A9DFBF")
+
+                        st_ti = ParagraphStyle("T",fontName="Helvetica-Bold",fontSize=16,
+                            textColor=C_W,alignment=TA_CENTER,spaceAfter=4)
+                        st_su = ParagraphStyle("S",fontName="Helvetica",fontSize=9,
+                            textColor=C_M,alignment=TA_CENTER,spaceAfter=4)
+                        st_h1 = ParagraphStyle("H1",fontName="Helvetica-Bold",fontSize=12,
+                            textColor=C_N,spaceBefore=12,spaceAfter=5)
+                        st_h2 = ParagraphStyle("H2",fontName="Helvetica-Bold",fontSize=10,
+                            textColor=C_G,spaceBefore=8,spaceAfter=4)
+                        st_bd = ParagraphStyle("B",fontName="Helvetica",fontSize=9,
+                            textColor=rl_colors.HexColor("#2C3E50"),spaceAfter=4,leading=13)
+                        st_bld= ParagraphStyle("Bo",fontName="Helvetica-Bold",fontSize=9,
+                            textColor=C_N,spaceAfter=3)
+                        st_sm = ParagraphStyle("Sm",fontName="Helvetica",fontSize=8,
+                            textColor=rl_colors.grey,spaceAfter=3)
+
+                        def _tbl_style(data, col_widths, header_bg=None):
+                            t = Table(data, colWidths=col_widths)
+                            _bg = header_bg or C_N
+                            t.setStyle(TableStyle([
+                                ("BACKGROUND",(0,0),(-1,0),_bg),
+                                ("TEXTCOLOR",(0,0),(-1,0),C_W),
+                                ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
+                                ("FONTSIZE",(0,0),(-1,-1),8.5),
+                                ("ROWBACKGROUNDS",(0,1),(-1,-1),[C_L, C_W]),
+                                ("ALIGN",(1,0),(-1,-1),"RIGHT"),
+                                ("GRID",(0,0),(-1,-1),0.3,rl_colors.HexColor("#DDE3EE")),
+                                ("TOPPADDING",(0,0),(-1,-1),4),
+                                ("BOTTOMPADDING",(0,0),(-1,-1),4),
+                                ("LEFTPADDING",(0,0),(-1,-1),7),
+                            ]))
+                            return t
+
+                        def _sec(txt):
+                            t = Table([[Paragraph(txt, ParagraphStyle("SH",
+                                fontName="Helvetica-Bold",fontSize=11,textColor=C_W))]],
+                                colWidths=[17*cm])
+                            t.setStyle(TableStyle([
+                                ("BACKGROUND",(0,0),(-1,-1),C_G),
+                                ("LEFTPADDING",(0,0),(-1,-1),10),
+                                ("TOPPADDING",(0,0),(-1,-1),6),
+                                ("BOTTOMPADDING",(0,0),(-1,-1),6),
+                            ]))
+                            return t
+
+                        story = []
+
+                        # En-tête
+                        # En-tête avec logo AFG encodé base64
+                        import base64 as _b64
+                        try:
+                            from reportlab.platypus import Image as RLImage
+                            from io import BytesIO as _BIO
+                            # Logo AFG depuis le code
+                            _logo_b64_pdf = LOGO_B64  # variable globale
+                            _logo_bytes = _b64.b64decode(_logo_b64_pdf)
+                            _logo_img = RLImage(_BIO(_logo_bytes), width=4*cm, height=1.8*cm)
+                            _logo_img.hAlign = 'CENTER'
+                            story.append(_logo_img)
+                            story.append(Spacer(1, 0.2*cm))
+                        except Exception:
+                            pass
+                        hdr_t = Table([[Paragraph("AFG ASSURANCES BÉNIN VIE", st_ti)],
+                            [Paragraph("RAPPORT DE GESTION", st_su)],
+                            [Paragraph(f"Période d'analyse : {period_lbl}  ·  Édité le {_dt.now().strftime('%d %B %Y')}", st_su)]],
+                            colWidths=[17*cm])
+                        hdr_t.setStyle(TableStyle([
+                            ("BACKGROUND",(0,0),(-1,-1),C_N),
+                            ("ALIGN",(0,0),(-1,-1),"CENTER"),
+                            ("TOPPADDING",(0,0),(-1,-1),14),
+                            ("BOTTOMPADDING",(0,0),(-1,-1),14),
                         ]))
-                        story.append(_ft)
+                        story.append(hdr_t)
                         story.append(Spacer(1,0.3*cm))
-                        cm_d = [["Indicateur CIMA","Valeur","Seuil","Statut"],
-                            ["Taux d'activité net",  f"{_ta2:.1f}%", "≥ 50%", "CONFORME" if _ta2>=50 else "NON CONFORME"],
-                            ["Taux résiliation",     f"{_tr2:.1f}%", "≤ 25%", "CONFORME" if _tr2<=25 else "NON CONFORME"],
-                            ["Ratio S/P",            f"{_sp2:.1f}%", "≤ 80%", "CONFORME" if _sp2<=80 else "NON CONFORME"],
-                            ["Part inactifs",        f"{_in2:.1f}%", "≤ 5%",  "CONFORME" if _in2<=5 else "NON CONFORME"]]
-                        t_cm = Table(cm_d, colWidths=[6*cm,3*cm,3*cm,5*cm])
-                        _cm_style = TableStyle([
-                            ("BACKGROUND",(0,0),(-1,0),C_N),
-                            ("TEXTCOLOR",(0,0),(-1,0),C_W),
-                            ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
+                        info_t = Table([
+                            ["Destinataire :", dest],
+                            ["Rédigé par :", auteur],
+                            ["Classification :", "Confidentiel · Usage interne"],
+                            ["Référence :", f"AFG-RPT-{_dt.now().strftime('%Y%m%d')}"],
+                        ], colWidths=[5*cm,12*cm])
+                        info_t.setStyle(TableStyle([
+                            ("FONTNAME",(0,0),(0,-1),"Helvetica-Bold"),
                             ("FONTSIZE",(0,0),(-1,-1),9),
-                            ("ROWBACKGROUNDS",(0,1),(-1,-1),[C_L,C_W]),
-                            ("ALIGN",(1,0),(-1,-1),"CENTER"),
-                            ("GRID",(0,0),(-1,-1),0.3,rl_colors.HexColor("#DDE3EE")),
+                            ("TEXTCOLOR",(0,0),(0,-1),C_N),
+                            ("ROWBACKGROUNDS",(0,0),(-1,-1),[C_L,C_W]),
                             ("TOPPADDING",(0,0),(-1,-1),5),
                             ("BOTTOMPADDING",(0,0),(-1,-1),5),
                             ("LEFTPADDING",(0,0),(-1,-1),8),
-                        ])
-                        for _i in range(1,len(cm_d)):
-                            _ok = cm_d[_i][3]=="CONFORME"
-                            _cm_style.add("TEXTCOLOR",(3,_i),(3,_i),C_G if _ok else C_R)
-                            _cm_style.add("FONTNAME",(3,_i),(3,_i),"Helvetica-Bold")
-                        t_cm.setStyle(_cm_style)
-                        story.append(t_cm)
+                        ]))
+                        story.append(info_t)
+                        story.append(Spacer(1,0.35*cm))
 
-                        # Graphique : indicateurs vs seuils
-                        story.append(Spacer(1,0.15*cm))
-                        story.append(_mpl_barv(
-                            ["Tx activité","Tx résiliation","Ratio S/P","Part inactifs"],
-                            [[_ta2, _tr2, _sp2, _in2], [50, 25, 80, 5]],
-                            ["Valeur constatée","Seuil CIMA"],
-                            f"Indicateurs CIMA face aux seuils réglementaires · {period_lbl}",
-                            haut=4.4))
+                        # ── Synthese executive : les chiffres cles en un coup d'oeil ──
+                        _sx_nb  = len(_pf_r) if _pf_r is not None else 0
+                        _sx_act = (int((_pf_r["ETAT_POLICE"].str.strip()=="ACTIF").sum())
+                                   if (_pf_r is not None and "ETAT_POLICE" in _pf_r.columns) else 0)
+                        _sx_ca  = (float(_ca_r["CHIFAFFA"].fillna(0).sum())
+                                   if (_ca_r is not None and "CHIFAFFA" in _ca_r.columns) else 0)
+                        _sx_nq  = len(_ca_r) if _ca_r is not None else 0
+                        _sx_cr  = next((c for c in (_sin_r.columns if _sin_r is not None else [])
+                                        if "glement" in c.lower() and "otal" in c.lower()), None)
+                        _sx_sin = float(_sin_r[_sx_cr].fillna(0).sum()) if _sx_cr else 0
+                        _sx_sp  = (_sx_sin/_sx_ca*100) if _sx_ca else 0
 
-                        # Carte : ecart de chaque indicateur a son seuil
-                        _ec_lab = ["Tx activité","Tx résiliation","Ratio S/P","Part inactifs"]
-                        _ec_val = [abs(_ta2-50), abs(_tr2-25), abs(_sp2-80), abs(_in2-5)]
-                        if sum(_ec_val) > 0:
-                            story.append(Spacer(1,0.18*cm))
-                            story.append(_mpl_treemap(_ec_lab, _ec_val,
-                                "Amplitude de l'écart au seuil réglementaire"))
+                        story.append(Paragraph("SYNTHÈSE", st_h1))
+                        _sx_rows = [
+                            ["Polices du périmètre", nb_full(_sx_nb),
+                             "Polices actives", nb_full(_sx_act)],
+                            ["Chiffre d'affaires", fmt_full(_sx_ca),
+                             "Quittances émises", nb_full(_sx_nq)],
+                            ["Sinistres réglés", fmt_full(_sx_sin),
+                             "Ratio S/P", f"{_sx_sp:.1f} %"],
+                        ]
+                        _sx_t = Table(_sx_rows, colWidths=[4.6*cm,3.9*cm,4.6*cm,3.9*cm])
+                        _sx_t.setStyle(TableStyle([
+                            ("FONTNAME",(0,0),(0,-1),"Helvetica"),
+                            ("FONTNAME",(2,0),(2,-1),"Helvetica"),
+                            ("FONTNAME",(1,0),(1,-1),"Helvetica-Bold"),
+                            ("FONTNAME",(3,0),(3,-1),"Helvetica-Bold"),
+                            ("FONTSIZE",(0,0),(-1,-1),9),
+                            ("TEXTCOLOR",(1,0),(1,-1),C_G),
+                            ("TEXTCOLOR",(3,0),(3,-1),C_G),
+                            ("ROWBACKGROUNDS",(0,0),(-1,-1),[C_L,C_W]),
+                            ("BOX",(0,0),(-1,-1),.6,C_N),
+                            ("INNERGRID",(0,0),(-1,-1),.25,rl_colors.HexColor("#DDE3EE")),
+                            ("TOPPADDING",(0,0),(-1,-1),6),
+                            ("BOTTOMPADDING",(0,0),(-1,-1),6),
+                            ("LEFTPADDING",(0,0),(-1,-1),8),
+                        ]))
+                        story.append(_sx_t)
+                        story.append(Spacer(1,0.2*cm))
+                        story.append(Paragraph(
+                            f"Le périmètre retenu pour ce rapport est <b>{period_lbl}</b>. "
+                            f"Les montants sont exprimés en francs CFA et arrondis à l'unité. "
+                            f"Chaque section présente les indicateurs, la représentation "
+                            f"graphique associée et une note de lecture.", st_bd))
+                        story.append(Spacer(1,0.35*cm))
+                        story.append(HRFlowable(width="100%",thickness=2,color=C_G,spaceAfter=6))
 
-                        _nb_ok  = sum(1 for _r in cm_d[1:] if _r[3] == "CONFORME")
-                        _tot_ic = len(cm_d) - 1
-                        _ecarts = [_r[0] for _r in cm_d[1:] if _r[3] != "CONFORME"]
+                        # 1. KPIs
+                        if s_kpis and _pf_r is not None:
+                            story.append(_sec("1.  PORTEFEUILLE DE POLICES"))
+                            story.append(Spacer(1,0.2*cm))
+                            _nb  = len(_pf_r); _ek="ETAT_POLICE"
+                            _act = int((_pf_r[_ek].str.strip().isin(["ACTIF"])).sum()) if _ek in _pf_r.columns else 0
+                            _res = int((_pf_r[_ek].str.strip()=="RESILIE").sum()) if _ek in _pf_r.columns else 0
+                            _ina = int((_pf_r[_ek].str.strip()=="INACTIF").sum()) if _ek in _pf_r.columns else 0
+                            _ec  = int((_pf_r[_ek].str.strip().isin(["ECHU","ASSURE ECHU"])).sum()) if _ek in _pf_r.columns else 0
+                            _mon = float(_pf_r["MONTENCA"].fillna(0).sum()) if "MONTENCA" in _pf_r.columns else 0
+                            _txa = _act/_nb*100 if _nb else 0
+                            _txr = _res/max(_nb-_ina,1)*100
+                            kd   = [["Indicateur","Valeur","Note"],
+                                ["Total polices",         nb_full(_nb),   "Ensemble du portefeuille"],
+                                ["Polices actives",        nb_full(_act), f"Taux activité : {_txa:.1f}%"],
+                                ["Polices résiliées",      nb_full(_res), f"Tx CIMA : {_txr:.1f}% (seuil ≤25%)"],
+                                ["Polices échues",         nb_full(_ec),  "ECHU + ASSURE ECHU"],
+                                ["Polices inactives",      nb_full(_ina), f"Part : {_ina/_nb*100:.1f} %" if _nb else "—"]]
+                            story.append(_tbl_style(kd,[7*cm,4*cm,6*cm]))
+                            story.append(Spacer(1,0.2*cm))
+                            # Graphique : repartition des etats
+                            _lab_e = ["Actives","Résiliées","Échues","Inactives"]
+                            _val_e = [_act, _res, _ec, _ina]
+                            _pair  = [(l,v) for l,v in zip(_lab_e,_val_e) if v > 0]
+                            if _pair:
+                                story.append(Spacer(1,0.15*cm))
+                                story.append(_mpl_pie([p[0] for p in _pair],
+                                                    [p[1] for p in _pair],
+                                                    f"Structure du portefeuille · {period_lbl}"))
+                                story.append(Spacer(1,0.18*cm))
+                                story.append(_mpl_treemap([p[0] for p in _pair],
+                                                      [p[1] for p in _pair],
+                                                      "Poids relatif de chaque état"))
+
+                            # Top produits du portefeuille
+                            if "LIBECATE" in _pf_r.columns:
+                                _tp = (_pf_r["LIBECATE"].astype(str).str.strip()
+                                         .value_counts().head(8))
+                                if not _tp.empty:
+                                    story.append(Spacer(1,0.2*cm))
+                                    story.append(Paragraph(
+                                        "Composition du portefeuille par produit :", st_h2))
+                                    _tpr = [["Produit","Polices","Part"]]
+                                    for _n, _v in _tp.items():
+                                        _tpr.append([str(_n)[:42], nb_full(int(_v)),
+                                                     f"{_v/_nb*100:.1f} %"])
+                                    story.append(_tbl_style(_tpr,[9.5*cm,3.5*cm,4*cm]))
+                                    story.append(Spacer(1,0.15*cm))
+                                    story.append(_mpl_barh(
+                                        _tp.index.astype(str).tolist(),
+                                        _tp.values.tolist(),
+                                        f"Nombre de polices par produit · {period_lbl}",
+                                        haut=4.2))
+                            # Commentaire analytique
+                            _cm_cima = ("conforme aux exigences du Code CIMA (seuil ≤ 25 %)"
+                                        if _txr <= 25 else
+                                        "supérieur au seuil réglementaire CIMA de 25 %, "
+                                        "ce qui appelle un plan de rétention")
+                            _cm_act  = ("un niveau d'activité satisfaisant" if _txa >= 50
+                                        else "un niveau d'activité à consolider")
+                            story.append(Spacer(1,0.15*cm))
+                            story.append(Paragraph(
+                                f"<b>Lecture.</b> Sur la période <b>{period_lbl}</b>, le portefeuille "
+                                f"comprend <b>{_nb:,}</b> polices, dont <b>{_act:,}</b> actives, "
+                                f"soit un taux d'activité de <b>{_txa:.1f} %</b> traduisant {_cm_act}. "
+                                f"Le taux de résiliation ressort à <b>{_txr:.1f} %</b>, {_cm_cima}. "
+                                f"Les encaissements cumulés atteignent <b>{fmt_full(_mon)}</b>.".replace(",", " "),
+                                st_bd))
+
+                        # 2. CA
+                        if s_ca and _ca_r is not None:
+                            story.append(Spacer(1,0.3*cm))
+                            story.append(_sec("2.  CHIFFRE D'AFFAIRES"))
+                            story.append(Spacer(1,0.2*cm))
+                            _cat = float(_ca_r["CHIFAFFA"].fillna(0).sum()) if "CHIFAFFA" in _ca_r.columns else 0
+                            _cm  = float(_ca_r["COMMAPPO"].fillna(0).sum()) if "COMMAPPO" in _ca_r.columns else 0
+                            _pr  = float(_ca_r["PRIMNETT"].fillna(0).sum()) if "PRIMNETT" in _ca_r.columns else 0
+                            _nq  = len(_ca_r); _tk = _cat/_nq if _nq else 0
+                            cd   = [["Indicateur","Valeur","Note"],
+                                ["CA brut total",      fmt_full(_cat),   "CHIFAFFA total"],
+                                ["Prime nette totale", fmt_full(_pr),    "Après chargements"],
+                                ["Commissions",        fmt_full(_cm),    f"Taux : {_cm/_cat*100:.1f}%" if _cat else "—"],
+                                ["Nb quittances",      nb_full(_nq), "Émissions totales"],
+                                ["Ticket moyen",       fmt_full(_tk),   "CA/quittance"]]
+                            story.append(_tbl_style(cd,[7*cm,4*cm,6*cm]))
+                            if "LIBECATE" in _ca_r.columns:
+                                story.append(Spacer(1,0.2*cm))
+                                story.append(Paragraph("Répartition par produit (Top 8) :", st_h2))
+                                _cp = _ca_r.groupby("LIBECATE")["CHIFAFFA"].sum().reset_index()
+                                _cp = _cp.sort_values("CHIFAFFA",ascending=False).head(8)
+                                _cp["Part"] = (_cp["CHIFAFFA"]/_cat*100).round(1)
+                                pd_   = [["Produit","CA (FCFA)","Part %"]] + [
+                                    [str(r["LIBECATE"])[:38],
+                                     fmt_full(r["CHIFAFFA"],""),
+                                     f"{r['Part']:.1f}%"]
+                                    for _,r in _cp.iterrows()]
+                                story.append(_tbl_style(pd_,[9*cm,4.5*cm,3.5*cm]))
+                                story.append(Spacer(1,0.15*cm))
+                                story.append(_mpl_barh(
+                                    _cp["LIBECATE"].astype(str).tolist(),
+                                    _cp["CHIFAFFA"].tolist(),
+                                    f"Chiffre d'affaires par produit · {period_lbl}"))
+                                _p1n = str(_cp.iloc[0]["LIBECATE"])[:34]
+                                _p1p = float(_cp.iloc[0]["Part"])
+                                _c3  = float(_cp.head(3)["CHIFAFFA"].sum())/_cat*100 if _cat else 0
+                                story.append(Spacer(1,0.15*cm))
+                                story.append(Paragraph(
+                                    f"<b>Lecture.</b> Le chiffre d'affaires de la période s'établit à "
+                                    f"<b>{fmt_full(_cat)}</b> pour <b>{_nq:,}</b> quittances, "
+                                    f"soit un ticket moyen de <b>{fmt_full(_tk)}</b>. "
+                                    f"Le produit <b>{_p1n}</b> concentre <b>{_p1p:.1f} %</b> du CA ; "
+                                    f"les trois premiers produits en représentent <b>{_c3:.1f} %</b>, "
+                                    f"{'traduisant une concentration marquée à surveiller' if _c3 >= 70 else 'ce qui reflète une répartition équilibrée'}."
+                                    .replace(",", " "), st_bd))
+
+                            # Evolution mensuelle du CA sur le perimetre
+                            _cdt = next((c for c in ["DATECOMP","DATEEFFE"]
+                                         if c in _ca_r.columns), None)
+                            if _cdt:
+                                _ev = _ca_r[[_cdt,"CHIFAFFA"]].copy()
+                                _ev["_M"] = pd.to_datetime(_ev[_cdt], errors="coerce")
+                                _ev = _ev.dropna(subset=["_M"])
+                                if not _ev.empty:
+                                    _ev["_ML"] = _ev["_M"].dt.strftime("%Y-%m")
+                                    _evg = (_ev.groupby("_ML")["CHIFAFFA"].sum()
+                                              .reset_index().sort_values("_ML"))
+                                    if len(_evg) >= 2:
+                                        _evg = _evg.tail(12)
+                                        story.append(Spacer(1,0.2*cm))
+                                        story.append(_mpl_barv(
+                                            _evg["_ML"].tolist(),
+                                            [_evg["CHIFAFFA"].tolist()],
+                                            ["Chiffre d'affaires"],
+                                            f"Évolution mensuelle du chiffre d'affaires · {period_lbl}"))
+                                        _mx = _evg.loc[_evg["CHIFAFFA"].idxmax()]
+                                        _mn = _evg.loc[_evg["CHIFAFFA"].idxmin()]
+                                        _moy = float(_evg["CHIFAFFA"].mean())
+                                        story.append(Spacer(1,0.12*cm))
+                                        story.append(Paragraph(
+                                            f"<b>Lecture.</b> Sur les {len(_evg)} mois observés, "
+                                            f"la production mensuelle moyenne ressort à "
+                                            f"<b>{fmt_full(_moy)}</b>. Le mois le plus actif est "
+                                            f"<b>{_mx['_ML']}</b> ({fmt_full(_mx['CHIFAFFA'])}), "
+                                            f"le plus faible <b>{_mn['_ML']}</b> "
+                                            f"({fmt_full(_mn['CHIFAFFA'])}), soit un rapport de "
+                                            f"<b>{_mx['CHIFAFFA']/max(_mn['CHIFAFFA'],1):.1f}</b> "
+                                            f"entre les deux extrêmes.", st_bd))
+
+                        # 3. Commerciaux
+                        if s_com and _ca_r is not None:
+                            story.append(Spacer(1,0.3*cm))
+                            story.append(_sec("3.  PERFORMANCE COMMERCIALE & PARTENAIRES"))
+                            story.append(Spacer(1,0.2*cm))
+                            # Nom de l'apporteur : CODEAPPO (CA) enrichi par NOM_APP (Portefeuille)
+                            _agk = next((c for c in ["NOM_APPORT","NOM_APPO",
+                                                     "NOM_INTERMEDIAIRE","NOM_APP"]
+                                         if c in _ca_r.columns), None)
+                            if _agk is None:
+                                _cd_r = next((c for c in ["CODEAPPO","CODE_APPO"]
+                                              if c in _ca_r.columns), None)
+                                _cd_p = next((c for c in ["CODEAPPO","CODE_APPO"]
+                                              if pf is not None and c in pf.columns), None)
+                                _nm_p = next((c for c in ["NOM_APP","NOM_APPORT","NOM_APPO"]
+                                              if pf is not None and c in pf.columns), None)
+                                if _cd_r and _cd_p and _nm_p:
+                                    _rf = (pf[[_cd_p,_nm_p]].dropna(subset=[_cd_p])
+                                             .astype({_cd_p:str}).drop_duplicates(_cd_p)
+                                             .rename(columns={_cd_p:_cd_r, _nm_p:"_NOM_R"}))
+                                    _ca_r = _ca_r.astype({_cd_r:str}).merge(_rf, on=_cd_r, how="left")
+                                    _ca_r["_NOM_R"] = _ca_r["_NOM_R"].fillna(
+                                        "Code " + _ca_r[_cd_r].astype(str))
+                                    _agk = "_NOM_R"
+                                elif _cd_r:
+                                    _ca_r = _ca_r.copy()
+                                    _ca_r["_NOM_R"] = "Code " + _ca_r[_cd_r].astype(str)
+                                    _agk = "_NOM_R"
+                            if _agk and _agk in _ca_r.columns:
+                                _g = _ca_r.groupby(_agk).agg(CA=("CHIFAFFA","sum"),NbQ=("CHIFAFFA","count")).reset_index()
+                                if "COMMAPPO" in _ca_r.columns:
+                                    _gc = _ca_r.groupby(_agk)["COMMAPPO"].sum()
+                                    _g["Comm"] = _gc.reindex(_g[_agk]).values
+                                else:
+                                    _g["Comm"] = 0
+                                _gtot = float(_g["CA"].sum())
+                                _g = _g.sort_values("CA",ascending=False).head(10)
+                                _g["Part"] = (_g["CA"]/max(_gtot,1)*100).round(1)
+                                comD = [["Commercial / Apporteur","CA (FCFA)","Nb quittances","Commission","Part %"]]
+                                for _,r in _g.iterrows():
+                                    comD.append([str(r[_agk])[:28],
+                                        fmt_full(r["CA"],""),
+                                        f"{int(r['NbQ']):,}".replace(",", " "),
+                                        fmt_full(r["Comm"],""), f"{r['Part']:.1f}%"])
+                                story.append(_tbl_style(comD,[7*cm,3.5*cm,2.2*cm,2.5*cm,1.8*cm]))
+                                story.append(Spacer(1,0.15*cm))
+                                story.append(_mpl_barh(
+                                    _g[_agk].astype(str).tolist(), _g["CA"].tolist(),
+                                    f"Top 10 apporteurs par chiffre d'affaires · {period_lbl}"))
+                                _t1n = str(_g.iloc[0][_agk])[:30]
+                                _t1p = float(_g.iloc[0]["Part"])
+                                _t5p = float(_g.head(5)["Part"].sum())
+                                story.append(Spacer(1,0.15*cm))
+                                story.append(Paragraph(
+                                    f"<b>Lecture.</b> Le réseau de distribution est mené par "
+                                    f"<b>{_t1n}</b>, qui réalise <b>{_t1p:.1f} %</b> du chiffre "
+                                    f"d'affaires de la période. Les cinq premiers apporteurs "
+                                    f"cumulent <b>{_t5p:.1f} %</b> du CA, "
+                                    f"{'une concentration élevée qui expose la compagnie au départ d un partenaire majeur' if _t5p >= 80 else 'une répartition qui limite le risque de dépendance commerciale'}.",
+                                    st_bd))
+                                story.append(Spacer(1,0.2*cm))
+                                # Partenaires financiers (code intermédiaire 3 chiffres, hors 100)
+                                _col_ci = next((c for c in ["CODEINTE","CODEAPPO","CODE_INTER"] if c in _ca_r.columns), None)
+                                _col_ni = next((c for c in ["NOM_APPORT","NOM_APPO","NOM_INTERMEDIAIRE"] if c in _ca_r.columns), None)
+                                if _col_ci:
+                                    _ca_part = _ca_r.copy()   # période filtrée
+                                    _ca_part[_col_ci] = _ca_part[_col_ci].astype(str).str.strip()
+                                    _ca_part = _ca_part[
+                                        (_ca_part[_col_ci].str.len() == 3) &
+                                        (_ca_part[_col_ci] != "100") &
+                                        (_ca_part[_col_ci].str.isdigit())
+                                    ]
+                                    if not _ca_part.empty:
+                                        _grp_part_key = _col_ci if _col_ni is None else [_col_ci, _col_ni]
+                                        _gp = _ca_part.groupby(_grp_part_key).agg(
+                                            CA=("CHIFAFFA","sum"), NbAff=("CHIFAFFA","count")
+                                        ).reset_index().sort_values("CA",ascending=False).head(10)
+                                        story.append(Paragraph("Partenaires financiers (codes 3 chiffres, hors 100) :", st_h2))
+                                        _pD_hdr = ["Code","Partenaire","CA (FCFA)","Nb quittances"] if _col_ni else ["Code","CA (FCFA)","Nb quittances"]
+                                        _pD = [_pD_hdr]
+                                        for _,r in _gp.iterrows():
+                                            if _col_ni and isinstance(_grp_part_key, list):
+                                                _pD.append([str(r[_col_ci]), str(r[_col_ni])[:25],
+                                                            fmt_full(r["CA"],""),
+                                                            f"{int(r['NbAff']):,}".replace(",", " ")])
+                                            else:
+                                                _pD.append([str(r[_col_ci]), fmt_full(r["CA"],""),
+                                                            f"{int(r['NbAff']):,}".replace(",", " ")])
+                                        _pw = [2*cm,6*cm,4.5*cm,4.5*cm] if _col_ni else [3*cm,8*cm,6*cm]
+                                        story.append(_tbl_style(_pD, _pw))
+
+                            # ── Comparaison de production N / N-1 ─────────────────
+                            # Etablie sur la base CA complete : une comparaison
+                            # annuelle suppose de disposer des deux exercices.
+                            _cd_r = next((c for c in ["DATECOMP","DATEEFFE","DATESOUS"]
+                                          if c in ca.columns), None)
+                            if _cd_r:
+                                _rb = ca.copy()
+                                _rb["_DT"] = pd.to_datetime(_rb[_cd_r], errors="coerce")
+                                _rb = _rb.dropna(subset=["_DT"])
+                                _rb["_AN"] = _rb["_DT"].dt.year
+                                _cak_r = "CHIFAFFA" if "CHIFAFFA" in _rb.columns else "MONTENCA"
+                                _ans_r = sorted(_rb["_AN"].unique().tolist())
+                                if len(_ans_r) >= 2:
+                                    # L'exercice de reference suit le filtre annuel
+                                    # de la barre laterale ; a defaut, le plus recent.
+                                    if SEL_YEAR and SEL_YEAR in _ans_r:
+                                        _aN = int(SEL_YEAR)
+                                        _prec = [a for a in _ans_r if a < _aN]
+                                        _aN1  = int(_prec[-1]) if _prec else int(_ans_r[0])
+                                    else:
+                                        _aN, _aN1 = int(_ans_r[-1]), int(_ans_r[-2])
+                                    _mN  = (_rb[_rb["_AN"]==_aN ].groupby(_rb["_DT"].dt.month)[_cak_r]
+                                              .sum().reindex(range(1,13), fill_value=0))
+                                    _mN1 = (_rb[_rb["_AN"]==_aN1].groupby(_rb["_DT"].dt.month)[_cak_r]
+                                              .sum().reindex(range(1,13), fill_value=0))
+                                    _MFR = ["Jan","Fév","Mar","Avr","Mai","Juin",
+                                            "Juil","Août","Sep","Oct","Nov","Déc"]
+                                    story.append(Spacer(1,0.25*cm))
+                                    story.append(Paragraph(
+                                        f"Production mensuelle comparée · {_aN} face à {_aN1} :", st_h2))
+                                    story.append(_mpl_barv(
+                                        _MFR, [_mN1.tolist(), _mN.tolist()],
+                                        [str(_aN1), str(_aN)],
+                                        f"Chiffre d'affaires mensuel · {_aN} face à {_aN1}",
+                                        haut=4.4))
+
+                                    _tN_r, _tN1_r = float(_mN.sum()), float(_mN1.sum())
+                                    _vr = ((_tN_r-_tN1_r)/_tN1_r*100) if _tN1_r else 0
+                                    _cmpR = [["Mois", f"{_aN1} (FCFA)", f"{_aN} (FCFA)",
+                                              "Écart", "Var."]]
+                                    for _k in range(12):
+                                        _v1, _v0 = float(_mN.iloc[_k]), float(_mN1.iloc[_k])
+                                        _vv = ((_v1-_v0)/_v0*100) if _v0 else None
+                                        _cmpR.append([_MFR[_k], fmt_full(_v0,""), fmt_full(_v1,""),
+                                                      fmt_full(_v1-_v0,""),
+                                                      "—" if _vv is None else f"{_vv:+.0f} %"])
+                                    _cmpR.append(["TOTAL", fmt_full(_tN1_r,""), fmt_full(_tN_r,""),
+                                                  fmt_full(_tN_r-_tN1_r,""), f"{_vr:+.1f} %"])
+                                    story.append(Spacer(1,0.15*cm))
+                                    story.append(_tbl_style(_cmpR,
+                                        [2.4*cm,3.9*cm,3.9*cm,3.6*cm,2.7*cm]))
+
+                                    _nb_h = int(sum(1 for _k in range(12)
+                                                    if _mN.iloc[_k] > _mN1.iloc[_k]))
+                                    _sens = "progresse" if _vr >= 0 else "recule"
+                                    story.append(Spacer(1,0.15*cm))
+                                    story.append(Paragraph(
+                                        f"<b>Lecture.</b> La production {_sens} de "
+                                        f"<b>{abs(_vr):.1f} %</b> entre {_aN1} et {_aN}, "
+                                        f"passant de <b>{fmt_full(_tN1_r)}</b> à "
+                                        f"<b>{fmt_full(_tN_r)}</b>. "
+                                        f"<b>{_nb_h} mois sur 12</b> affichent une production "
+                                        f"supérieure à celle de l'exercice précédent"
+                                        + (", ce qui traduit une dynamique installée."
+                                           if _nb_h >= 8 else
+                                           ", signe d'une reprise encore inégale."
+                                           if _nb_h >= 5 else
+                                           ", ce qui appelle un examen des causes du retrait."),
+                                        st_bd))
+
+                                    # ── Performance par partenaire : N face a N-1 ──
+                                    # Banques, compagnies d'assurance et principaux
+                                    # apporteurs, identifies par leur code a trois
+                                    # chiffres (hors 100, reserve au reseau interne).
+                                    _cci = next((c for c in ["CODEINTE","CODE_INTER",
+                                                             "CODEINTER","CODEAPPO"]
+                                                 if c in _rb.columns), None)
+                                    if _cci:
+                                        _rp = _rb.copy()
+                                        _rp["_CD"] = (_rp[_cci].astype(str)
+                                                        .str.strip().str.zfill(3))
+                                        _rp = _rp[_rp["_CD"].str.fullmatch(r"\d{3}", na=False)
+                                                  & (_rp["_CD"] != "100")]
+                                        # Nom : Portefeuille puis base CA complete
+                                        _mn_r = {}
+                                        if pf is not None:
+                                            _cp = next((c for c in ["CODEINTE_P","CODEINTE",
+                                                                    "CODEAPPO","CODE_APPO"]
+                                                        if c in pf.columns), None)
+                                            _np_ = next((c for c in ["NOM_APP","NOM_APPORT",
+                                                                     "NOM_APPO"]
+                                                         if c in pf.columns), None)
+                                            if _cp and _np_:
+                                                _t = pf[[_cp,_np_]].dropna()
+                                                _t = _t[_t[_np_].astype(str).str.strip() != ""]
+                                                for _c, _n in zip(
+                                                        _t[_cp].astype(str).str.strip().str.zfill(3),
+                                                        _t[_np_].astype(str).str.strip()):
+                                                    _mn_r.setdefault(_c, _n)
+                                        _nc_r = next((c for c in ["NOM_APPORT","NOM_APPO",
+                                                                  "NOM_INTERMEDIAIRE","NOM_APP"]
+                                                      if c in _rb.columns), None)
+                                        if _nc_r:
+                                            _t2 = _rb[[_cci,_nc_r]].dropna()
+                                            _t2 = _t2[_t2[_nc_r].astype(str).str.strip() != ""]
+                                            for _c, _n in zip(
+                                                    _t2[_cci].astype(str).str.strip().str.zfill(3),
+                                                    _t2[_nc_r].astype(str).str.strip()):
+                                                _mn_r.setdefault(_c, _n)
+                                        _rp["_NM"] = _rp["_CD"].map(_mn_r).fillna(
+                                                        "Code " + _rp["_CD"])
+
+                                        _pN  = (_rp[_rp["_AN"]==_aN ].groupby("_NM")[_cak_r].sum())
+                                        _pN1 = (_rp[_rp["_AN"]==_aN1].groupby("_NM")[_cak_r].sum())
+                                        _pp  = (pd.DataFrame({"N": _pN, "N1": _pN1})
+                                                  .fillna(0.0))
+                                        _pp  = _pp[(_pp["N"] > 0) | (_pp["N1"] > 0)]
+
+                                        if not _pp.empty:
+                                            _pp["Ecart"] = _pp["N"] - _pp["N1"]
+                                            _pp["Var"]   = np.where(_pp["N1"] > 0,
+                                                            _pp["Ecart"]/_pp["N1"]*100, np.nan)
+                                            _pp = _pp.sort_values("N", ascending=False)
+                                            _tpN, _tpN1 = float(_pp["N"].sum()), float(_pp["N1"].sum())
+                                            _p10 = _pp.head(10)
+
+                                            story.append(Spacer(1,0.3*cm))
+                                            story.append(Paragraph(
+                                                f"Performance des partenaires · {_aN} face à {_aN1}",
+                                                st_h2))
+
+                                            # Barres groupees : dix premiers partenaires
+                                            story.append(_mpl_barv(
+                                                [str(i)[:14] for i in _p10.index],
+                                                [_p10["N1"].tolist(), _p10["N"].tolist()],
+                                                [str(_aN1), str(_aN)],
+                                                f"Production des dix premiers partenaires · "
+                                                f"{_aN} face à {_aN1}", haut=4.6))
+
+                                            # Tableau detaille
+                                            _ptb = [["Partenaire", f"{_aN1} (FCFA)",
+                                                     f"{_aN} (FCFA)", "Écart", "Var.", "Part"]]
+                                            for _nmp, _r in _p10.iterrows():
+                                                _vv2 = _r["Var"]
+                                                _ptb.append([
+                                                    str(_nmp)[:30],
+                                                    fmt_full(_r["N1"], ""),
+                                                    fmt_full(_r["N"], ""),
+                                                    fmt_full(_r["Ecart"], ""),
+                                                    "n. s." if pd.isna(_vv2) else f"{_vv2:+.0f} %",
+                                                    f"{_r['N']/_tpN*100:.1f} %" if _tpN else "—"])
+                                            story.append(Spacer(1,0.15*cm))
+                                            story.append(_tbl_style(_ptb,
+                                                [4.2*cm,3.1*cm,3.1*cm,3*cm,1.9*cm,1.7*cm]))
+
+                                            # Progressions et retraits marquants
+                                            _sig = _pp[(_pp["N1"] > 0) & (_pp["Var"].notna())]
+                                            _hau = _sig.nlargest(3, "Var")
+                                            _bas = _sig.nsmallest(3, "Var")
+                                            if not _hau.empty:
+                                                _lh = " ; ".join(
+                                                    f"<b>{str(i)[:26]}</b> {r['Var']:+.0f} %"
+                                                    for i, r in _hau.iterrows())
+                                                _lb = " ; ".join(
+                                                    f"<b>{str(i)[:26]}</b> {r['Var']:+.0f} %"
+                                                    for i, r in _bas.iterrows())
+                                                _vpg = ((_tpN-_tpN1)/_tpN1*100) if _tpN1 else 0
+                                                _nh  = int((_pp["Ecart"] > 0).sum())
+                                                _nt  = int(len(_pp))
+                                                _c3  = (float(_pp.head(3)["N"].sum())/_tpN*100
+                                                        if _tpN else 0)
+                                                _msg_c3 = ("ce qui expose la production à la "
+                                                           "défaillance d'un seul apporteur"
+                                                           if _c3 >= 60 else
+                                                           "niveau de dépendance acceptable")
+                                                story.append(Spacer(1,0.15*cm))
+                                                story.append(Paragraph(
+                                                    f"<b>Lecture.</b> Le réseau partenaire "
+                                                    f"totalise <b>{fmt_full(_tpN)}</b> en {_aN}, "
+                                                    f"contre <b>{fmt_full(_tpN1)}</b> en {_aN1}, "
+                                                    f"soit une variation de "
+                                                    f"<b>{_vpg:+.1f} %</b>. "
+                                                    f"<b>{_nh} partenaires sur {_nt}</b> "
+                                                    f"progressent d'un exercice à l'autre. "
+                                                    f"Les trois premiers concentrent "
+                                                    f"<b>{_c3:.1f} %</b> de la production, "
+                                                    f"{_msg_c3}.",
+                                                    st_bd))
+                                                story.append(Paragraph(
+                                                    f"<b>Progressions les plus fortes :</b> {_lh}.",
+                                                    st_bd))
+                                                story.append(Paragraph(
+                                                    f"<b>Replis les plus marqués :</b> {_lb}. "
+                                                    f"Ces reculs justifient un entretien "
+                                                    f"commercial avant la clôture de l'exercice.",
+                                                    st_bd))
+
+                        # 4. Sinistres
+                        if s_sin and _sin_r is not None:
+                            story.append(Spacer(1,0.3*cm))
+                            story.append(_sec("4.  SINISTRES ET PRESTATIONS"))
+                            story.append(Spacer(1,0.2*cm))
+                            _st  = float(_sin_r["Réglement Total"].fillna(0).sum()) if "Réglement Total" in _sin_r.columns else 0
+                            _ss  = float(_sin_r["SAP au 31/12/2025"].fillna(0).sum()) if "SAP au 31/12/2025" in _sin_r.columns else 0
+                            _sh  = float(_sin_r["Réglement Honoraires"].fillna(0).sum()) if "Réglement Honoraires" in _sin_r.columns else 0
+                            _sc  = int((_sin_r["Sort Sinistre"]=="Cloturé").sum()) if "Sort Sinistre" in _sin_r.columns else 0
+                            _so  = int((_sin_r["Sort Sinistre"]=="Ouvert").sum()) if "Sort Sinistre" in _sin_r.columns else 0
+                            _sn  = len(_sin_r)
+                            _ca2 = float(_ca_r["CHIFAFFA"].fillna(0).sum()) if _ca_r is not None and "CHIFAFFA" in _ca_r.columns else 1
+                            _sp  = _st/_ca2*100
+                            _cu  = _st+_ss+_sh
+                            sd   = [["Indicateur","Valeur","Note"],
+                                ["Total réglé",       fmt_full(_st,""), "Montant total règlements"],
+                                ["SAP (provisions)",  fmt_full(_ss,""), "Sinistres à payer"],
+                                ["Honoraires",        fmt_full(_sh,""), "Experts médicaux"],
+                                ["Charge ultime",     fmt_full(_cu,""), "Réglé + SAP + Honoraires"],
+                                ["Ratio S/P",         f"{_sp:.1f}%", f"Seuil CIMA ≤80% {'✓' if _sp<=80 else '⚠'}"],
+                                ["Dossiers ouverts",  nb_full(_so),    f"Sur {_sn:,} dossiers"],
+                                ["Dossiers clos",     nb_full(_sc),    f"Taux clôture : {_sc/_sn*100:.1f}%" if _sn else "—"]]
+                            story.append(_tbl_style(sd,[6*cm,4*cm,7*cm]))
+
+                            # Graphique : structure de la charge
+                            _lab_s = ["Réglé","SAP","Honoraires"]
+                            _val_s = [_st, _ss, _sh]
+                            if sum(_val_s) > 0:
+                                story.append(Spacer(1,0.15*cm))
+                                story.append(_mpl_barv(_lab_s, [_val_s], ["Montant"],
+                                    f"Décomposition de la charge sinistres · {period_lbl}",
+                                    haut=4.0))
+
+                            # Structure de la charge par nature de sinistre
+                            # Les variantes de deces sont regroupees sous un libelle unique
+                            _c_nat_r = next((c for c in _sin_r.columns
+                                             if "ature" in c.lower() and "ini" in c.lower()), None)
+                            _c_reg_r = next((c for c in _sin_r.columns
+                                             if "glement" in c.lower() and "otal" in c.lower()), None)
+                            _c_sap_r = next((c for c in _sin_r.columns
+                                             if c.upper().startswith("SAP")), None)
+                            if _c_nat_r and _c_reg_r:
+                                _sr = _sin_r.copy()
+                                _sr[_c_nat_r] = normaliser_nature(_sr[_c_nat_r])
+                                _agg_n = {"Nb": (_c_nat_r,"count"), "Regle": (_c_reg_r,"sum")}
+                                if _c_sap_r: _agg_n["SAP"] = (_c_sap_r,"sum")
+                                _gnat = _sr.groupby(_c_nat_r).agg(**_agg_n).reset_index()
+                                if "SAP" not in _gnat.columns: _gnat["SAP"] = 0.0
+                                _gnat["Charge"] = _gnat["Regle"] + _gnat["SAP"]
+                                _gnat = _gnat.sort_values("Charge", ascending=False)
+                                _tot_ch = float(_gnat["Charge"].sum())
+
+                                if not _gnat.empty and _tot_ch > 0:
+                                    # Tableau : poids de chaque nature dans la charge
+                                    _nt = [["Nature de sinistre","Dossiers","Réglé (FCFA)",
+                                            "SAP (FCFA)","Charge","Part"]]
+                                    for _, _r in _gnat.head(8).iterrows():
+                                        _nt.append([
+                                            str(_r[_c_nat_r])[:30],
+                                            nb_full(int(_r["Nb"])),
+                                            fmt_full(_r["Regle"], ""),
+                                            fmt_full(_r["SAP"], ""),
+                                            fmt_full(_r["Charge"], ""),
+                                            f"{_r['Charge']/_tot_ch*100:.1f} %"])
+                                    story.append(Spacer(1,0.2*cm))
+                                    story.append(Paragraph(
+                                        "Décomposition de la charge par nature "
+                                        "(décès regroupés) :", st_h2))
+                                    story.append(_tbl_style(_nt,
+                                        [4.3*cm,2*cm,2.9*cm,2.6*cm,2.9*cm,1.8*cm]))
+
+                                    # Carte proportionnelle : poids visuel de chaque nature
+                                    _g6 = _gnat.head(6)
+                                    story.append(Spacer(1,0.18*cm))
+                                    story.append(_mpl_treemap(
+                                        _g6[_c_nat_r].astype(str).tolist(),
+                                        _g6["Charge"].tolist(),
+                                        f"Répartition de la charge par nature · {period_lbl}"))
+
+                                    # Barres : montants comparés
+                                    _g8 = _gnat.head(8)
+                                    story.append(Spacer(1,0.18*cm))
+                                    story.append(_mpl_barh(
+                                        _g8[_c_nat_r].astype(str).tolist(),
+                                        _g8["Charge"].tolist(),
+                                        f"Charge par nature de sinistre · {period_lbl}",
+                                        coul="#C0392B"))
+
+                                    # Note de lecture sur la concentration
+                                    _n1  = _gnat.iloc[0]
+                                    _p1  = float(_n1["Charge"])/_tot_ch*100
+                                    _p3  = float(_gnat.head(3)["Charge"].sum())/_tot_ch*100
+                                    _dc  = _gnat[_gnat[_c_nat_r].astype(str)
+                                                 .str.upper().str.startswith("DÉCÈS")]
+                                    _pdc = (float(_dc["Charge"].sum())/_tot_ch*100
+                                            if not _dc.empty else 0)
+                                    _ndc = int(_dc["Nb"].sum()) if not _dc.empty else 0
+                                    story.append(Spacer(1,0.15*cm))
+                                    story.append(Paragraph(
+                                        f"<b>Lecture.</b> La charge se concentre sur "
+                                        f"<b>{str(_n1[_c_nat_r])[:32]}</b>, qui absorbe "
+                                        f"<b>{_p1:.1f} %</b> du total ; les trois premières "
+                                        f"natures en cumulent <b>{_p3:.1f} %</b>. "
+                                        + (f"Le risque décès, toutes garanties confondues, "
+                                           f"représente <b>{_ndc:,} dossiers</b> pour "
+                                           f"<b>{_pdc:.1f} %</b> de la charge."
+                                           .replace(",", " ") if _ndc else ""),
+                                        st_bd))
+
+                            # Commentaire analytique
+                            _sp_msg = ("en conformité avec la norme CIMA (seuil ≤ 80 %)"
+                                       if _sp <= 80 else
+                                       "supérieur au seuil réglementaire CIMA de 80 %, "
+                                       "ce qui justifie une révision tarifaire")
+                            _tx_clo = _sc/_sn*100 if _sn else 0
+                            story.append(Spacer(1,0.15*cm))
+                            story.append(Paragraph(
+                                f"<b>Lecture.</b> Sur la période <b>{period_lbl}</b>, la charge ultime "
+                                f"des sinistres atteint <b>{fmt_full(_cu)}</b>, dont "
+                                f"<b>{fmt_full(_st)}</b> déjà réglés et <b>{fmt_full(_ss)}</b> "
+                                f"encore provisionnés en SAP. Le ratio Sinistres/Primes ressort à "
+                                f"<b>{_sp:.1f} %</b>, {_sp_msg}. "
+                                f"Sur <b>{_sn:,}</b> dossiers, <b>{_sc:,}</b> sont clos "
+                                f"(<b>{_tx_clo:.1f} %</b>) et <b>{_so:,}</b> restent ouverts."
+                                .replace(",", " "), st_bd))
+
+                        # 5. CIMA
+                        if s_cima and _pf_r is not None:
+                            story.append(Spacer(1,0.3*cm))
+                            story.append(_sec("5.  SCORECARD CONFORMITÉ CIMA"))
+                            story.append(Spacer(1,0.2*cm))
+                            _nb2 = len(_pf_r); _ek2="ETAT_POLICE"
+                            _a2  = int((_pf_r[_ek2].str.strip().isin(["ACTIF"])).sum()) if _ek2 in _pf_r.columns else 0
+                            _r2  = int((_pf_r[_ek2].str.strip()=="RESILIE").sum()) if _ek2 in _pf_r.columns else 0
+                            _i2  = int((_pf_r[_ek2].str.strip()=="INACTIF").sum()) if _ek2 in _pf_r.columns else 0
+                            _c2  = float(_ca_r["CHIFAFFA"].fillna(0).sum()) if _ca_r is not None and "CHIFAFFA" in _ca_r.columns else 1
+                            _s2  = float(_sin_r["Réglement Total"].fillna(0).sum()) if _sin_r is not None and "Réglement Total" in _sin_r.columns else 0
+                            _ta2 = _a2/_nb2*100 if _nb2 else 0
+                            _tr2 = _r2/max(_nb2-_i2,1)*100
+                            _sp2 = _s2/_c2*100
+                            _in2 = _i2/_nb2*100 if _nb2 else 0
+                            # Formules des taux CIMA
+                            _st_f = ParagraphStyle("Ff",fontName="Helvetica",fontSize=8,
+                                textColor=rl_colors.HexColor("#333"),leading=12,spaceAfter=2)
+                            story.append(Paragraph("<b>Formules de calcul des indicateurs :</b>", st_h2))
+                            _fd = [
+                                ["Indicateur","Formule","Valeur"],
+                                ["Taux activite net",
+                                 f"Actifs / (Total - Inactifs) x 100 = {_a2:,} / {max(_nb2-_i2,1):,} x 100",
+                                 f"{_ta2:.1f}%"],
+                                ["Taux resiliation",
+                                 f"Resilies / (Total - Inactifs) x 100 = {_r2:,} / {max(_nb2-_i2,1):,} x 100",
+                                 f"{_tr2:.1f}%"],
+                                ["Ratio S/P",
+                                 f"Reglements / CA brut x 100 = {fmt_full(_s2)} / {fmt_full(_c2)} x 100",
+                                 f"{_sp2:.1f}%"],
+                                ["Part inactifs",
+                                 f"Inactifs / Total x 100 = {_i2:,} / {max(_nb2,1):,} x 100",
+                                 f"{_in2:.1f}%"],
+                            ]
+                            _ft = Table(_fd, colWidths=[4*cm, 10*cm, 3*cm])
+                            _ft.setStyle(TableStyle([
+                                ("BACKGROUND",(0,0),(-1,0),C_N),("TEXTCOLOR",(0,0),(-1,0),C_W),
+                                ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
+                                ("FONTSIZE",(0,0),(-1,-1),8),
+                                ("ROWBACKGROUNDS",(0,1),(-1,-1),[C_L,C_W]),
+                                ("GRID",(0,0),(-1,-1),0.3,rl_colors.HexColor("#DDE3EE")),
+                                ("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4),
+                                ("LEFTPADDING",(0,0),(-1,-1),5),("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+                                ("FONTNAME",(2,1),(2,-1),"Helvetica-Bold"),
+                                ("TEXTCOLOR",(2,1),(2,-1),C_G),
+                            ]))
+                            story.append(_ft)
+                            story.append(Spacer(1,0.3*cm))
+                            cm_d = [["Indicateur CIMA","Valeur","Seuil","Statut"],
+                                ["Taux d'activité net",  f"{_ta2:.1f}%", "≥ 50%", "CONFORME" if _ta2>=50 else "NON CONFORME"],
+                                ["Taux résiliation",     f"{_tr2:.1f}%", "≤ 25%", "CONFORME" if _tr2<=25 else "NON CONFORME"],
+                                ["Ratio S/P",            f"{_sp2:.1f}%", "≤ 80%", "CONFORME" if _sp2<=80 else "NON CONFORME"],
+                                ["Part inactifs",        f"{_in2:.1f}%", "≤ 5%",  "CONFORME" if _in2<=5 else "NON CONFORME"]]
+                            t_cm = Table(cm_d, colWidths=[6*cm,3*cm,3*cm,5*cm])
+                            _cm_style = TableStyle([
+                                ("BACKGROUND",(0,0),(-1,0),C_N),
+                                ("TEXTCOLOR",(0,0),(-1,0),C_W),
+                                ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
+                                ("FONTSIZE",(0,0),(-1,-1),9),
+                                ("ROWBACKGROUNDS",(0,1),(-1,-1),[C_L,C_W]),
+                                ("ALIGN",(1,0),(-1,-1),"CENTER"),
+                                ("GRID",(0,0),(-1,-1),0.3,rl_colors.HexColor("#DDE3EE")),
+                                ("TOPPADDING",(0,0),(-1,-1),5),
+                                ("BOTTOMPADDING",(0,0),(-1,-1),5),
+                                ("LEFTPADDING",(0,0),(-1,-1),8),
+                            ])
+                            for _i in range(1,len(cm_d)):
+                                _ok = cm_d[_i][3]=="CONFORME"
+                                _cm_style.add("TEXTCOLOR",(3,_i),(3,_i),C_G if _ok else C_R)
+                                _cm_style.add("FONTNAME",(3,_i),(3,_i),"Helvetica-Bold")
+                            t_cm.setStyle(_cm_style)
+                            story.append(t_cm)
+
+                            # Graphique : indicateurs vs seuils
+                            story.append(Spacer(1,0.15*cm))
+                            story.append(_mpl_barv(
+                                ["Tx activité","Tx résiliation","Ratio S/P","Part inactifs"],
+                                [[_ta2, _tr2, _sp2, _in2], [50, 25, 80, 5]],
+                                ["Valeur constatée","Seuil CIMA"],
+                                f"Indicateurs CIMA face aux seuils réglementaires · {period_lbl}",
+                                haut=4.4))
+
+                            # Carte : ecart de chaque indicateur a son seuil
+                            _ec_lab = ["Tx activité","Tx résiliation","Ratio S/P","Part inactifs"]
+                            _ec_val = [abs(_ta2-50), abs(_tr2-25), abs(_sp2-80), abs(_in2-5)]
+                            if sum(_ec_val) > 0:
+                                story.append(Spacer(1,0.18*cm))
+                                story.append(_mpl_treemap(_ec_lab, _ec_val,
+                                    "Amplitude de l'écart au seuil réglementaire"))
+
+                            _nb_ok  = sum(1 for _r in cm_d[1:] if _r[3] == "CONFORME")
+                            _tot_ic = len(cm_d) - 1
+                            _ecarts = [_r[0] for _r in cm_d[1:] if _r[3] != "CONFORME"]
+                            story.append(Spacer(1,0.15*cm))
+                            story.append(Paragraph(
+                                f"<b>Lecture.</b> Sur les <b>{_tot_ic}</b> indicateurs réglementaires "
+                                f"suivis, <b>{_nb_ok}</b> sont conformes aux seuils du Code CIMA. "
+                                + (f"Les indicateurs en écart sont : <b>{', '.join(_ecarts)}</b>. "
+                                   f"Un plan d'action est recommandé sur ces axes."
+                                   if _ecarts else
+                                   "L'ensemble des indicateurs respecte les seuils réglementaires."),
+                                st_bd))
+
+                        # Conclusion
+                        story.append(Spacer(1,0.4*cm))
+                        story.append(HRFlowable(width="100%",thickness=1,color=C_G,spaceAfter=6))
+                        story.append(Paragraph("CONCLUSION",st_h1))
+                        story.append(Paragraph(
+                            f"Le présent rapport, établi par le <b>Département Technique</b>, "
+                            f"dresse l'état de la situation actuarielle et commerciale "
+                            f"d'AFG Assurances Bénin Vie pour la période du <b>{period_lbl}</b>. "
+                            f"L'ensemble des indicateurs, graphiques et tableaux qui précèdent "
+                            f"portent exclusivement sur cette période : aucune donnée globale "
+                            f"hors périmètre n'y est intégrée.",st_bd))
                         story.append(Spacer(1,0.15*cm))
                         story.append(Paragraph(
-                            f"<b>Lecture.</b> Sur les <b>{_tot_ic}</b> indicateurs réglementaires "
-                            f"suivis, <b>{_nb_ok}</b> sont conformes aux seuils du Code CIMA. "
-                            + (f"Les indicateurs en écart sont : <b>{', '.join(_ecarts)}</b>. "
-                               f"Un plan d'action est recommandé sur ces axes."
-                               if _ecarts else
-                               "L'ensemble des indicateurs respecte les seuils réglementaires."),
-                            st_bd))
+                            f"Les données proviennent des bases de gestion officielles de la "
+                            f"compagnie (Portefeuille, Chiffre d'affaires, Prestations) et ont "
+                            f"été traitées conformément aux exigences du Code CIMA en vigueur "
+                            f"dans la zone UEMOA. Les montants sont exprimés en francs CFA.",st_bd))
+                        story.append(Spacer(1,0.2*cm))
+                        story.append(Paragraph(
+                            f"<i>Document confidentiel · AFG Assurances Bénin Vie · "
+                            f"Groupe AFG Holding · Conforme CIMA · "
+                            f"Établi le {_dt.now().strftime('%d/%m/%Y')}</i>",st_sm))
+                        story.append(Spacer(1,0.5*cm))
+                        story.append(Table(
+                            [["", ""],
+                             ["Le Département Technique", "Visa de la Direction Générale"],
+                             ["", ""], ["", ""]],
+                            colWidths=[8.5*cm, 8.5*cm],
+                            style=TableStyle([
+                                ("FONTNAME",(0,1),(-1,1),"Helvetica-Bold"),
+                                ("FONTSIZE",(0,0),(-1,-1),8.5),
+                                ("TEXTCOLOR",(0,1),(-1,1),C_N),
+                                ("ALIGN",(0,0),(-1,-1),"CENTER"),
+                                ("LINEABOVE",(0,3),(0,3),.6,C_N),
+                                ("LINEABOVE",(1,3),(1,3),.6,C_N),
+                                ("TOPPADDING",(0,2),(-1,2),22),
+                            ])))
 
-                    # Conclusion
-                    story.append(Spacer(1,0.4*cm))
-                    story.append(HRFlowable(width="100%",thickness=1,color=C_G,spaceAfter=6))
-                    story.append(Paragraph("CONCLUSION",st_h1))
-                    story.append(Paragraph(
-                        f"Le présent rapport, établi par le <b>Département Technique</b>, "
-                        f"dresse l'état de la situation actuarielle et commerciale "
-                        f"d'AFG Assurances Bénin Vie pour la période du <b>{period_lbl}</b>. "
-                        f"L'ensemble des indicateurs, graphiques et tableaux qui précèdent "
-                        f"portent exclusivement sur cette période : aucune donnée globale "
-                        f"hors périmètre n'y est intégrée.",st_bd))
-                    story.append(Spacer(1,0.15*cm))
-                    story.append(Paragraph(
-                        f"Les données proviennent des bases de gestion officielles de la "
-                        f"compagnie (Portefeuille, Chiffre d'affaires, Prestations) et ont "
-                        f"été traitées conformément aux exigences du Code CIMA en vigueur "
-                        f"dans la zone UEMOA. Les montants sont exprimés en francs CFA.",st_bd))
-                    story.append(Spacer(1,0.2*cm))
-                    story.append(Paragraph(
-                        f"<i>Document confidentiel · AFG Assurances Bénin Vie · "
-                        f"Groupe AFG Holding · Conforme CIMA · "
-                        f"Établi le {_dt.now().strftime('%d/%m/%Y')}</i>",st_sm))
-                    story.append(Spacer(1,0.5*cm))
-                    story.append(Table(
-                        [["", ""],
-                         ["Le Département Technique", "Visa de la Direction Générale"],
-                         ["", ""], ["", ""]],
-                        colWidths=[8.5*cm, 8.5*cm],
-                        style=TableStyle([
-                            ("FONTNAME",(0,1),(-1,1),"Helvetica-Bold"),
-                            ("FONTSIZE",(0,0),(-1,-1),8.5),
-                            ("TEXTCOLOR",(0,1),(-1,1),C_N),
-                            ("ALIGN",(0,0),(-1,-1),"CENTER"),
-                            ("LINEABOVE",(0,3),(0,3),.6,C_N),
-                            ("LINEABOVE",(1,3),(1,3),.6,C_N),
-                            ("TOPPADDING",(0,2),(-1,2),22),
-                        ])))
+                        doc.build(story)
+                        # Le PDF est conserve en session : le bouton de
+                        # telechargement reste disponible apres le re-rendu
+                        # declenche par le clic sur "Generer".
+                        st.session_state["_rapport_pdf"] = _buf.getvalue()
+                        st.session_state["_rapport_nom"] = (
+                            f"AFG_Rapport_DG_{period_lbl.replace(' ','_')}"
+                            f"_{_dt.now().strftime('%Y%m%d')}.pdf")
+                        st.session_state["_rapport_lbl"] = period_lbl
+                    except ImportError:
+                        alert("La bibliothèque <b>reportlab</b> n'est pas installée.", "danger")
+                    except Exception as _e:
+                        alert(f"Erreur génération PDF : {_e}", "danger")
+                        import traceback; st.code(traceback.format_exc())
 
-                    doc.build(story)
-                    # Le PDF est conserve en session : le bouton de
-                    # telechargement reste disponible apres le re-rendu
-                    # declenche par le clic sur "Generer".
-                    st.session_state["_rapport_pdf"] = _buf.getvalue()
-                    st.session_state["_rapport_nom"] = (
-                        f"AFG_Rapport_DG_{period_lbl.replace(' ','_')}"
-                        f"_{_dt.now().strftime('%Y%m%d')}.pdf")
-                    st.session_state["_rapport_lbl"] = period_lbl
-                except ImportError:
-                    alert("La bibliothèque <b>reportlab</b> n'est pas installée.", "danger")
-                except Exception as _e:
-                    alert(f"Erreur génération PDF : {_e}", "danger")
-                    import traceback; st.code(traceback.format_exc())
-
-        # ── Telechargement (persiste entre les re-rendus) ─────────────────
-        if st.session_state.get("_rapport_pdf"):
-            _pdfb = st.session_state["_rapport_pdf"]
-            st.markdown("")
-            st.success(f"Rapport prêt — {len(_pdfb)//1024} Ko · "
-                       f"période {st.session_state.get('_rapport_lbl', period_lbl)}")
-            st.download_button("📥 Télécharger le rapport PDF",
-                data=_pdfb,
-                file_name=st.session_state.get("_rapport_nom","rapport_afg.pdf"),
-                mime="application/pdf",
-                use_container_width=True, type="primary",
-                key="dl_pdf_final")
-
+            # ── Telechargement (persiste entre les re-rendus) ─────────────────
+            if st.session_state.get("_rapport_pdf"):
+                _pdfb = st.session_state["_rapport_pdf"]
+                st.markdown("")
+                st.success(f"Rapport prêt — {len(_pdfb)//1024} Ko · "
+                           f"période {st.session_state.get('_rapport_lbl', period_lbl)}")
+                st.download_button("📥 Télécharger le rapport PDF",
+                    data=_pdfb,
+                    file_name=st.session_state.get("_rapport_nom","rapport_afg.pdf"),
+                    mime="application/pdf",
+                    use_container_width=True, type="primary",
+                    key="dl_pdf_final")
+    except Exception as _e_page:
+        _erreur_onglet(_e_page, "Rapport PDF")
 
     # ── FOOTER ────────────────────────────────────────────────────────────────────
     st.markdown(f"""
