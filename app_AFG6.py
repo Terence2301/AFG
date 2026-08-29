@@ -478,6 +478,22 @@ def generer_pdf_rapport(pf, ca, sin, period_lbl, user_nom,
 
 
 
+_CODES_VIDES = {"", "nan", "none", "null", "<na>", "nat", "0"}
+
+def code_propre(serie):
+    """Normalise une colonne de code en chaine exploitable.
+
+    Trois pieges corriges :
+      · astype(str) laisse les NaN en flottant, invisibles au masque ;
+      · un code lu en flottant s'ecrit « 2016.0 » ;
+      · les espaces internes du Portefeuille (« 2 745 ») faussent la jointure.
+    """
+    _s = serie.fillna("").astype(str).str.strip()
+    _s = _s.str.replace(r"\.0+$", "", regex=True)
+    _s = _s.str.replace(r"\s+", "", regex=True)
+    return _s.mask(_s.str.lower().isin(_CODES_VIDES), "")
+
+
 def normaliser_nature(serie):
     """Regroupe les variantes de deces sous un libelle unique.
 
@@ -3324,47 +3340,121 @@ elif "Commerciaux" in page and "Partenaires" not in page:
                                    f"n'ont pas de nom dans le Portefeuille.")
 
         # ── Identification des commerciaux ────────────────────────────────────────
-        # Regle metier : le CODE APPORTEUR vient de la base CA (CODEAPPO),
-        # le NOM correspondant est recupere dans la base Portefeuille (NOM_APP).
+        # Deux nomenclatures coexistent dans les bases AFG :
+        #   · CODEINTE  (3 caracteres) designe l'AGENCE ou le partenaire.
+        #     Present dans le CA et dans le Portefeuille (CODEINTE_P),
+        #     il se recoupe a 100 % : c'est la cle de jointure fiable.
+        #   · CODEAPPO  (4 caracteres cote CA) designe l'AGENT commercial.
+        #     Le Portefeuille stocke un CODEAPPO a 5 caracteres qui ne
+        #     correspond pas : la jointure directe echoue (1,2 %).
+        #
+        # Le detail par agent est conserve. Chaque agent est rattache a son
+        # agence pour recuperer un libelle lisible :
+        #     « BUREAU DE BOHICON · agent 2016 »
         _code_ca = next((c for c in ["CODEAPPO","CODE_APPO","CODEAPP"]
                          if c in df_com.columns), None)
+        _inte_ca = next((c for c in ["CODEINTE","CODE_INTER","CODEINTER"]
+                         if c in df_com.columns), None)
 
-        if _code_ca is not None and pf is not None:
-            _code_pf = next((c for c in ["CODEAPPO","CODE_APPO","CODEAPP"]
-                             if c in pf.columns), None)
-            _nom_pf  = next((c for c in ["NOM_APP","NOM_APPORT","NOM_APPO"]
-                             if c in pf.columns), None)
-            if _code_pf and _nom_pf:
-                # Dictionnaire code -> nom construit sur les bases COMPLETES
-                # (Portefeuille puis CA tous exercices), afin qu'un exercice ou le
-                # nom est absent de la base CA reste correctement libelle.
-                _map_nom = {}
-                _t = pf[[_code_pf, _nom_pf]].dropna()
-                _t = _t[_t[_nom_pf].astype(str).str.strip() != ""]
-                for _c, _n in zip(_t[_code_pf].astype(str).str.strip(),
-                                  _t[_nom_pf].astype(str).str.strip()):
-                    _map_nom.setdefault(_c, _n)
-                _nca = next((c for c in ["NOM_APPORT","NOM_APPO","NOM_INTERMEDIAIRE","NOM_APP"]
-                             if c in ca.columns), None)
-                if _nca:
-                    _t2 = ca[[_code_ca, _nca]].dropna()
-                    _t2 = _t2[_t2[_nca].astype(str).str.strip() != ""]
-                    for _c, _n in zip(_t2[_code_ca].astype(str).str.strip(),
-                                      _t2[_nca].astype(str).str.strip()):
-                        _map_nom.setdefault(_c, _n)
-                df_com = df_com.copy()
-                df_com["_CODE_K"]  = df_com[_code_ca].astype(str).str.strip()
-                df_com["_NOM_REF"] = df_com["_CODE_K"].map(_map_nom)
-                # Libelle final : "NOM (CODE)" ou "CODE" si le nom est absent
-                df_com["_APPORTEUR"] = df_com.apply(
-                    lambda r: (f"{r['_NOM_REF']} ({r['_CODE_K']})"
-                               if pd.notna(r.get("_NOM_REF")) and str(r.get("_NOM_REF")).strip()
-                               else f"Code {r['_CODE_K']}"), axis=1)
-                ag_k = "_APPORTEUR"
-            else:
-                df_com = df_com.copy()
-                df_com["_APPORTEUR"] = "Code " + df_com[_code_ca].astype(str).str.strip()
-                ag_k = "_APPORTEUR"
+        # 1. Referentiel agence : CODEINTE -> nom, construit sur les bases completes
+        _ref_agence = {}
+        if pf is not None:
+            _ipf = next((c for c in ["CODEINTE_P","CODEINTE","CODE_INTER"]
+                         if c in pf.columns), None)
+            _npf = next((c for c in ["NOM_APP","NOM_APPORT","NOM_APPO",
+                                     "NOM_INTERMEDIAIRE"] if c in pf.columns), None)
+            if _ipf and _npf:
+                _tp = pf[[_ipf, _npf]].dropna()
+                _tp = _tp[_tp[_npf].astype(str).str.strip() != ""]
+                for _c, _n in zip(_tp[_ipf].astype(str).str.strip(),
+                                  _tp[_npf].astype(str).str.strip()):
+                    _ref_agence.setdefault(_c, _n)
+        _ica = next((c for c in ["CODEINTE","CODE_INTER","CODEINTER"]
+                     if c in ca.columns), None)
+        _nca = next((c for c in ["NOM_INTERMEDIAIRE","NOM_APPORT","NOM_APPO","NOM_APP"]
+                     if c in ca.columns), None)
+        if _ica and _nca:
+            _tc = ca[[_ica, _nca]].dropna()
+            _tc = _tc[_tc[_nca].astype(str).str.strip() != ""]
+            for _c, _n in zip(_tc[_ica].astype(str).str.strip(),
+                              _tc[_nca].astype(str).str.strip()):
+                _ref_agence.setdefault(_c, _n)
+
+        # 2. Referentiel agent : CODEAPPO -> nom, si un nom d'agent existe
+        _ref_agent = {}
+        if _code_ca:
+            for _cn in ["NOM_APPORT","NOM_APPO","NOM_COMMERCIAL","NOM_AGENT"]:
+                if _cn in ca.columns:
+                    _ta = ca[[_code_ca, _cn]].dropna()
+                    _ta = _ta[_ta[_cn].astype(str).str.strip() != ""]
+                    for _c, _n in zip(_ta[_code_ca].astype(str).str.strip(),
+                                      _ta[_cn].astype(str).str.strip()):
+                        _ref_agent.setdefault(_c, _n)
+            if pf is not None:
+                _apf = next((c for c in ["CODEAPPO","CODE_APPO"] if c in pf.columns), None)
+                _anp = next((c for c in ["NOM_APP","NOM_APPORT"] if c in pf.columns), None)
+                if _apf and _anp:
+                    _tb = pf[[_apf, _anp]].dropna()
+                    _tb = _tb[_tb[_anp].astype(str).str.strip() != ""]
+                    for _c, _n in zip(_tb[_apf].astype(str).str.strip()
+                                          .str.replace(r"\s+", "", regex=True),
+                                      _tb[_anp].astype(str).str.strip()):
+                        _ref_agent.setdefault(_c, _n)
+
+        if _code_ca is not None:
+            df_com = df_com.copy()
+            # Les valeurs manquantes deviennent la chaine « nan » apres astype(str) :
+            # on les neutralise explicitement pour eviter des libelles parasites.
+            _VIDES = {"", "nan", "none", "null", "<na>", "nat"}
+
+            def _code_propre(serie):
+                """Normalise une colonne de code en chaine, vide si absente.
+
+                astype(str) laisse les NaN sous forme de flottant : on les
+                remplace d'abord par une chaine vide, sinon le masque suivant
+                ne les capte pas et produit des libelles « agent nan ».
+                """
+                _s = serie.fillna("").astype(str).str.strip()
+                # Un code numerique lu en flottant s'ecrit « 2016.0 »
+                _s = _s.str.replace(r"\.0+$", "", regex=True)
+                return _s.mask(_s.str.lower().isin(_VIDES), "")
+
+            df_com["_AGENT"]  = _code_propre(df_com[_code_ca])
+            df_com["_AGENCE"] = (_code_propre(df_com[_inte_ca])
+                                 if _inte_ca else "")
+            df_com["_N_AGENT"]  = df_com["_AGENT"].map(_ref_agent)
+            df_com["_N_AGENCE"] = df_com["_AGENCE"].map(_ref_agence)
+
+            def _libelle_agent(r):
+                """Nom de l'agent si connu, sinon rattachement a son agence."""
+                _cd = str(r["_AGENT"]).strip()
+                if _cd == "":
+                    _ag = r.get("_N_AGENCE")
+                    return (f"{_ag} · sans code agent"
+                            if pd.notna(_ag) and str(_ag).strip()
+                            else "Apporteur non identifié")
+                _na = r.get("_N_AGENT")
+                if pd.notna(_na) and str(_na).strip():
+                    return f"{str(_na).strip()} ({_cd})"
+                _ag = r.get("_N_AGENCE")
+                if pd.notna(_ag) and str(_ag).strip():
+                    return f"{str(_ag).strip()} · agent {_cd}"
+                return f"Agent {_cd}"
+
+            df_com["_APPORTEUR"] = df_com.apply(_libelle_agent, axis=1)
+            ag_k = "_APPORTEUR"
+
+            # Taux de resolution affiche sous les indicateurs
+            _n_tot_ag = df_com["_AGENT"].nunique()
+            _n_res_ag = df_com.loc[
+                df_com["_N_AGENT"].notna() | df_com["_N_AGENCE"].notna(),
+                "_AGENT"].nunique()
+            _tx_res = _n_res_ag / max(_n_tot_ag, 1) * 100
+            st.markdown(
+                f"<div style='font-size:11px;color:#667;margin:-4px 0 10px'>"
+                f"<b>{nb_full(_n_tot_ag)}</b> agents commerciaux sur la période · "
+                f"<b>{nb_full(_n_res_ag)}</b> rattachés à une agence identifiée "
+                f"({_tx_res:.1f} %)</div>", unsafe_allow_html=True)
         else:
             # Repli : colonnes nom presentes directement dans le CA
             ag_k = next((c for c in ["NOM_APPORT","NOM_APPO","NOM_INTERMEDIAIRE","NOM_APP"]
