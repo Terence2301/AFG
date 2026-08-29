@@ -3203,6 +3203,126 @@ elif "Commerciaux" in page and "Partenaires" not in page:
 
         section(f"👥 Performance Commerciale — {period_lbl}","CA · CLIENTS · COMMISSIONS · CLASSEMENT")
 
+        # ── Diagnostic des clés de jointure ──────────────────────────────────────
+        with st.expander("Diagnostic des correspondances code / nom", expanded=False):
+            st.caption("Ce panneau compare les colonnes de code des deux bases "
+                       "et mesure le taux de correspondance. Il sert à identifier "
+                       "la clé de jointure la plus fiable.")
+
+            _cands_ca = [c for c in ca.columns
+                         if "CODE" in c.upper() or "INTE" in c.upper()
+                         or "APPO" in c.upper()]
+            _cands_pf = ([c for c in pf.columns
+                          if "CODE" in c.upper() or "INTE" in c.upper()
+                          or "APPO" in c.upper()] if pf is not None else [])
+            _noms_pf  = ([c for c in pf.columns if "NOM" in c.upper()]
+                         if pf is not None else [])
+            _noms_ca  = [c for c in ca.columns if "NOM" in c.upper()]
+
+            d1, d2 = st.columns(2)
+            with d1:
+                st.markdown("**Base CA**")
+                st.markdown(f"<div style='font-size:11px;color:#556'>"
+                            f"Colonnes code : {', '.join(_cands_ca) or 'aucune'}<br>"
+                            f"Colonnes nom : {', '.join(_noms_ca) or 'aucune'}</div>",
+                            unsafe_allow_html=True)
+            with d2:
+                st.markdown("**Base Portefeuille**")
+                st.markdown(f"<div style='font-size:11px;color:#556'>"
+                            f"Colonnes code : {', '.join(_cands_pf) or 'aucune'}<br>"
+                            f"Colonnes nom : {', '.join(_noms_pf) or 'aucune'}</div>",
+                            unsafe_allow_html=True)
+
+            # Échantillon de valeurs et longueurs observées
+            st.markdown("**Format des codes observés**")
+            _fmt_rows = []
+            for _src_lbl, _dfx, _cols in [("CA", ca, _cands_ca),
+                                          ("Portefeuille", pf, _cands_pf)]:
+                if _dfx is None: continue
+                for _c in _cols[:6]:
+                    _s = _dfx[_c].dropna().astype(str).str.strip()
+                    _s = _s[_s != ""]
+                    if _s.empty:
+                        _fmt_rows.append([_src_lbl, _c, "0", "—", "—", "—"])
+                        continue
+                    _lg = _s.str.len().value_counts().head(3)
+                    _fmt_rows.append([
+                        _src_lbl, _c, nb_full(_s.nunique()),
+                        " · ".join(f"{k} car. ({v})" for k, v in _lg.items()),
+                        " · ".join(_s.head(3).tolist()),
+                        f"{_dfx[_c].isna().mean()*100:.1f} %"])
+            if _fmt_rows:
+                st.dataframe(pd.DataFrame(_fmt_rows, columns=[
+                    "Base","Colonne","Codes distincts","Longueurs",
+                    "Exemples","Taux de vide"]),
+                    use_container_width=True, hide_index=True)
+
+            # Taux de recouvrement pour chaque paire testée
+            if pf is not None and _cands_ca and _cands_pf:
+                st.markdown("**Taux de correspondance entre les paires de colonnes**")
+                _rec = []
+                for _cc in _cands_ca[:5]:
+                    _sc = set(ca[_cc].dropna().astype(str).str.strip()) - {""}
+                    for _cp in _cands_pf[:5]:
+                        _sp = set(pf[_cp].dropna().astype(str).str.strip()) - {""}
+                        if not _sc or not _sp: continue
+                        _inter = _sc & _sp
+                        # Test complémentaire avec normalisation sur 3 puis 4 chiffres
+                        _sc3 = {v.zfill(3) for v in _sc}
+                        _sp3 = {v.zfill(3) for v in _sp}
+                        _sc4 = {v.zfill(4) for v in _sc}
+                        _sp4 = {v.zfill(4) for v in _sp}
+                        _rec.append([
+                            f"CA.{_cc}", f"PF.{_cp}",
+                            nb_full(len(_sc)), nb_full(len(_sp)),
+                            nb_full(len(_inter)),
+                            f"{len(_inter)/max(len(_sc),1)*100:.1f} %",
+                            f"{len(_sc3 & _sp3)/max(len(_sc3),1)*100:.1f} %",
+                            f"{len(_sc4 & _sp4)/max(len(_sc4),1)*100:.1f} %"])
+                if _rec:
+                    _dfr = pd.DataFrame(_rec, columns=[
+                        "Colonne CA","Colonne PF","Codes CA","Codes PF",
+                        "Communs","Recouvrement","Sur 3 car.","Sur 4 car."])
+                    _dfr = _dfr.sort_values("Recouvrement", ascending=False)
+                    st.dataframe(_dfr, use_container_width=True, hide_index=True)
+                    _best = _dfr.iloc[0]
+                    st.info(f"Meilleure correspondance : **{_best['Colonne CA']}** "
+                            f"vers **{_best['Colonne PF']}** — "
+                            f"{_best['Recouvrement']} des codes du CA trouvent "
+                            f"leur nom dans le Portefeuille.")
+
+            # Codes du CA restés sans nom
+            _cc0 = next((c for c in ["CODEAPPO","CODE_APPO","CODEAPP","CODEINTE"]
+                         if c in ca.columns), None)
+            if _cc0 and pf is not None:
+                _cp0 = next((c for c in ["CODEAPPO","CODE_APPO","CODEINTE_P","CODEINTE"]
+                             if c in pf.columns), None)
+                _np0 = next((c for c in ["NOM_APP","NOM_APPORT","NOM_APPO"]
+                             if c in pf.columns), None)
+                if _cp0 and _np0:
+                    _known = set(pf.loc[pf[_np0].notna(), _cp0]
+                                   .astype(str).str.strip())
+                    _all_ca = (ca[_cc0].dropna().astype(str).str.strip()
+                                 .value_counts())
+                    _orph = _all_ca[~_all_ca.index.isin(_known)]
+                    _cak0 = "CHIFAFFA" if "CHIFAFFA" in ca.columns else None
+                    st.markdown("**Codes du CA sans nom dans le Portefeuille**")
+                    if _orph.empty:
+                        st.success("Tous les codes du CA trouvent leur nom.")
+                    else:
+                        _lig = []
+                        for _cd, _nq in _orph.head(20).items():
+                            _mt = (float(ca.loc[ca[_cc0].astype(str).str.strip()==_cd,
+                                                _cak0].sum()) if _cak0 else 0)
+                            _lig.append([_cd, nb_full(_nq), fmt_full(_mt,"")])
+                        st.dataframe(pd.DataFrame(_lig, columns=[
+                            "Code","Quittances","CA (FCFA)"]),
+                            use_container_width=True, hide_index=True)
+                        _pct_o = len(_orph)/max(len(_all_ca),1)*100
+                        st.warning(f"{nb_full(len(_orph))} codes sur "
+                                   f"{nb_full(len(_all_ca))} ({_pct_o:.1f} %) "
+                                   f"n'ont pas de nom dans le Portefeuille.")
+
         # ── Identification des commerciaux ────────────────────────────────────────
         # Regle metier : le CODE APPORTEUR vient de la base CA (CODEAPPO),
         # le NOM correspondant est recupere dans la base Portefeuille (NOM_APP).
@@ -3322,14 +3442,26 @@ elif "Commerciaux" in page and "Partenaires" not in page:
         with t_par:
             c1,c2 = st.columns(2)
             with c1:
-                t30 = grp.head(30)
+                # Dix apporteurs suffisent a la lecture : au dela, les barres
+                # deviennent illisibles et le cumul de Pareto perd son sens.
+                t10 = grp.head(10).copy()
+                _lb10 = t10[ag_k].fillna("Non identifié").astype(str).str[:28]
                 fig = make_subplots(specs=[[{"secondary_y":True}]])
-                fig.add_bar(x=t30["CA"],y=t30[ag_k].str[:22],name="CA",marker_color=GREEN,orientation="h")
-                fig.add_scatter(x=t30["Part cum %"],y=t30[ag_k].str[:22],name="Cumul %",
-                    line=dict(color=RED,width=2.5),secondary_y=True,orientation="h")
-                fig.update_layout(yaxis=dict(autorange="reversed"))
-                fig_style(fig,520,f"📊 Pareto CA — Top 30 commerciaux · {period_lbl}")
-                st.plotly_chart(fig,use_container_width=True)
+                fig.add_bar(x=t10["CA"], y=_lb10, name="CA",
+                    marker_color=GREEN, orientation="h",
+                    text=[fmt_full(v,"") for v in t10["CA"]],
+                    textposition="outside", textfont=dict(size=9),
+                    hovertemplate="%{y}<br>CA : %{x:,.0f} FCFA<extra></extra>")
+                fig.add_scatter(x=t10["Part cum %"], y=_lb10, name="Cumul %",
+                    line=dict(color=RED, width=2.5), mode="lines+markers",
+                    secondary_y=True, orientation="h",
+                    hovertemplate="%{y}<br>Cumul : %{x:.1f} %<extra></extra>")
+                fig.update_layout(
+                    yaxis=dict(autorange="reversed"),
+                    xaxis=dict(title="CA (FCFA)"),
+                    legend=dict(orientation="h", y=-0.13))
+                fig_style(fig, 440, f"Pareto CA · Top 10 apporteurs · {period_lbl}")
+                st.plotly_chart(fig, use_container_width=True)
             with c2:
                 # Distribution des CA
                 fig2 = go.Figure(go.Histogram(x=grp["CA"],nbinsx=30,
@@ -5954,6 +6086,48 @@ elif "Rapport PDF" in page:
                             for _s2 in ("left","bottom"): ax.spines[_s2].set_color("#D5DBE5")
                             return _mpl_img(fig)
 
+                        def _mpl_pareto(labels, values, cumul, titre, haut=4.8):
+                            """Diagramme de Pareto : barres decroissantes et courbe
+                            de cumul en pourcentage sur un second axe."""
+                            _n = max(len(labels), 1)
+                            fig, ax = _plt.subplots(figsize=(10, max(haut, .42*_n + 1.4)))
+                            _y = list(range(len(labels)))
+                            ax.barh(_y, values, color="#1A7F6E", height=.62,
+                                    edgecolor="white", linewidth=.6, zorder=2)
+                            ax.set_yticks(_y)
+                            ax.set_yticklabels([str(l)[:32] for l in labels], fontsize=8.8)
+                            ax.invert_yaxis()
+                            _mx = max(values) if len(values) and max(values) else 1
+                            for _i, _v in enumerate(values):
+                                ax.text(_v + _mx*.012, _i, _espace(_v),
+                                        va="center", fontsize=8, color="#2C3E50", zorder=3)
+                            ax.set_xlim(0, _mx*1.20)
+                            ax.xaxis.set_major_formatter(_FF(_espace))
+                            ax.tick_params(axis="x", labelsize=8, colors="#667")
+                            ax.set_xlabel("Chiffre d'affaires (FCFA)", fontsize=8.5,
+                                          color="#667")
+                            ax.grid(axis="x", color="#E8ECF3", linewidth=.7, zorder=0)
+                            ax.set_axisbelow(True)
+                            for _s in ("top","right","left"): ax.spines[_s].set_visible(False)
+                            ax.spines["bottom"].set_color("#D5DBE5")
+
+                            # Courbe de cumul sur l'axe superieur
+                            ax2 = ax.twiny()
+                            ax2.plot(cumul, _y, color="#C0392B", linewidth=2.1,
+                                     marker="o", markersize=4.2, zorder=4)
+                            for _i, _c in enumerate(cumul):
+                                ax2.annotate(f"{_c:.0f} %", (_c, _i),
+                                             textcoords="offset points", xytext=(6, 7),
+                                             fontsize=7.4, color="#C0392B",
+                                             fontweight="bold")
+                            ax2.set_xlim(0, 108)
+                            ax2.set_xlabel("Cumul (%)", fontsize=8.5, color="#C0392B")
+                            ax2.tick_params(axis="x", labelsize=8, colors="#C0392B")
+                            for _s in ("top","right","left"): ax2.spines[_s].set_visible(False)
+                            ax.set_title(titre, fontsize=11, fontweight="bold",
+                                         color="#0D1F3C", loc="left", pad=26)
+                            return _mpl_img(fig)
+
                         def _mpl_pie(labels, values, titre, haut=4.4):
                             """Anneau avec légende latérale et pourcentages."""
                             fig, ax = _plt.subplots(figsize=(10, haut))
@@ -6471,9 +6645,12 @@ elif "Rapport PDF" in page:
                                         fmt_full(r["Comm"],""), f"{r['Part']:.1f}%"])
                                 story.append(_tbl_style(comD,[7*cm,3.5*cm,2.2*cm,2.5*cm,1.8*cm]))
                                 story.append(Spacer(1,0.15*cm))
-                                story.append(_mpl_barh(
-                                    _g[_agk].astype(str).tolist(), _g["CA"].tolist(),
-                                    f"Top 10 apporteurs par chiffre d'affaires · {period_lbl}"))
+                                _cum = (_g["CA"].cumsum()/max(_gtot,1)*100).tolist()
+                                story.append(_mpl_pareto(
+                                    _g[_agk].astype(str).tolist(),
+                                    _g["CA"].tolist(), _cum,
+                                    f"Pareto du chiffre d'affaires · "
+                                    f"Top 10 apporteurs · {period_lbl}"))
                                 _t1n = str(_g.iloc[0][_agk])[:30]
                                 _t1p = float(_g.iloc[0]["Part"])
                                 _t5p = float(_g.head(5)["Part"].sum())
