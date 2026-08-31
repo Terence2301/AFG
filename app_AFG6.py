@@ -6127,8 +6127,13 @@ elif "Rapport PDF" in page:
 
                         def _mpl_barh(labels, values, titre, coul="#1A7F6E", haut=4.2):
                             """Barres horizontales, valeurs annotées en bout."""
+                            # Une barre unique ne doit pas s'etirer sur toute la hauteur.
+                            if len(labels) == 0:
+                                labels, values = ['Aucune donnée'], [0]
                             _n  = max(len(labels), 1)
-                            fig, ax = _plt.subplots(figsize=(10, max(haut, 0.42*_n + 1.1)))
+                            fig, ax = _plt.subplots(
+                                figsize=(10, 1.6 if _n == 1
+                                         else max(haut, 0.42*_n + 1.1)))
                             _y  = range(len(labels))
                             ax.barh(list(_y), values, color=coul, height=.64,
                                     edgecolor="white", linewidth=.6)
@@ -6152,6 +6157,15 @@ elif "Rapport PDF" in page:
 
                         def _mpl_barv(labels, series, noms, titre, haut=4.4):
                             """Barres verticales groupées, une à trois séries."""
+                            series = [s for s in series if s is not None and len(s)]
+                            if not series or not labels:
+                                fig, ax = _plt.subplots(figsize=(10, 1.6))
+                                ax.text(.5, .5, 'Données insuffisantes sur la période',
+                                        ha='center', va='center', fontsize=10, color='#889')
+                                ax.axis('off')
+                                ax.set_title(titre, fontsize=11, fontweight='bold',
+                                             color='#0D1F3C', loc='left', pad=10)
+                                return _mpl_img(fig)
                             fig, ax = _plt.subplots(figsize=(10, haut))
                             _n   = len(series)
                             _x   = np.arange(len(labels))
@@ -6179,6 +6193,11 @@ elif "Rapport PDF" in page:
                         def _mpl_pareto(labels, values, cumul, titre, haut=4.8):
                             """Diagramme de Pareto : barres decroissantes et courbe
                             de cumul en pourcentage sur un second axe."""
+                            # Un Pareto sur une seule categorie n'a pas de sens : la barre
+                            # occupe toute la largeur et le cumul vaut 100 %. On bascule
+                            # alors sur des barres simples.
+                            if len(labels) < 2:
+                                return _mpl_barh(labels, values, titre, haut=2.2)
                             _n = max(len(labels), 1)
                             fig, ax = _plt.subplots(figsize=(10, max(haut, .42*_n + 1.4)))
                             _y = list(range(len(labels)))
@@ -6220,6 +6239,8 @@ elif "Rapport PDF" in page:
 
                         def _mpl_pie(labels, values, titre, haut=4.4):
                             """Anneau avec légende latérale et pourcentages."""
+                            if len(labels) < 2:
+                                return _mpl_barh(labels, values, titre, haut=2.2)
                             fig, ax = _plt.subplots(figsize=(10, haut))
                             _tot = float(sum(values)) or 1.0
                             _w, _t, _a = ax.pie(
@@ -6240,6 +6261,9 @@ elif "Rapport PDF" in page:
 
                         def _mpl_treemap(labels, values, titre, haut=4.6):
                             """Carte proportionnelle par pavage récursif."""
+                            # Une carte a une seule case n'apporte rien : barres a la place.
+                            if len(labels) < 2:
+                                return _mpl_barh(labels, values, titre, haut=2.2)
                             fig, ax = _plt.subplots(figsize=(10, haut))
                             _tot = float(sum(values)) or 1.0
                             _x, _y, _lw, _lh = 0., 0., 1., 1.
@@ -6694,29 +6718,86 @@ elif "Rapport PDF" in page:
                             story.append(Spacer(1,0.3*cm))
                             story.append(_sec("3.  PERFORMANCE COMMERCIALE & PARTENAIRES"))
                             story.append(Spacer(1,0.2*cm))
-                            # Nom de l'apporteur : CODEAPPO (CA) enrichi par NOM_APP (Portefeuille)
-                            _agk = next((c for c in ["NOM_APPORT","NOM_APPO",
-                                                     "NOM_INTERMEDIAIRE","NOM_APP"]
-                                         if c in _ca_r.columns), None)
+                            # Identification des apporteurs : meme regle que
+                            # l'onglet Commerciaux. Le detail par agent est
+                            # conserve (CODEAPPO), le nom de l'agence provient
+                            # de CODEINTE, seule cle qui se recoupe entre les
+                            # deux bases. Grouper sur NOM_INTERMEDIAIRE seul
+                            # produirait un unique groupe sur les exercices ou
+                            # cette colonne porte une valeur constante.
+                            _cd_r = next((c for c in ["CODEAPPO","CODE_APPO"]
+                                          if c in _ca_r.columns), None)
+                            _in_r = next((c for c in ["CODEINTE","CODE_INTER"]
+                                          if c in _ca_r.columns), None)
+                            _agk  = None
+
+                            if _cd_r or _in_r:
+                                # Referentiel agence : CODEINTE -> nom
+                                _rag = {}
+                                if pf is not None:
+                                    _ip = next((c for c in ["CODEINTE_P","CODEINTE"]
+                                                if c in pf.columns), None)
+                                    _np = next((c for c in ["NOM_APP","NOM_APPORT",
+                                                            "NOM_INTERMEDIAIRE"]
+                                                if c in pf.columns), None)
+                                    if _ip and _np:
+                                        _tt = pf[[_ip,_np]].dropna()
+                                        _tt = _tt[_tt[_np].astype(str).str.strip() != ""]
+                                        for _c, _n in zip(code_propre(_tt[_ip]),
+                                                          _tt[_np].astype(str).str.strip()):
+                                            if _c: _rag.setdefault(_c, _n)
+                                _ic = next((c for c in ["CODEINTE","CODE_INTER"]
+                                            if c in ca.columns), None)
+                                _nc = next((c for c in ["NOM_INTERMEDIAIRE","NOM_APPORT",
+                                                        "NOM_APPO","NOM_APP"]
+                                            if c in ca.columns), None)
+                                if _ic and _nc:
+                                    _tt2 = ca[[_ic,_nc]].dropna()
+                                    _tt2 = _tt2[_tt2[_nc].astype(str).str.strip() != ""]
+                                    for _c, _n in zip(code_propre(_tt2[_ic]),
+                                                      _tt2[_nc].astype(str).str.strip()):
+                                        if _c: _rag.setdefault(_c, _n)
+
+                                # Referentiel agent : CODEAPPO -> nom, si disponible
+                                _ragt = {}
+                                if _cd_r:
+                                    for _cn in ["NOM_APPORT","NOM_APPO","NOM_AGENT"]:
+                                        if _cn in ca.columns:
+                                            _t3 = ca[[_cd_r,_cn]].dropna()
+                                            _t3 = _t3[_t3[_cn].astype(str).str.strip() != ""]
+                                            for _c, _n in zip(code_propre(_t3[_cd_r]),
+                                                              _t3[_cn].astype(str).str.strip()):
+                                                if _c: _ragt.setdefault(_c, _n)
+
+                                _ca_r = _ca_r.copy()
+                                _ca_r["_AG"] = (code_propre(_ca_r[_cd_r]) if _cd_r else "")
+                                _ca_r["_IN"] = (code_propre(_ca_r[_in_r]) if _in_r else "")
+                                _ca_r["_NA"] = _ca_r["_AG"].map(_ragt)
+                                _ca_r["_NI"] = _ca_r["_IN"].map(_rag)
+
+                                def _lib_r(r):
+                                    _cd = str(r["_AG"]).strip()
+                                    if _cd == "":
+                                        _ag = r.get("_NI")
+                                        return (f"{_ag} · sans code agent"
+                                                if pd.notna(_ag) and str(_ag).strip()
+                                                else "Apporteur non identifié")
+                                    _na = r.get("_NA")
+                                    if pd.notna(_na) and str(_na).strip():
+                                        return f"{str(_na).strip()} ({_cd})"
+                                    _ag = r.get("_NI")
+                                    if pd.notna(_ag) and str(_ag).strip():
+                                        return f"{str(_ag).strip()} · agent {_cd}"
+                                    return f"Agent {_cd}"
+
+                                _ca_r["_NOM_R"] = _ca_r.apply(_lib_r, axis=1)
+                                _agk = "_NOM_R"
+
+                            # Repli : colonne nom directement exploitable
                             if _agk is None:
-                                _cd_r = next((c for c in ["CODEAPPO","CODE_APPO"]
-                                              if c in _ca_r.columns), None)
-                                _cd_p = next((c for c in ["CODEAPPO","CODE_APPO"]
-                                              if pf is not None and c in pf.columns), None)
-                                _nm_p = next((c for c in ["NOM_APP","NOM_APPORT","NOM_APPO"]
-                                              if pf is not None and c in pf.columns), None)
-                                if _cd_r and _cd_p and _nm_p:
-                                    _rf = (pf[[_cd_p,_nm_p]].dropna(subset=[_cd_p])
-                                             .astype({_cd_p:str}).drop_duplicates(_cd_p)
-                                             .rename(columns={_cd_p:_cd_r, _nm_p:"_NOM_R"}))
-                                    _ca_r = _ca_r.astype({_cd_r:str}).merge(_rf, on=_cd_r, how="left")
-                                    _ca_r["_NOM_R"] = _ca_r["_NOM_R"].fillna(
-                                        "Code " + _ca_r[_cd_r].astype(str))
-                                    _agk = "_NOM_R"
-                                elif _cd_r:
-                                    _ca_r = _ca_r.copy()
-                                    _ca_r["_NOM_R"] = "Code " + _ca_r[_cd_r].astype(str)
-                                    _agk = "_NOM_R"
+                                _agk = next((c for c in ["NOM_APPORT","NOM_APPO",
+                                                         "NOM_INTERMEDIAIRE","NOM_APP"]
+                                             if c in _ca_r.columns), None)
                             if _agk and _agk in _ca_r.columns:
                                 _g = _ca_r.groupby(_agk).agg(CA=("CHIFAFFA","sum"),NbQ=("CHIFAFFA","count")).reset_index()
                                 if "COMMAPPO" in _ca_r.columns:
