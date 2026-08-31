@@ -480,6 +480,49 @@ def generer_pdf_rapport(pf, ca, sin, period_lbl, user_nom,
 
 _CODES_VIDES = {"", "nan", "none", "null", "<na>", "nat", "0"}
 
+# Regles de classement des apporteurs par nature d'organisme.
+# L'ordre compte : le premier motif rencontre l'emporte, ce qui evite
+# qu'une banque de microfinance soit classee deux fois.
+_CATEG_APPORTEUR = [
+    ("Banques", [
+        "BANK", "BANQUE", "BOA", "UBA", "ECOBANK", "BSIC", "CORIS",
+        "ORABANK", "NSIA BANQUE", "SGB", "BGFI", "DIAMOND", "BIIC",
+    ]),
+    ("Systèmes financiers décentralisés", [
+        "PADME", "FINADEV", "MICROFINANCE", "MICRO FINANCE", "SFD",
+        "RENACA", "ALIDE", "CLCAM", "FECECAM", "COMUBA", "PEBCO",
+        "MUTUELLE", "CREDIT", "CAISSE", "COOPEC", "ASSEF",
+    ]),
+    ("Compagnies d'assurance", [
+        "ASSURANCE", "ASSURANCES", "SUNU", "NSIA VIE", "SAHAM",
+        "ALLIANZ", "AFRICAINE VIE", "SANLAM", "ACTIVA", "COLINA",
+    ]),
+    ("Courtiers", [
+        "COURTAGE", "COURTIER", "BROKER", "ASCOMA", "GRAS SAVOYE",
+        "OLEA", "AON", "MARSH", "CABINET",
+    ]),
+    ("Réseau interne", [
+        "BUREAU DE", "BUREAU DIRECT", "AGENCE", "SIEGE", "DIRECT SIEGE",
+    ]),
+]
+
+
+def categoriser_apporteur(nom) -> str:
+    """Classe un apporteur selon la nature de son organisme.
+
+    Le classement repose sur la raison sociale : un nom de personne
+    physique ou un libelle inconnu tombe dans « Autres apporteurs ».
+    """
+    _n = str(nom or "").upper()
+    if not _n.strip() or _n.strip() in ("NAN", "NONE"):
+        return "Non identifiés"
+    for _cat, _mots in _CATEG_APPORTEUR:
+        for _m in _mots:
+            if _m in _n:
+                return _cat
+    return "Autres apporteurs"
+
+
 def code_propre(serie):
     """Normalise une colonne de code en chaine exploitable.
 
@@ -1134,6 +1177,11 @@ CA_COLS = {
     "CODEINTE","NUMEPOLI","DATECOMP","NOMPRODUIT","LIBECATE",
     "NOM_INTERMEDIAIRE","CODEAPPO","CHIFAFFA","PRIMNETT","COMMAPPO",
     "COMMGEST","TYPEMOUV","SORTQUIT",
+    # RAISOCIN porte la raison sociale de l'organisme apporteur
+    # (banques, courtiers, SFD, compagnies). C'est le referentiel de
+    # reference pour nommer un CODEAPPO, bien plus fiable que NOM_APPORT
+    # qui contient des noms de personnes physiques.
+    "RAISOCIN","RAISOC","RAISON_SOCIALE",
 }
 # Colonnes Prestations — noms EXACTS vérifiés sur le fichier réel AFG
 # Libéllé Catégorie : double 'l' (particularité AFG)
@@ -3371,8 +3419,10 @@ elif "Commerciaux" in page and "Partenaires" not in page:
                     _ref_agence.setdefault(_c, _n)
         _ica = next((c for c in ["CODEINTE","CODE_INTER","CODEINTER"]
                      if c in ca.columns), None)
-        _nca = next((c for c in ["NOM_INTERMEDIAIRE","NOM_APPORT","NOM_APPO","NOM_APP"]
-                     if c in ca.columns), None)
+        # Seul NOM_INTERMEDIAIRE nomme une agence. NOM_APPORT designe une
+        # personne physique : l'employer ici ferait porter le nom du premier
+        # agent rencontre a tous ses collegues de la meme agence.
+        _nca = next((c for c in ["NOM_INTERMEDIAIRE"] if c in ca.columns), None)
         if _ica and _nca:
             _tc = ca[[_ica, _nca]].dropna()
             _tc = _tc[_tc[_nca].astype(str).str.strip() != ""]
@@ -3383,7 +3433,10 @@ elif "Commerciaux" in page and "Partenaires" not in page:
         # 2. Referentiel agent : CODEAPPO -> nom, si un nom d'agent existe
         _ref_agent = {}
         if _code_ca:
-            for _cn in ["NOM_APPORT","NOM_APPO","NOM_COMMERCIAL","NOM_AGENT"]:
+            # RAISOCIN d'abord : raison sociale de l'organisme apporteur.
+            # Puis les noms de personnes, en dernier recours.
+            for _cn in ["RAISOCIN","RAISOC","RAISON_SOCIALE",
+                        "NOM_APPORT","NOM_APPO","NOM_COMMERCIAL","NOM_AGENT"]:
                 if _cn in ca.columns:
                     _ta = ca[[_code_ca, _cn]].dropna()
                     _ta = _ta[_ta[_cn].astype(str).str.strip() != ""]
@@ -6748,8 +6801,7 @@ elif "Rapport PDF" in page:
                                             if _c: _rag.setdefault(_c, _n)
                                 _ic = next((c for c in ["CODEINTE","CODE_INTER"]
                                             if c in ca.columns), None)
-                                _nc = next((c for c in ["NOM_INTERMEDIAIRE","NOM_APPORT",
-                                                        "NOM_APPO","NOM_APP"]
+                                _nc = next((c for c in ["NOM_INTERMEDIAIRE"]
                                             if c in ca.columns), None)
                                 if _ic and _nc:
                                     _tt2 = ca[[_ic,_nc]].dropna()
@@ -6761,7 +6813,8 @@ elif "Rapport PDF" in page:
                                 # Referentiel agent : CODEAPPO -> nom, si disponible
                                 _ragt = {}
                                 if _cd_r:
-                                    for _cn in ["NOM_APPORT","NOM_APPO","NOM_AGENT"]:
+                                    for _cn in ["RAISOCIN","RAISOC","RAISON_SOCIALE",
+                                                "NOM_APPORT","NOM_APPO","NOM_AGENT"]:
                                         if _cn in ca.columns:
                                             _t3 = ca[[_cd_r,_cn]].dropna()
                                             _t3 = _t3[_t3[_cn].astype(str).str.strip() != ""]
@@ -7060,6 +7113,109 @@ elif "Rapport PDF" in page:
                                                     f"Ces reculs justifient un entretien "
                                                     f"commercial avant la clôture de l'exercice.",
                                                     st_bd))
+
+                        # ══════════════════════════════════════════════════════
+                        #  Repartition par nature d'organisme apporteur
+                        #  Banques, systemes financiers decentralises, courtiers,
+                        #  compagnies d'assurance et reseau interne.
+                        # ══════════════════════════════════════════════════════
+                        if _ca_r is not None and _agk and _agk in _ca_r.columns:
+                            _cr   = _ca_r.copy()
+                            _cak2 = "CHIFAFFA" if "CHIFAFFA" in _cr.columns else "MONTENCA"
+                            _src_nom = next((c for c in ["RAISOCIN","RAISOC","NOM_INTERMEDIAIRE"]
+                                             if c in _cr.columns), None)
+                            _cr["_CATEG"] = (_cr[_src_nom].apply(categoriser_apporteur)
+                                             if _src_nom
+                                             else _cr[_agk].apply(categoriser_apporteur))
+                            _gc2 = (_cr.groupby("_CATEG")
+                                       .agg(CA=(_cak2,"sum"), NbQ=(_cak2,"count"))
+                                       .reset_index().sort_values("CA", ascending=False))
+                            _tot_c = float(_gc2["CA"].sum())
+
+                            if not _gc2.empty and _tot_c > 0:
+                                story.append(Spacer(1,0.3*cm))
+                                story.append(Paragraph(
+                                    "Répartition par nature d'organisme apporteur", st_h2))
+                                _ct = [["Catégorie","Chiffre d'affaires","Quittances","Part"]]
+                                for _, _r in _gc2.iterrows():
+                                    _ct.append([str(_r["_CATEG"]), fmt_full(_r["CA"], ""),
+                                                nb_full(int(_r["NbQ"])),
+                                                f"{_r['CA']/_tot_c*100:.1f} %"])
+                                _ct.append(["TOTAL", fmt_full(_tot_c, ""),
+                                            nb_full(int(_gc2["NbQ"].sum())), "100,0 %"])
+                                story.append(_tbl_style(_ct, [6.5*cm,4.5*cm,3*cm,3*cm]))
+                                story.append(Spacer(1,0.18*cm))
+                                story.append(_mpl_pie(
+                                    _gc2["_CATEG"].astype(str).tolist(), _gc2["CA"].tolist(),
+                                    f"Poids de chaque nature d'apporteur · {period_lbl}"))
+
+                                _c1n = str(_gc2.iloc[0]["_CATEG"])
+                                _c1p = float(_gc2.iloc[0]["CA"])/_tot_c*100
+                                _ext = _gc2[_gc2["_CATEG"] != "Réseau interne"]
+                                _pex = float(_ext["CA"].sum())/_tot_c*100 if not _ext.empty else 0
+                                _msg_ex = ("ce qui traduit une dépendance forte aux canaux tiers."
+                                           if _pex >= 60 else
+                                           "équilibre satisfaisant entre réseau propre et partenariats."
+                                           if _pex >= 30 else
+                                           "marge de progression sur les partenariats bancaires et les SFD.")
+                                story.append(Spacer(1,0.15*cm))
+                                story.append(Paragraph(
+                                    f"<b>Lecture.</b> La distribution s'appuie principalement sur "
+                                    f"<b>{_c1n.lower()}</b>, qui apporte <b>{_c1p:.1f} %</b> du "
+                                    f"chiffre d'affaires. Les partenaires extérieurs au réseau propre "
+                                    f"pèsent <b>{_pex:.1f} %</b> de la production, {_msg_ex}", st_bd))
+
+                                # Detail nominatif des trois premieres categories
+                                for _cat_n in _gc2["_CATEG"].head(3):
+                                    if _cat_n == "Non identifiés": continue
+                                    _sub = (_cr[_cr["_CATEG"] == _cat_n].groupby(_agk)[_cak2].sum()
+                                              .sort_values(ascending=False).head(8))
+                                    if _sub.empty or _sub.sum() <= 0: continue
+                                    _tc2 = float(_sub.sum())
+                                    story.append(Spacer(1,0.22*cm))
+                                    story.append(Paragraph(
+                                        f"{_cat_n} · détail des principaux apporteurs", st_h2))
+                                    _st2 = [["Apporteur","Chiffre d'affaires","Part"]]
+                                    for _nm2, _v2 in _sub.items():
+                                        _st2.append([str(_nm2)[:44], fmt_full(_v2, ""),
+                                                     f"{_v2/_tc2*100:.1f} %"])
+                                    story.append(_tbl_style(_st2, [8.5*cm,5*cm,3.5*cm]))
+                                    story.append(Spacer(1,0.12*cm))
+                                    story.append(_mpl_barh(
+                                        _sub.index.astype(str).tolist(), _sub.tolist(),
+                                        f"{_cat_n} · chiffre d'affaires par apporteur",
+                                        coul="#2E86C1", haut=3.4))
+
+                                # Evolution mensuelle par nature d'organisme
+                                _cdm = next((c for c in ["DATECOMP","DATEEFFE"] if c in _cr.columns), None)
+                                if _cdm:
+                                    _cm2 = _cr.copy()
+                                    _cm2["_DT"] = pd.to_datetime(_cm2[_cdm], errors="coerce")
+                                    _cm2 = _cm2.dropna(subset=["_DT"])
+                                    if not _cm2.empty:
+                                        _cm2["_M"] = _cm2["_DT"].dt.month
+                                        _MF = ["Jan","Fév","Mar","Avr","Mai","Juin",
+                                               "Juil","Août","Sep","Oct","Nov","Déc"]
+                                        _ser, _nom_ser = [], []
+                                        for _tc3 in _gc2[_gc2["_CATEG"] != "Non identifiés"]["_CATEG"].head(3):
+                                            _v3 = (_cm2[_cm2["_CATEG"] == _tc3].groupby("_M")[_cak2].sum()
+                                                     .reindex(range(1,13), fill_value=0))
+                                            if _v3.sum() > 0:
+                                                _ser.append(_v3.tolist()); _nom_ser.append(str(_tc3)[:22])
+                                        if _ser:
+                                            story.append(Spacer(1,0.25*cm))
+                                            story.append(_mpl_barv(
+                                                _MF, _ser, _nom_ser,
+                                                f"Évolution mensuelle par nature d'apporteur · {period_lbl}",
+                                                haut=4.6))
+                                            _pic = max(range(12), key=lambda k: sum(s[k] for s in _ser))
+                                            story.append(Spacer(1,0.12*cm))
+                                            story.append(Paragraph(
+                                                f"<b>Lecture.</b> Le mois de <b>{_MF[_pic]}</b> concentre "
+                                                f"la production la plus élevée, toutes natures d'apporteurs "
+                                                f"confondues. Le suivi mensuel permet d'identifier les "
+                                                f"périodes creuses et d'ajuster l'animation commerciale du "
+                                                f"réseau partenaire.", st_bd))
 
                         # 4. Sinistres
                         if s_sin and _sin_r is not None:
