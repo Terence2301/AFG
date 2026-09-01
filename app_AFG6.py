@@ -1270,11 +1270,13 @@ CA_COLS = {
     "CODEINTE","NUMEPOLI","DATECOMP","NOMPRODUIT","LIBECATE",
     "NOM_INTERMEDIAIRE","CODEAPPO","CHIFAFFA","PRIMNETT","COMMAPPO",
     "COMMGEST","TYPEMOUV","SORTQUIT",
-    # RAISOCIN porte la raison sociale de l'organisme apporteur
-    # (banques, courtiers, SFD, compagnies). C'est le referentiel de
-    # reference pour nommer un CODEAPPO, bien plus fiable que NOM_APPORT
-    # qui contient des noms de personnes physiques.
+    # Colonnes qui nomment l'apporteur, indispensables pour l'onglet
+    # Commerciaux. Leur absence du filtre laissait tous les agents sans
+    # nom, seul le code de leur agence subsistait.
+    #   RAISOCIN   : raison sociale de l'organisme (banque, SFD, courtier)
+    #   NOM_APPORT : nom de la personne physique rattachee au CODEAPPO
     "RAISOCIN","RAISOC","RAISON_SOCIALE",
+    "NOM_APPORT","NOM_APPO","NOM_COMMERCIAL","NOM_AGENT",
 }
 # Colonnes Prestations — noms EXACTS vérifiés sur le fichier réel AFG
 # Libéllé Catégorie : double 'l' (particularité AFG)
@@ -3531,9 +3533,9 @@ elif "Commerciaux" in page and "Partenaires" not in page:
             (pf, next((c for c in ["CODEAPPO","CODE_APPO","CODEAPP"]
                        if pf is not None and c in pf.columns), None),
                  ["NOM_APP","NOM_APPORT","NOM_APPO"]),
-            # Dernier recours : le code agent peut correspondre a un code
-            # intermediaire dans certaines saisies anciennes.
-            (ca, _code_ca, ["NOM_INTERMEDIAIRE"]),
+            # NOM_INTERMEDIAIRE est volontairement exclu : associe au code
+            # agent, il produisait des libelles contradictoires du type
+            # « BUREAU DIRECT SIEGE (2000) - BUREAU DE DJOUGOU ».
         ])
 
         if _code_ca is not None:
@@ -3560,8 +3562,10 @@ elif "Commerciaux" in page and "Partenaires" not in page:
                 _na = str(_na).strip() if pd.notna(_na) else ""
                 _ag = str(_ag).strip() if pd.notna(_ag) else ""
 
-                # Un nom d'apporteur identique au nom d'agence n'apporte rien
-                if _na and _ag and _na.upper() == _ag.upper():
+                # Un nom d'agence remonte comme nom d'agent n'apporte rien
+                # et peut meme contredire le rattachement reel.
+                if _na and (est_reseau_interne(_na)
+                            or (_ag and _na.upper() == _ag.upper())):
                     _na = ""
 
                 _tete = _ag or _na            # libelle principal
