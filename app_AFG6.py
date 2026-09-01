@@ -3527,16 +3527,26 @@ elif "Commerciaux" in page and "Partenaires" not in page:
 
         # Agent : la raison sociale prime, puis les noms de personnes,
         # puis le referentiel du Portefeuille.
+        # Le nom de l'apporteur vient d'abord du Portefeuille : la colonne
+        # NOM_APP y porte le nom de la personne physique (SINSIN ELISEE
+        # DANIEL, OZA AUDE RUSSEL…) associee au CODEAPPO de la meme ligne.
+        # Les codes y sont exportes avec un separateur de milliers
+        # (« 2 538 »), que code_propre() supprime avant la jointure.
+        _cp_agent = next((c for c in ["CODEAPPO","CODE_APPO","CODEAPP"]
+                          if pf is not None and c in pf.columns), None)
         _ref_agent = construire_referentiel([
+            (pf, _cp_agent, ["NOM_APP","NOM_APPORT","NOM_APPO"]),
             (ca, _code_ca, ["RAISOCIN","RAISOC","RAISON_SOCIALE",
                             "NOM_APPORT","NOM_APPO","NOM_COMMERCIAL","NOM_AGENT"]),
-            (pf, next((c for c in ["CODEAPPO","CODE_APPO","CODEAPP"]
-                       if pf is not None and c in pf.columns), None),
-                 ["NOM_APP","NOM_APPORT","NOM_APPO"]),
             # NOM_INTERMEDIAIRE est volontairement exclu : associe au code
-            # agent, il produisait des libelles contradictoires du type
+            # agent, il produirait des libelles contradictoires du type
             # « BUREAU DIRECT SIEGE (2000) - BUREAU DE DJOUGOU ».
         ])
+
+        # Un nom d'agence remonte dans le referentiel agent fausse le rendu :
+        # on le retire une bonne fois, plutot que de filtrer a l'affichage.
+        _ref_agent = {_k: _v for _k, _v in _ref_agent.items()
+                      if not est_reseau_interne(_v)}
 
         if _code_ca is not None:
             df_com = df_com.copy()
@@ -3584,11 +3594,9 @@ elif "Commerciaux" in page and "Partenaires" not in page:
                 _na = str(_na).strip() if pd.notna(_na) else ""
                 _ag = str(_ag).strip() if pd.notna(_ag) else ""
 
-                # Un nom d'agence remonte comme nom d'agent est ecarte, mais
-                # seulement si une agence est deja identifiee : sinon on
-                # perdrait la seule information disponible.
-                if _na and _ag and (est_reseau_interne(_na)
-                                    or _na.upper() == _ag.upper()):
+                # Le referentiel agent ne contient plus de noms d'agence ;
+                # reste a eviter la repetition quand les deux coincident.
+                if _na and _ag and _na.upper() == _ag.upper():
                     _na = ""
 
                 _tete = _ag or _na            # libelle principal
