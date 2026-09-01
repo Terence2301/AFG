@@ -480,6 +480,37 @@ def generer_pdf_rapport(pf, ca, sin, period_lbl, user_nom,
 
 _CODES_VIDES = {"", "nan", "none", "null", "<na>", "nat", "0"}
 
+# Motifs identifiant le reseau propre d'AFG. Toute raison sociale qui
+# ne correspond a aucun de ces motifs est consideree comme un partenaire
+# financier exterieur : banque, SFD, courtier, compagnie ou autre.
+_MOTIFS_RESEAU = [
+    "BUREAU", "AGENCE", "SIEGE", "SIÈGE", "DIRECT SIEGE",
+    "AFG ", "AFG-", "AFGVIE", "AFG VIE", "AFG ASSURANCES",
+    "DIRECTION", "GUICHET", "POINT DE VENTE",
+]
+
+
+def est_reseau_interne(nom) -> bool:
+    """Vrai si la raison sociale designe un point de vente propre a AFG."""
+    _n = str(nom or "").upper().strip()
+    if not _n or _n in ("NAN", "NONE", "NAT"):
+        return False
+    return any(_m in _n for _m in _MOTIFS_RESEAU)
+
+
+def est_partenaire(nom) -> bool:
+    """Vrai si la raison sociale designe un partenaire financier.
+
+    Regle retenue avec la direction : toute raison sociale renseignee
+    correspond a un partenaire, a l'exception du reseau propre (bureaux,
+    agences, siege). Aucune liste de banques a maintenir.
+    """
+    _n = str(nom or "").upper().strip()
+    if not _n or _n in ("NAN", "NONE", "NAT"):
+        return False
+    return not est_reseau_interne(_n)
+
+
 # Regles de classement des apporteurs par nature d'organisme.
 # L'ordre compte : le premier motif rencontre l'emporte, ce qui evite
 # qu'une banque de microfinance soit classee deux fois.
@@ -510,17 +541,24 @@ _CATEG_APPORTEUR = [
 def categoriser_apporteur(nom) -> str:
     """Classe un apporteur selon la nature de son organisme.
 
-    Le classement repose sur la raison sociale : un nom de personne
-    physique ou un libelle inconnu tombe dans « Autres apporteurs ».
+    Le reseau propre est identifie en premier, car un bureau peut porter
+    un nom de ville qui declencherait un autre motif. Tout le reste est
+    un partenaire, ventile par famille lorsque le nom le permet.
     """
-    _n = str(nom or "").upper()
-    if not _n.strip() or _n.strip() in ("NAN", "NONE"):
+    _n = str(nom or "").upper().strip()
+    if not _n or _n in ("NAN", "NONE", "NAT"):
         return "Non identifiés"
+    if est_reseau_interne(_n):
+        return "Réseau interne"
     for _cat, _mots in _CATEG_APPORTEUR:
+        if _cat == "Réseau interne":
+            continue
         for _m in _mots:
             if _m in _n:
                 return _cat
-    return "Autres apporteurs"
+    # Raison sociale renseignee mais famille non reconnue :
+    # il s'agit tout de meme d'un partenaire exterieur.
+    return "Autres partenaires"
 
 
 def code_propre(serie):
@@ -3679,7 +3717,7 @@ elif "Partenaires" in page:
         if df_part_all is None or df_part_all.empty: df_part_all = ca
 
         section(f"🏦 Partenaires Financiers — {period_lbl}",
-                "CODE INTERMÉDIAIRE 3 CHIFFRES · HORS CODE 100")
+                "RAISON SOCIALE RENSEIGNÉE · HORS RÉSEAU PROPRE")
 
         # Identifier la colonne code intermédiaire : CODEINTE (priorité)
         _col_code = next((c for c in ["CODEINTE","CODE_INTER","CODEINTER","CODEAPPO"]
@@ -3711,8 +3749,11 @@ elif "Partenaires" in page:
                                   _t[_npf].astype(str).str.strip()):
                     _ref_nom.setdefault(_c, _n)
 
-        # 2) Complété par la base CA complète (tous exercices confondus)
-        _nca_all = next((c for c in ["NOM_APPORT","NOM_APPO","NOM_INTERMEDIAIRE","NOM_APP"]
+        # 2) Complété par la base CA complète (tous exercices confondus).
+        #    RAISOCIN porte la raison sociale de l'organisme : c'est la
+        #    source la plus fiable pour nommer un partenaire.
+        _nca_all = next((c for c in ["RAISOCIN","RAISOC","RAISON_SOCIALE",
+                                     "NOM_INTERMEDIAIRE","NOM_APPORT","NOM_APPO","NOM_APP"]
                          if c in ca.columns), None)
         if _nca_all:
             _t2 = ca[[_col_code,_nca_all]].dropna()
@@ -3727,15 +3768,39 @@ elif "Partenaires" in page:
             "Code " + df_part_all["_CODE_STR"].astype(str))
         _col_nom = "_NOM_PART"
 
-        # Partenaires financiers = code 3 chiffres numériques, hors 100
-        def _is_pf(x):
-            s = str(x).strip().lstrip("0") or "0"
-            return str(x).strip().isdigit() and len(str(x).strip()) <= 3 and str(x).strip() != "100"
+        # ── Perimetre des partenaires financiers ─────────────────────────────
+        # Regle arretee avec la direction : toute raison sociale renseignee
+        # designe un partenaire, a l'exception du reseau propre (bureaux,
+        # agences, siege). Aucune liste d'organismes a maintenir.
+        _col_rs = next((c for c in ["RAISOCIN","RAISOC","RAISON_SOCIALE"]
+                        if c in df_part_all.columns), None)
 
-        _mask_pf  = df_part_all["_CODE_STR"].apply(
-            lambda x: x.isdigit() and len(x) <= 3 and x not in ("100","000"))
-        df_pf     = df_part_all[_mask_pf].copy()
-        df_ri     = df_part_all[~_mask_pf].copy()
+        if _col_rs:
+            df_part_all["_RS"] = (df_part_all[_col_rs].fillna("")
+                                    .astype(str).str.strip())
+            # Repli sur le nom resolu quand la raison sociale est absente
+            df_part_all.loc[df_part_all["_RS"] == "", "_RS"] = (
+                df_part_all.loc[df_part_all["_RS"] == "", "_NOM_PART"]
+                           .astype(str).str.replace(r"^Code\s+", "", regex=True))
+            _mask_pf = df_part_all["_RS"].apply(est_partenaire)
+            _regle_pf = "raison sociale hors réseau propre"
+        else:
+            # Sans RAISOCIN, on retombe sur l'ancienne convention de codes
+            df_part_all["_RS"] = df_part_all["_NOM_PART"].astype(str)
+            _mask_pf = df_part_all["_CODE_STR"].apply(
+                lambda x: x.isdigit() and len(x) <= 3 and x not in ("100","000"))
+            _regle_pf = "code intermédiaire à 3 chiffres hors 100"
+
+        df_pf = df_part_all[_mask_pf].copy()
+        df_ri = df_part_all[~_mask_pf].copy()
+
+        # Le libelle d'affichage prend la raison sociale quand elle existe
+        if _col_rs:
+            df_pf["_NOM_PART"] = df_pf["_RS"].where(
+                df_pf["_RS"].str.strip() != "", df_pf["_NOM_PART"])
+            df_pf["_CATEG_PART"] = df_pf["_RS"].apply(categoriser_apporteur)
+
+        st.caption(f"Périmètre retenu : {_regle_pf}.")
 
         ca_pf_tot = float(df_pf["CHIFAFFA"].sum()) if "CHIFAFFA" in df_pf.columns else 0
         ca_ri_tot = float(df_ri["CHIFAFFA"].sum()) if "CHIFAFFA" in df_ri.columns else 0
@@ -3749,8 +3814,97 @@ elif "Partenaires" in page:
         kpi(p4,"Ticket moyen",fmt(ca_pf_tot/max(_nq_pf,1)),"CA / quittance","amber",icon="🎫")
 
         st.markdown("")
-        tp1,tp2,tpE,tp3 = st.tabs(["📊 Par partenaire","🥧 Réseau vs Partenaires",
-                                   "📈 Évolution & comparaison N/N-1","🔍 Données brutes"])
+        tp1,tpC,tp2,tpE,tp3 = st.tabs(
+            ["📊 Par partenaire","🏛️ Par nature d'organisme",
+             "🥧 Réseau vs Partenaires","📈 Évolution & comparaison N/N-1",
+             "🔍 Données brutes"])
+
+        # ══════════════════════════════════════════════════════════════════════
+        #  REPARTITION PAR NATURE D'ORGANISME
+        #  Banques, systemes financiers decentralises, courtiers, compagnies.
+        # ══════════════════════════════════════════════════════════════════════
+        with tpC:
+            if "_CATEG_PART" not in df_pf.columns or df_pf.empty:
+                bloc_vide("La colonne RAISOCIN est nécessaire pour classer "
+                          "les partenaires par nature d'organisme.", "🏛️")
+            else:
+                _cak_c = "CHIFAFFA" if "CHIFAFFA" in df_pf.columns else "MONTENCA"
+                _gcat = (df_pf.groupby("_CATEG_PART")
+                              .agg(CA=(_cak_c,"sum"), NbQ=(_cak_c,"count"),
+                                   Nb=("_RS","nunique"))
+                              .reset_index().sort_values("CA", ascending=False))
+                _tc = float(_gcat["CA"].sum())
+
+                k1,k2,k3 = st.columns(3)
+                kpi(k1,"Natures représentées", nb_full(len(_gcat)),
+                    "Familles d'organismes","blue", icon="🏛️")
+                kpi(k2,"Partenaires distincts", nb_full(int(_gcat["Nb"].sum())),
+                    "Raisons sociales","teal", icon="🤝")
+                _dom = _gcat.iloc[0]
+                kpi(k3,"Nature dominante", str(_dom["_CATEG_PART"])[:22],
+                    f"{_dom['CA']/max(_tc,1)*100:.1f} % du CA","", icon="🥇")
+
+                cc1, cc2 = st.columns([1.3,1])
+                with cc1:
+                    figC = go.Figure(go.Bar(
+                        x=_gcat["CA"], y=_gcat["_CATEG_PART"].astype(str),
+                        orientation="h", marker_color=BLUE,
+                        text=[fmt_full(v,"") for v in _gcat["CA"]],
+                        textposition="outside", textfont=dict(size=10),
+                        hovertemplate="%{y}<br>CA : %{x:,.0f} FCFA<extra></extra>"))
+                    figC.update_layout(yaxis=dict(autorange="reversed"),
+                                       xaxis=dict(title="CA (FCFA)"))
+                    fig_style(figC, 360, "Chiffre d'affaires par nature d'organisme")
+                    st.plotly_chart(figC, use_container_width=True)
+                with cc2:
+                    figD = go.Figure(go.Pie(
+                        labels=_gcat["_CATEG_PART"].astype(str),
+                        values=_gcat["CA"], hole=.42,
+                        textinfo="percent", textfont=dict(size=11),
+                        hovertemplate="%{label}<br>%{value:,.0f} FCFA"
+                                      "<br>%{percent}<extra></extra>"))
+                    figD.update_layout(legend=dict(font=dict(size=9)))
+                    fig_style(figD, 360, "Poids relatif")
+                    st.plotly_chart(figD, use_container_width=True)
+
+                _gd = _gcat.copy()
+                _gd["Part %"] = (_gd["CA"]/max(_tc,1)*100).round(2)
+                _gd["CA"]  = _gd["CA"].apply(lambda x: fmt_full(x,""))
+                _gd["NbQ"] = _gd["NbQ"].apply(nb_full)
+                _gd["Nb"]  = _gd["Nb"].apply(nb_full)
+                _gd.columns = ["Nature d'organisme","CA (FCFA)","Quittances",
+                               "Partenaires","Part %"]
+                st.dataframe(_gd, use_container_width=True, hide_index=True)
+
+                # Detail nominatif par nature
+                st.markdown("")
+                _cat_sel = st.selectbox("Détail d'une nature",
+                                        _gcat["_CATEG_PART"].astype(str).tolist(),
+                                        key="part_cat_sel")
+                _sub = (df_pf[df_pf["_CATEG_PART"] == _cat_sel]
+                          .groupby("_RS")[_cak_c].sum()
+                          .sort_values(ascending=False).head(15))
+                if not _sub.empty:
+                    _ts = float(_sub.sum())
+                    figS = go.Figure(go.Bar(
+                        x=_sub.values, y=_sub.index.astype(str).str[:34],
+                        orientation="h", marker_color=GREEN,
+                        text=[fmt_full(v,"") for v in _sub.values],
+                        textposition="outside", textfont=dict(size=9),
+                        hovertemplate="%{y}<br>CA : %{x:,.0f} FCFA<extra></extra>"))
+                    figS.update_layout(yaxis=dict(autorange="reversed"),
+                                       xaxis=dict(title="CA (FCFA)"))
+                    fig_style(figS, 420, f"{_cat_sel} · principaux partenaires")
+                    st.plotly_chart(figS, use_container_width=True)
+
+                    _dts = pd.DataFrame({
+                        "Partenaire": _sub.index.astype(str),
+                        "CA (FCFA)":  [fmt_full(v,"") for v in _sub.values],
+                        "Part %":     [f"{v/_ts*100:.2f} %" for v in _sub.values]})
+                    st.dataframe(_dts, use_container_width=True, hide_index=True)
+                    st.download_button("📥 Export par nature",
+                        dl_csv(_gcat), "partenaires_par_nature.csv", "text/csv",
+                        use_container_width=True, key="dl_part_cat")
 
         # ══════════════════════════════════════════════════════════════════════════
         #  EVOLUTION MENSUELLE PAR PARTENAIRE + COMPARAISON N vs N-1
