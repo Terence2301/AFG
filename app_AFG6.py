@@ -5966,7 +5966,7 @@ elif "Saisie BIA" in page:
                     st.session_state.pop("bia_step", None)
                     return data["numero_bia"]
                 return None
-            # ── Impression BIA (courtier PA0 uniquement) ─────────────────────────
+            # ── Impression BIA (tous produits : 220, 221, EP0, PA0) ──────────────
             if st.button("🖨️ Imprimer le BIA — 2 exemplaires",
                                            use_container_width=True, key="print_bia_btn"):
                 try:
@@ -6058,104 +6058,42 @@ elif "Saisie BIA" in page:
                     story.extend(_exemplaire("EXEMPLAIRE AFG ASSURANCES"))
 
                     doc.build(story)
-                    _pdf_bia = _buf.getvalue()
-                    _nom_bia = st.session_state.get("f_c_nom","").upper()
-                    st.success(f"✅ BIA généré — {len(_pdf_bia)//1024} Ko")
-                    st.download_button("📥 Télécharger le BIA (PDF — 2 exemplaires)",
-                        data=_pdf_bia,
-                        file_name=f"BIA_PA0_{_nom_bia}_{_dt.now().strftime('%Y%m%d')}.pdf",
-                        mime="application/pdf", use_container_width=True,
-                        type="primary", key="dl_bia_pdf_final")
+                    # Le PDF est conserve en session : Streamlit relance le
+                    # script a chaque clic, le bouton de telechargement doit
+                    # survivre a ce rechargement.
+                    _num_b = st.session_state.get("_last_bia_num","")
+                    _nom_b = st.session_state.get("f_c_nom","").upper()
+                    st.session_state["_bia_pdf"] = _buf.getvalue()
+                    st.session_state["_bia_pdf_nom"] = (
+                        f"BIA_{_num_b or prod['code']}_{_nom_b}"
+                        f"_{_dt.now().strftime('%Y%m%d')}.pdf")
                 except ImportError:
                     alert("La bibliothèque <b>reportlab</b> n'est pas installée.","danger")
                 except Exception as _ep_bia:
                     alert(f"Erreur impression BIA : {_ep_bia}","danger")
 
             # ── Bouton PDF universel (tous produits) ────────────────────────────────
-            if False:
-                if st.button("🖨️ Télécharger le BIA (PDF — 2 exemplaires)",
-                             use_container_width=True, key="dl_bia_btn_all"):
-                    try:
-                        from reportlab.lib.pagesizes import A4
-                        from reportlab.lib.units import cm
-                        from reportlab.lib import colors as _rlc
-                        from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
-                            Table, TableStyle, HRFlowable, Image as _RLImg)
-                        from reportlab.lib.styles import ParagraphStyle
-                        from reportlab.lib.enums import TA_CENTER
-                        import io as _io2, base64 as _b64_2
-                        from datetime import datetime as _dt2
-                        _buf2 = _io2.BytesIO()
-                        _doc2 = SimpleDocTemplate(_buf2, pagesize=A4,
-                            leftMargin=1.5*cm, rightMargin=1.5*cm,
-                            topMargin=1.5*cm, bottomMargin=1.5*cm)
-                        _CN=_rlc.HexColor("#0D1F3C"); _CG=_rlc.HexColor("#1A7F6E")
-                        _CR=_rlc.HexColor("#C0392B"); _CW=_rlc.white; _CL=_rlc.HexColor("#F3F6FA")
-                        _st_ti=ParagraphStyle("T",fontName="Helvetica-Bold",fontSize=11,textColor=_CW,alignment=TA_CENTER)
-                        _st_su=ParagraphStyle("S",fontName="Helvetica",fontSize=8.5,textColor=_rlc.HexColor("#A9DFBF"),alignment=TA_CENTER)
-                        _st_bd=ParagraphStyle("B",fontName="Helvetica",fontSize=8.5,textColor=_rlc.HexColor("#2C3E50"),leading=12)
-                        _st_sm=ParagraphStyle("M",fontName="Helvetica",fontSize=7.5,textColor=_rlc.grey,alignment=TA_CENTER)
-                        _nom_sous_g = f"{st.session_state.get('f_c_tit','')} {st.session_state.get('f_c_nom','').upper()} {st.session_state.get('f_c_prn','')}".strip()
-                        def _gen_bia_ex(lbl):
-                            _it=[]
-                            try:
-                                _img=_RLImg(_io2.BytesIO(_b64_2.b64decode(LOGO_B64)),width=3.5*cm,height=1.5*cm)
-                                _img.hAlign="CENTER"; _it.append(_img); _it.append(Spacer(1,.15*cm))
-                            except Exception: pass
-                            _h=Table([[Paragraph("BULLETIN INDIVIDUEL D'ADHÉSION",_st_ti)],
-                                      [Paragraph(f"{prod['nom']} — AFG Assurances Bénin Vie",_st_su)],
-                                      [Paragraph(f"Exemplaire : {lbl}",_st_su)]],colWidths=[17*cm])
-                            _h.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,-1),_CN),
-                                ("ALIGN",(0,0),(-1,-1),"CENTER"),
-                                ("TOPPADDING",(0,0),(-1,-1),7),("BOTTOMPADDING",(0,0),(-1,-1),7)]))
-                            _it.append(_h); _it.append(Spacer(1,.2*cm))
-                            _rows=[
-                                ["N° BIA",st.session_state.get("_last_bia_num","—"),"Date",_dt2.now().strftime("%d/%m/%Y")],
-                                ["Produit",prod["nom"],"Code",prod["code"]],
-                                ["Souscripteur",_nom_sous_g,"Téléphone",st.session_state.get("f_c_tel","—")],
-                                ["Cotisation",f"{int(st.session_state.get('f_coti',0)):,} FCFA / {st.session_state.get('f_peri','—')}","Capital",f"{int(st.session_state.get('f_cap',0)):,} FCFA"],
-                                ["Date effet",str(st.session_state.get("f_deff","—")),"Durée",f"{st.session_state.get('f_duree','—')} an(s)"],
-                                ["Mode règlement",st.session_state.get("f_mode","—"),"Référence",st.session_state.get("f_mref","—") or "—"],
-                                ["Apporteur",st.session_state.get("f_nom_appo","—") or "—","Code",str(st.session_state.get("f_code_appo","—"))],
-                            ]
-                            _t=Table(_rows,colWidths=[4*cm,4.5*cm,4*cm,4.5*cm])
-                            _t.setStyle(TableStyle([
-                                ("FONTNAME",(0,0),(0,-1),"Helvetica-Bold"),("FONTNAME",(2,0),(2,-1),"Helvetica-Bold"),
-                                ("FONTSIZE",(0,0),(-1,-1),8.5),("ROWBACKGROUNDS",(0,0),(-1,-1),[_CL,_CW]),
-                                ("GRID",(0,0),(-1,-1),.3,_rlc.HexColor("#DDE3EE")),
-                                ("TOPPADDING",(0,0),(-1,-1),5),("BOTTOMPADDING",(0,0),(-1,-1),5),("LEFTPADDING",(0,0),(-1,-1),6),
-                            ]))
-                            _it.append(_t); _it.append(Spacer(1,.3*cm))
-                            _it.append(Paragraph("Je soussigné(e) certifie l'exactitude des informations ci-dessus et reconnais avoir reçu les conditions générales.",_st_bd))
-                            _it.append(Spacer(1,.5*cm))
-                            _sig=Table([["Signature souscripteur","Cachet & Signature AFG"],["",""],["",""]],colWidths=[8.5*cm,8.5*cm])
-                            _sig.setStyle(TableStyle([("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
-                                ("FONTSIZE",(0,0),(-1,-1),8),("ALIGN",(0,0),(-1,-1),"CENTER"),
-                                ("BOX",(0,1),(0,2),.5,_CN),("BOX",(1,1),(1,2),.5,_CN),
-                                ("BOTTOMPADDING",(0,1),(-1,2),22)]))
-                            _it.append(_sig); _it.append(Spacer(1,.15*cm))
-                            _it.append(Paragraph("AFG Assurances Bénin Vie · Groupe AFG Holding · Conforme CIMA",_st_sm))
-                            return _it
-                        _st2=[]
-                        _st2.extend(_gen_bia_ex("EXEMPLAIRE CLIENT"))
-                        _st2.append(Spacer(1,.3*cm))
-                        _st2.append(HRFlowable(width="100%",thickness=.7,color=_CR,dash=[3,3],spaceAfter=3))
-                        _st2.append(Paragraph("✂  —  —  Découper ici  —  —  ✂",
-                            ParagraphStyle("CUT",fontName="Helvetica",fontSize=7.5,textColor=_rlc.grey,alignment=TA_CENTER)))
-                        _st2.append(Spacer(1,.3*cm))
-                        _st2.extend(_gen_bia_ex("EXEMPLAIRE AFG ASSURANCES BÉNIN VIE"))
-                        _doc2.build(_st2)
-                        _pdf2=_buf2.getvalue()
-                        _fn2=f"BIA_{prod['code']}_{_nom_sous_g.replace(' ','_')}_{_dt2.now().strftime('%Y%m%d')}.pdf"
-                        st.success(f"✅ BIA généré — {len(_pdf2)//1024} Ko")
-                        st.download_button("📥 Télécharger le BIA PDF",data=_pdf2,file_name=_fn2,
-                            mime="application/pdf",use_container_width=True,type="primary",key="dl_bia_pdf_final_b")
-                    except ImportError:
-                        alert("La bibliothèque <b>reportlab</b> n'est pas installée.","danger")
-                    except Exception as _ep_g:
-                        alert(f"Erreur génération PDF : {_ep_g}","danger")
-
             st.markdown("")
+                # ── Telechargement du BIA (persiste entre les rechargements) ─────────
+            if st.session_state.get("_bia_pdf"):
+                _pb = st.session_state["_bia_pdf"]
+                st.markdown("")
+                st.success(f"Bulletin prêt — {len(_pb)//1024} Ko · deux exemplaires "
+                           f"(client et courtier) sur une même page")
+                _d1, _d2 = st.columns([3,1])
+                _d1.download_button(
+                    "📥 Télécharger le BIA en PDF",
+                    data=_pb,
+                    file_name=st.session_state.get("_bia_pdf_nom","bulletin_bia.pdf"),
+                    mime="application/pdf",
+                    use_container_width=True, type="primary",
+                    key="dl_bia_final")
+                if _d2.button("Effacer", key="clr_bia_pdf", use_container_width=True):
+                    st.session_state.pop("_bia_pdf", None)
+                    st.session_state.pop("_bia_pdf_nom", None)
+                    st.rerun()
+                st.markdown("")
+
             b1,b2,b3=st.columns([1,1,1.4])
             if b1.button("← Retour", key=f"ret7_{4157}"): st.session_state["bia_step"] = 5 if _is_crt_step else 6; st.rerun()
             if b2.button("💾 Brouillon"):
@@ -6268,14 +6206,38 @@ elif "Saisie BIA" in page:
                                 except: pass
                                 try: term_s = _dt.strptime(str(term_s),"%Y-%m-%d").strftime("%d/%m/%Y")
                                 except: pass
-                                story.append(_tbl([
-                                    ["Produit :","Prévoyance Auto (PA0)"],
-                                    ["Prime annuelle :",f"{prime_v:,.0f} FCFA"],
-                                    ["Capital garanti décès :",f"{cap_v:,.0f} FCFA"],
-                                    ["Date d'effet :",deff_s],
-                                    ["Date terme :",term_s],
-                                    ["Mode de règlement :",ss.get("f_mode","—")],
-                                    ["Référence paiement :",ss.get("f_mref","—")]]))
+                                # Le tableau s'adapte au produit : periodicite,
+                                # libelle du capital et duree different selon
+                                # qu'il s'agit d'un contrat deces, d'une
+                                # epargne ou de la prevoyance auto.
+                                _pcode = prod["code"]
+                                _peri_lbl = {
+                                    "Mensuelle":"Prime mensuelle",
+                                    "Trimestrielle":"Prime trimestrielle",
+                                    "Semestrielle":"Prime semestrielle",
+                                    "Annuelle":"Prime annuelle",
+                                    "Unique":"Prime unique",
+                                }.get(str(ss.get("f_peri","Annuelle")), "Cotisation")
+                                _cap_lbl = ("Capital constitutif" if _pcode == "EP0"
+                                            else "Capital garanti décès")
+                                _rows_ct = [
+                                    ["Produit :", f"{prod['nom']} ({_pcode})"],
+                                    [f"{_peri_lbl} :", f"{prime_v:,.0f} FCFA".replace(","," ")],
+                                    [f"{_cap_lbl} :", f"{cap_v:,.0f} FCFA".replace(","," ")],
+                                    ["Date d'effet :", deff_s],
+                                    ["Date terme :", term_s],
+                                    ["Mode de règlement :", ss.get("f_mode","—")],
+                                    ["Référence paiement :", ss.get("f_mref","—")],
+                                ]
+                                # Duree : pertinente pour l'epargne et les
+                                # contrats deces, fixee a un an pour PA0.
+                                if _pcode != "PA0" and ss.get("f_duree"):
+                                    _rows_ct.insert(4, ["Durée :",
+                                                        f"{ss.get('f_duree')} an(s)"])
+                                if _pcode == "EP0" and ss.get("f_tx_tech"):
+                                    _rows_ct.append(["Taux technique :",
+                                                     f"{ss.get('f_tx_tech')} %"])
+                                story.append(_tbl(_rows_ct))
                                 story.append(Spacer(1,0.2*cm))
                                 # Signatures
                                 story.append(_sec("SIGNATURES"))
@@ -6307,17 +6269,18 @@ elif "Saisie BIA" in page:
                                 textColor=__import__("reportlab.lib.colors",fromlist=["grey"]).grey,
                                 alignment=TA_CENTER))]],colWidths=[17*cm]))
                             story.append(Spacer(1,0.3*cm))
-                            _bloc_bia(story, "AFG")
+                            # Pour Prévoyance Auto, le second exemplaire revient
+                            # au courtier ; pour les autres produits, à AFG.
+                            _bloc_bia(story,
+                                      "COURTIER" if prod["code"] == "PA0" else "AFG")
                             doc.build(story)
-                            _pdf = _buf.getvalue()
-                            _nom = f"{st.session_state.get('f_c_nom','').upper()}_{st.session_state.get('f_c_prn','')}"
-                            st.success(f"✅ BIA généré — {len(_pdf)//1024} Ko")
-                            st.download_button("📥 Télécharger le BIA (PDF 2 exemplaires)",
-                                data=_pdf,
-                                file_name=f"BIA_PA0_{_nom}_{_dt.now().strftime('%Y%m%d')}.pdf",
-                                mime="application/pdf",
-                                use_container_width=True, type="primary",
-                                key="dl_bia_pdf")
+                            _num_b2 = st.session_state.get("_last_bia_num","")
+                            _nom_b2 = (f"{st.session_state.get('f_c_nom','').upper()}"
+                                       f"_{st.session_state.get('f_c_prn','')}")
+                            st.session_state["_bia_pdf"] = _buf.getvalue()
+                            st.session_state["_bia_pdf_nom"] = (
+                                f"BIA_{_num_b2 or 'PA0'}_{_nom_b2}"
+                                f"_{_dt.now().strftime('%Y%m%d')}.pdf")
                         except ImportError:
                             alert("reportlab non installé.","danger")
                         except Exception as _e_bp:
@@ -7066,25 +7029,8 @@ elif "Rapport PDF" in page:
                                                       [p[1] for p in _pair],
                                                       "Poids relatif de chaque état"))
 
-                            # Top produits du portefeuille
-                            if "LIBECATE" in _pf_r.columns:
-                                _tp = (_pf_r["LIBECATE"].astype(str).str.strip()
-                                         .value_counts().head(8))
-                                if not _tp.empty:
-                                    story.append(Spacer(1,0.2*cm))
-                                    story.append(Paragraph(
-                                        "Composition du portefeuille par produit :", st_h2))
-                                    _tpr = [["Produit","Polices","Part"]]
-                                    for _n, _v in _tp.items():
-                                        _tpr.append([str(_n)[:42], nb_full(int(_v)),
-                                                     f"{_v/_nb*100:.1f} %"])
-                                    story.append(_tbl_style(_tpr,[9.5*cm,3.5*cm,4*cm]))
-                                    story.append(Spacer(1,0.15*cm))
-                                    story.append(_mpl_barh(
-                                        _tp.index.astype(str).tolist(),
-                                        _tp.values.tolist(),
-                                        f"Nombre de polices par produit · {period_lbl}",
-                                        haut=4.2))
+                            # La ventilation par produit figure en section 2,
+                        # ou elle est mise en regard du chiffre d'affaires.
                             # Commentaire analytique
                             _cm_cima = ("conforme aux exigences du Code CIMA (seuil ≤ 25 %)"
                                         if _txr <= 25 else
@@ -7119,7 +7065,7 @@ elif "Rapport PDF" in page:
                             story.append(_tbl_style(cd,[7*cm,4*cm,6*cm]))
                             if "LIBECATE" in _ca_r.columns:
                                 story.append(Spacer(1,0.2*cm))
-                                story.append(Paragraph("Répartition par produit (Top 8) :", st_h2))
+                                story.append(Paragraph("Ventilation par produit", st_h2))
                                 _cp = _ca_r.groupby("LIBECATE")["CHIFAFFA"].sum().reset_index()
                                 _cp = _cp.sort_values("CHIFAFFA",ascending=False).head(8)
                                 _cp["Part"] = (_cp["CHIFAFFA"]/_cat*100).round(1)
@@ -7183,7 +7129,7 @@ elif "Rapport PDF" in page:
                         # 3. Commerciaux
                         if s_com and _ca_r is not None:
                             story.append(Spacer(1,0.3*cm))
-                            story.append(_sec("3.  PERFORMANCE COMMERCIALE & PARTENAIRES"))
+                            story.append(_sec("3.  RÉSEAU COMMERCIAL"))
                             story.append(Spacer(1,0.2*cm))
                             # Identification des apporteurs : meme regle que
                             # l'onglet Commerciaux. Le detail par agent est
@@ -7317,7 +7263,11 @@ elif "Rapport PDF" in page:
                                         _gp = _ca_part.groupby(_grp_part_key).agg(
                                             CA=("CHIFAFFA","sum"), NbAff=("CHIFAFFA","count")
                                         ).reset_index().sort_values("CA",ascending=False).head(10)
-                                        story.append(Paragraph("Partenaires financiers (codes 3 chiffres, hors 100) :", st_h2))
+                                        story.append(Spacer(1,0.3*cm))
+                                        story.append(_sec("4.  PARTENAIRES FINANCIERS"))
+                                        story.append(Spacer(1,0.2*cm))
+                                        story.append(Paragraph(
+                                            "Principaux partenaires apporteurs", st_h2))
                                         _pD_hdr = ["Code","Partenaire","CA (FCFA)","Nb quittances"] if _col_ni else ["Code","CA (FCFA)","Nb quittances"]
                                         _pD = [_pD_hdr]
                                         for _,r in _gp.iterrows():
@@ -7459,7 +7409,7 @@ elif "Rapport PDF" in page:
 
                                             story.append(Spacer(1,0.3*cm))
                                             story.append(Paragraph(
-                                                f"Performance des partenaires · {_aN} face à {_aN1}",
+                                                f"Évolution {_aN1} vers {_aN}",
                                                 st_h2))
 
                                             # Barres groupees : dix premiers partenaires
@@ -7588,7 +7538,7 @@ elif "Rapport PDF" in page:
                                     _tc2 = float(_sub.sum())
                                     story.append(Spacer(1,0.22*cm))
                                     story.append(Paragraph(
-                                        f"{_cat_n} · détail des principaux apporteurs", st_h2))
+                                        f"Détail · {_cat_n}", st_h2))
                                     _st2 = [["Apporteur","Chiffre d'affaires","Part"]]
                                     for _nm2, _v2 in _sub.items():
                                         _st2.append([str(_nm2)[:44], fmt_full(_v2, ""),
@@ -7634,7 +7584,7 @@ elif "Rapport PDF" in page:
                         # 4. Sinistres
                         if s_sin and _sin_r is not None:
                             story.append(Spacer(1,0.3*cm))
-                            story.append(_sec("4.  SINISTRES ET PRESTATIONS"))
+                            story.append(_sec("5.  SINISTRES ET PRESTATIONS"))
                             story.append(Spacer(1,0.2*cm))
                             _st  = float(_sin_r["Réglement Total"].fillna(0).sum()) if "Réglement Total" in _sin_r.columns else 0
                             _ss  = float(_sin_r["SAP au 31/12/2025"].fillna(0).sum()) if "SAP au 31/12/2025" in _sin_r.columns else 0
@@ -7760,7 +7710,7 @@ elif "Rapport PDF" in page:
                         # 5. CIMA
                         if s_cima and _pf_r is not None:
                             story.append(Spacer(1,0.3*cm))
-                            story.append(_sec("5.  SCORECARD CONFORMITÉ CIMA"))
+                            story.append(_sec("6.  SCORECARD CONFORMITÉ CIMA"))
                             story.append(Spacer(1,0.2*cm))
                             _nb2 = len(_pf_r); _ek2="ETAT_POLICE"
                             _a2  = int((_pf_r[_ek2].str.strip().isin(["ACTIF"])).sum()) if _ek2 in _pf_r.columns else 0
