@@ -998,6 +998,26 @@ CREATE TABLE IF NOT EXISTS bases_data (
 """
 _DDL_DATA_SQ = _DDL_DATA.replace("BYTEA", "BLOB")
 
+# ── Comptes courtiers ─────────────────────────────────────────────────────────
+# Chaque courtier dispose de son identifiant, de son mot de passe (haché en
+# SHA-256, jamais stocké en clair), de sa raison sociale, de son préfixe BIA
+# et de son logo. Le logo est conservé en base64 dans la base : il reste
+# disponible hors ligne et suit le courtier d'un poste à l'autre.
+_DDL_COURTIERS = """
+CREATE TABLE IF NOT EXISTS courtiers (
+    identifiant   TEXT PRIMARY KEY,
+    mdp_hash      TEXT NOT NULL,
+    raison_sociale TEXT NOT NULL,
+    prefixe_bia   TEXT NOT NULL,
+    logo_b64      TEXT,
+    telephone     TEXT,
+    email         TEXT,
+    actif         INTEGER DEFAULT 1,
+    cree_le       TEXT,
+    cree_par      TEXT
+)
+"""
+
 def init_db():
     """Crée toutes les tables (idempotent)."""
     try:
@@ -1007,17 +1027,145 @@ def init_db():
         cur.execute(_DDL    if pg else _DDL_SQLITE)
         cur.execute(_DDL_BASES_META if pg else _DDL_BASES_META_SQ)
         cur.execute(_DDL_DATA       if pg else _DDL_DATA_SQ)
+        cur.execute(_DDL_COURTIERS)
         conn.commit(); cur.close(); conn.close()
     except Exception as e:
         st.warning(f"⚠️ Init DB : {e}")
+
+
+def _hash_mdp(mdp: str) -> str:
+    """Empreinte SHA-256 d'un mot de passe."""
+    return hashlib.sha256(str(mdp).encode("utf-8")).hexdigest()
+
+
+def prefixe_depuis_nom(raison_sociale: str) -> str:
+    """Trois premières lettres de la raison sociale, en majuscules."""
+    _c = "".join(ch for ch in str(raison_sociale).upper() if ch.isalpha())
+    return (_c[:3] if len(_c) >= 3 else _c.ljust(3, "X")) or "XXX"
+
+
+def lister_courtiers(actifs_seuls: bool = False) -> list:
+    """Retourne la liste des courtiers enregistrés."""
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        _q = ("SELECT identifiant, raison_sociale, prefixe_bia, logo_b64, "
+              "telephone, email, actif, cree_le, cree_par FROM courtiers")
+        if actifs_seuls:
+            _q += " WHERE actif = 1"
+        _q += " ORDER BY raison_sociale"
+        cur.execute(_q)
+        _cols = ["identifiant","raison_sociale","prefixe_bia","logo_b64",
+                 "telephone","email","actif","cree_le","cree_par"]
+        _res = [dict(zip(_cols, r)) for r in cur.fetchall()]
+        cur.close(); conn.close()
+        return _res
+    except Exception:
+        return []
+
+
+def lire_courtier(identifiant: str):
+    """Retourne le courtier correspondant à l'identifiant, ou None."""
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        _p = "%s" if _is_pg(conn) else "?"
+        cur.execute(
+            f"SELECT identifiant, mdp_hash, raison_sociale, prefixe_bia, "
+            f"logo_b64, telephone, email, actif FROM courtiers "
+            f"WHERE UPPER(identifiant) = {_p}",
+            (str(identifiant).strip().upper(),))
+        _r = cur.fetchone()
+        cur.close(); conn.close()
+        if not _r:
+            return None
+        return dict(zip(["identifiant","mdp_hash","raison_sociale","prefixe_bia",
+                         "logo_b64","telephone","email","actif"], _r))
+    except Exception:
+        return None
+
+
+def enregistrer_courtier(identifiant, mdp, raison_sociale, prefixe,
+                         logo_b64=None, telephone="", email="",
+                         actif=True, cree_par="") -> tuple:
+    """Crée ou met à jour un compte courtier.
+
+    Un mot de passe vide lors d'une mise à jour laisse l'ancien inchangé.
+    Retourne (succes, message).
+    """
+    _id = str(identifiant).strip().upper()
+    if not _id:
+        return False, "L'identifiant est obligatoire."
+    if not str(raison_sociale).strip():
+        return False, "La raison sociale est obligatoire."
+
+    _existant = lire_courtier(_id)
+    if _existant is None and not str(mdp).strip():
+        return False, "Un mot de passe est requis à la création."
+    _hash = _hash_mdp(mdp) if str(mdp).strip() else _existant["mdp_hash"]
+    _pfx  = (str(prefixe).strip().upper()[:4]
+             or prefixe_depuis_nom(raison_sociale))
+
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        _p = "%s" if _is_pg(conn) else "?"
+        if _existant:
+            cur.execute(
+                f"UPDATE courtiers SET mdp_hash={_p}, raison_sociale={_p}, "
+                f"prefixe_bia={_p}, logo_b64={_p}, telephone={_p}, email={_p}, "
+                f"actif={_p} WHERE identifiant={_p}",
+                (_hash, str(raison_sociale).strip(), _pfx,
+                 logo_b64 if logo_b64 is not None else _existant.get("logo_b64"),
+                 telephone, email, 1 if actif else 0, _id))
+            _msg = f"Compte « {_id} » mis à jour."
+        else:
+            cur.execute(
+                f"INSERT INTO courtiers (identifiant, mdp_hash, raison_sociale, "
+                f"prefixe_bia, logo_b64, telephone, email, actif, cree_le, cree_par) "
+                f"VALUES ({_p},{_p},{_p},{_p},{_p},{_p},{_p},{_p},{_p},{_p})",
+                (_id, _hash, str(raison_sociale).strip(), _pfx, logo_b64,
+                 telephone, email, 1 if actif else 0,
+                 datetime.now().strftime("%Y-%m-%d %H:%M"), cree_par))
+            _msg = f"Compte « {_id} » créé."
+        conn.commit(); cur.close(); conn.close()
+        return True, _msg
+    except Exception as e:
+        return False, f"Enregistrement impossible : {e}"
+
+
+def supprimer_courtier(identifiant: str) -> tuple:
+    """Supprime définitivement un compte courtier."""
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        _p = "%s" if _is_pg(conn) else "?"
+        cur.execute(f"DELETE FROM courtiers WHERE UPPER(identifiant)={_p}",
+                    (str(identifiant).strip().upper(),))
+        conn.commit(); cur.close(); conn.close()
+        return True, f"Compte « {identifiant} » supprimé."
+    except Exception as e:
+        return False, f"Suppression impossible : {e}"
+
+
+def authentifier_courtier(identifiant: str, mdp: str):
+    """Vérifie les identifiants d'un courtier.
+
+    Retourne son dossier si l'authentification réussit et que le compte
+    est actif, None sinon.
+    """
+    _c = lire_courtier(identifiant)
+    if not _c or not _c.get("actif"):
+        return None
+    return _c if _c["mdp_hash"] == _hash_mdp(mdp) else None
 # ── Numéro BIA unique ─────────────────────────────────────────────────────────
-def gen_bia(courtier: str = None) -> str:
+def gen_bia(courtier: str = None, prefixe: str = None) -> str:
     """Numero BIA sequentiel.
-    Avec courtier : XXX00001 (3 lettres du courtier + ordre propre au courtier).
-    Sans courtier : BIA-AAAA-00001."""
+
+    Avec courtier : XXX00001, ou XXX est le prefixe enregistre sur son
+    compte (a defaut, les trois premieres lettres de sa raison sociale).
+    Chaque courtier dispose de sa propre serie.
+    Sans courtier : BIA-AAAA-00001.
+    """
     if courtier and str(courtier).strip():
-        _cl  = "".join(c for c in str(courtier).upper() if c.isalpha())
-        _pfx = (_cl[:3] if len(_cl) >= 3 else _cl.ljust(3, "X")) or "XXX"
+        _pfx = (str(prefixe).strip().upper()[:4] if prefixe
+                else prefixe_depuis_nom(courtier))
         try:
             conn = get_conn(); cur = conn.cursor()
             _q = ("SELECT COUNT(*) FROM bulletins_bia WHERE numero_bia LIKE %s"
@@ -1242,6 +1390,7 @@ def get_bases_meta() -> dict:
 
 # ── Rôles admin (seuls ces rôles peuvent charger/supprimer les bases) ─────────
 # Rôles autorisés à charger/gérer les bases de données
+ADMIN_ROLES     = {"PDG", "ADMIN"}      # gestion des comptes courtiers
 UPLOAD_ROLES    = {"PDG", "ACTUAIRE"}   # peuvent charger PF, CA, Prestations
 # Rôles autorisés à voir les onglets analytiques
 ANALYTICS_ROLES = {"PDG", "ACTUAIRE"}   # voient le dashboard complet
@@ -1613,12 +1762,28 @@ if not st.session_state.auth:
             code  = st.text_input("🔑 Mot de passe", type="password")
             if st.button("🔐 Accéder au système", use_container_width=True, type="primary"):
                 up = ident.strip().upper()
-                if up in USERS and USERS[up] == hashlib.sha256(code.encode()).hexdigest():
+                # 1. Comptes courtiers enregistrés en base
+                _crt = authentifier_courtier(up, code)
+                if _crt:
+                    st.session_state.auth = True
+                    st.session_state.user = {
+                        "nom":            _crt["raison_sociale"],
+                        "role":           "COURTIER",
+                        "identifiant":    _crt["identifiant"],
+                        "raison_sociale": _crt["raison_sociale"],
+                        "prefixe_bia":    _crt["prefixe_bia"],
+                        "logo_b64":       _crt.get("logo_b64"),
+                        "telephone":      _crt.get("telephone", ""),
+                        "email":          _crt.get("email", ""),
+                    }
+                    st.rerun()
+                # 2. Comptes internes AFG
+                elif up in USERS and USERS[up] == hashlib.sha256(code.encode()).hexdigest():
                     st.session_state.auth = True
                     st.session_state.user = {"nom": ident.strip(), "role": up.split()[0]}
                     st.rerun()
                 else:
-                    st.error("❌ Identifiant ou code PIN incorrect.")
+                    st.error("Identifiant ou mot de passe incorrect.")
     st.stop()
 
 user  = st.session_state.user
@@ -1711,6 +1876,7 @@ ALL_PAGES = [
     "📐  Actuariat Avancé",
     "🔮  Prévisions & Tendances",
     # Outils de gestion
+    "🤝  Comptes courtiers",
     "📝  Saisie BIA",
     "🗂️  Base BIA",
     "📄  Rapport PDF",
@@ -1740,6 +1906,11 @@ _is_courtier  = is_courtier(user)         # Courtiers  Saisie BIA uniquement
 # • COURTIER  Saisie BIA uniquement (produit PA0)
 # • Tous les autres  Saisie BIA uniquement
 pages_visible = ALL_PAGES if (_any_data and _can_analysis and not _is_courtier) else VISIBLE_DEFAULT
+# La gestion des comptes courtiers reste reservee au PDG et a l'administrateur
+if user.get("role","").upper() not in ADMIN_ROLES:
+    pages_visible = [p for p in pages_visible if "Comptes courtiers" not in p]
+elif "🤝  Comptes courtiers" not in pages_visible:
+    pages_visible = pages_visible + ["🤝  Comptes courtiers"]
 
 # Sécurité : si la page courante a disparu (ex. données effacées), revenir à BIA
 if st.session_state.current_page not in pages_visible:
@@ -5085,6 +5256,179 @@ elif "Prévisions" in page:
     except Exception as _e_page:
         _erreur_onglet(_e_page, "Prévisions")
 
+elif "Comptes courtiers" in page:
+    try:
+        section("Comptes courtiers",
+                "IDENTIFIANTS · RAISON SOCIALE · PRÉFIXE BIA · LOGO")
+
+        if not is_admin(user):
+            alert("Cette page est réservée à la Direction générale "
+                  "et à l'administrateur.", "warn")
+            st.stop()
+
+        st.caption("Chaque courtier dispose de son identifiant, de son mot de "
+                   "passe et de son logo. À la connexion, sa raison sociale et "
+                   "son logo apparaissent automatiquement sur le bulletin ; "
+                   "ses numéros de BIA suivent son préfixe.")
+
+        _liste = lister_courtiers()
+
+        c1, c2, c3 = st.columns(3)
+        kpi(c1, "Courtiers enregistrés", nb_full(len(_liste)),
+            "Comptes créés", "blue", icon="🤝")
+        kpi(c2, "Comptes actifs",
+            nb_full(sum(1 for c in _liste if c.get("actif"))),
+            "Peuvent se connecter", "teal", icon="✅")
+        kpi(c3, "Logos renseignés",
+            nb_full(sum(1 for c in _liste if c.get("logo_b64"))),
+            "Apparaissent sur le BIA", "", icon="🖼️")
+
+        t_liste, t_ajout = st.tabs(["Comptes existants", "Créer ou modifier"])
+
+        # ── Liste des comptes ────────────────────────────────────────────────
+        with t_liste:
+            if not _liste:
+                bloc_vide("Aucun compte courtier enregistré. "
+                          "Utilisez l'onglet « Créer ou modifier ».", "🤝")
+            else:
+                for _c in _liste:
+                    _st_lbl = "Actif" if _c.get("actif") else "Désactivé"
+                    _st_col = GREEN if _c.get("actif") else "#999"
+                    with st.container(border=True):
+                        _l1, _l2, _l3 = st.columns([1, 3, 1.2])
+                        with _l1:
+                            if _c.get("logo_b64"):
+                                st.markdown(
+                                    f'<img src="data:image/png;base64,'
+                                    f'{_c["logo_b64"]}" style="height:56px;'
+                                    f'object-fit:contain;border-radius:8px"/>',
+                                    unsafe_allow_html=True)
+                            else:
+                                st.markdown(
+                                    "<div style='height:56px;display:flex;"
+                                    "align-items:center;color:#BBB;font-size:11px'>"
+                                    "Pas de logo</div>", unsafe_allow_html=True)
+                        with _l2:
+                            st.markdown(
+                                f"<div style='font-size:14px;font-weight:700;"
+                                f"color:{NAVY}'>{_c['raison_sociale']}</div>"
+                                f"<div style='font-size:11px;color:#667'>"
+                                f"Identifiant <b>{_c['identifiant']}</b> · "
+                                f"Préfixe BIA <b>{_c['prefixe_bia']}</b> · "
+                                f"<span style='color:{_st_col}'>{_st_lbl}</span>"
+                                f"</div>"
+                                f"<div style='font-size:10px;color:#889'>"
+                                f"{_c.get('telephone') or ''} "
+                                f"{_c.get('email') or ''}</div>",
+                                unsafe_allow_html=True)
+                        with _l3:
+                            if st.button("Supprimer",
+                                         key=f"del_crt_{_c['identifiant']}",
+                                         use_container_width=True):
+                                st.session_state["_crt_a_supprimer"] = _c["identifiant"]
+
+                # Confirmation de suppression
+                _cible = st.session_state.get("_crt_a_supprimer")
+                if _cible:
+                    st.warning(f"Supprimer définitivement le compte "
+                               f"« {_cible} » ? Les BIA déjà saisis sont conservés.")
+                    _s1, _s2 = st.columns(2)
+                    if _s1.button("Confirmer la suppression", type="primary",
+                                  use_container_width=True, key="conf_del_crt"):
+                        _ok, _msg = supprimer_courtier(_cible)
+                        st.session_state.pop("_crt_a_supprimer", None)
+                        (st.success if _ok else st.error)(_msg)
+                        st.rerun()
+                    if _s2.button("Annuler", use_container_width=True,
+                                  key="ann_del_crt"):
+                        st.session_state.pop("_crt_a_supprimer", None)
+                        st.rerun()
+
+        # ── Création ou modification ─────────────────────────────────────────
+        with t_ajout:
+            _opts = ["Nouveau compte"] + [c["identifiant"] for c in _liste]
+            _sel  = st.selectbox("Compte à modifier", _opts, key="crt_sel_edit")
+            _ex   = lire_courtier(_sel) if _sel != "Nouveau compte" else None
+
+            f1, f2 = st.columns(2)
+            _id_c = f1.text_input(
+                "Identifiant de connexion",
+                value=_ex["identifiant"] if _ex else "",
+                disabled=bool(_ex),
+                placeholder="ATLANTIQUE", key="crt_id",
+                help="Saisi par le courtier à la connexion. En majuscules.")
+            _rs_c = f2.text_input(
+                "Raison sociale",
+                value=_ex["raison_sociale"] if _ex else "",
+                placeholder="ATLANTIQUE COURTAGE", key="crt_rs",
+                help="Nom affiché sur le bulletin.")
+
+            f3, f4 = st.columns(2)
+            _mdp_c = f3.text_input(
+                "Mot de passe", type="password", key="crt_mdp",
+                placeholder="Laisser vide pour ne pas changer" if _ex else "",
+                help="Stocké sous forme d'empreinte, jamais en clair.")
+            _pfx_def = (_ex["prefixe_bia"] if _ex
+                        else (prefixe_depuis_nom(_rs_c) if _rs_c else ""))
+            _pfx_c = f4.text_input(
+                "Préfixe des numéros BIA", value=_pfx_def,
+                max_chars=4, key="crt_pfx",
+                help="Trois ou quatre lettres. Exemple : ATL donne ATL00001.")
+
+            f5, f6 = st.columns(2)
+            _tel_c = f5.text_input("Téléphone",
+                                   value=_ex.get("telephone","") if _ex else "",
+                                   key="crt_tel")
+            _mail_c = f6.text_input("Adresse électronique",
+                                    value=_ex.get("email","") if _ex else "",
+                                    key="crt_mail")
+
+            _actif_c = st.checkbox(
+                "Compte actif", value=bool(_ex.get("actif")) if _ex else True,
+                key="crt_actif",
+                help="Un compte désactivé ne peut plus se connecter.")
+
+            st.markdown("**Logo**")
+            _up = st.file_uploader(
+                "Fichier PNG ou JPEG", type=["png","jpg","jpeg"],
+                key="crt_logo",
+                help="Il apparaîtra sur le bulletin imprimé. "
+                     "Format paysage recommandé, fond transparent ou blanc.")
+            _logo_new = None
+            if _up is not None:
+                import base64 as _b64c
+                _logo_new = _b64c.b64encode(_up.getvalue()).decode("ascii")
+                st.image(_up, width=180, caption="Aperçu")
+            elif _ex and _ex.get("logo_b64"):
+                st.markdown(
+                    f'<img src="data:image/png;base64,{_ex["logo_b64"]}" '
+                    f'style="height:70px;object-fit:contain;border-radius:8px"/>'
+                    f"<div style='font-size:11px;color:#889;margin-top:4px'>"
+                    f"Logo actuel — déposez un fichier pour le remplacer</div>",
+                    unsafe_allow_html=True)
+
+            st.markdown("")
+            if st.button("Enregistrer le compte", type="primary",
+                         use_container_width=True, key="crt_save"):
+                _ok, _msg = enregistrer_courtier(
+                    identifiant=_id_c or (_ex["identifiant"] if _ex else ""),
+                    mdp=_mdp_c,
+                    raison_sociale=_rs_c,
+                    prefixe=_pfx_c,
+                    logo_b64=_logo_new,
+                    telephone=_tel_c,
+                    email=_mail_c,
+                    actif=_actif_c,
+                    cree_par=user.get("nom",""))
+                if _ok:
+                    st.success(_msg)
+                    st.rerun()
+                else:
+                    st.error(_msg)
+
+    except Exception as _e_page:
+        _erreur_onglet(_e_page, "Comptes courtiers")
+
 elif "Saisie BIA" in page:
     try:
         # Compteurs BIA — filtrés sur PA0 pour les courtiers
@@ -5153,28 +5497,54 @@ elif "Saisie BIA" in page:
               </div>
             </div>""", unsafe_allow_html=True)
 
-            _nom_courtier = st.text_input(
-                "Courtier (nom ou sigle)",
-                value=st.session_state.get("f_courtier_nom",""),
-                placeholder="Ex: ATLANTIQUE COURTAGE, ABC Assurances...",
-                key="inp_courtier")
-            st.session_state["f_courtier_nom"] = _nom_courtier
+            # Un courtier authentifié n'a rien à saisir : sa raison sociale
+            # et son logo proviennent de son compte.
+            _crt_compte = is_courtier(user) and user.get("raison_sociale")
+            if _crt_compte:
+                _nom_courtier = user["raison_sociale"]
+                st.session_state["f_courtier_nom"] = _nom_courtier
+                _logo_compte = user.get("logo_b64")
+                if _logo_compte:
+                    st.markdown(f"""
+                    <div style="text-align:center;margin:10px 0 6px">
+                      <img src="data:image/png;base64,{_logo_compte}"
+                           style="height:84px;object-fit:contain;border-radius:12px;
+                                  box-shadow:0 3px 16px rgba(0,0,0,.14)"
+                           alt="{_nom_courtier}"/>
+                    </div>""", unsafe_allow_html=True)
+                st.markdown(
+                    f"<div style='text-align:center;margin-bottom:14px'>"
+                    f"<div style='font-size:15px;font-weight:800;color:{NAVY}'>"
+                    f"{_nom_courtier}</div>"
+                    f"<div style='font-size:11px;color:#889'>Préfixe BIA "
+                    f"<b>{user.get('prefixe_bia','—')}</b></div></div>",
+                    unsafe_allow_html=True)
+            else:
+                _nom_courtier = st.text_input(
+                    "Courtier (nom ou sigle)",
+                    value=st.session_state.get("f_courtier_nom",""),
+                    placeholder="Ex: ATLANTIQUE COURTAGE, ABC Assurances...",
+                    key="inp_courtier")
+                st.session_state["f_courtier_nom"] = _nom_courtier
 
-            # Logo courtier — Clearbit (auto) + fallback avatar initiales
-            if _nom_courtier and len(_nom_courtier.strip()) >= 2:
-                _slug_crt  = _nom_courtier.strip().lower().replace(" ","").replace(".","")                                       .replace("-","").replace("'","").replace(",","")
-                _logo_url  = f"https://logo.clearbit.com/{_slug_crt}.com"
-                _logo_q    = _nom_courtier.strip().replace(" ", "+")
-                _fallback  = f"https://ui-avatars.com/api/?name={_logo_q}&background=003366&color=fff&size=200&bold=true&font-size=0.38&format=png"
-                st.markdown(f"""
-                <div style="text-align:center;margin:8px 0 14px">
-                  <img src="{_logo_url}"
-                       onerror="this.onerror=null;this.src='{_fallback}'"
-                       style="height:72px;object-fit:contain;border-radius:10px;
-                              box-shadow:0 2px 12px rgba(0,0,0,.12)"
-                       alt="{_nom_courtier}"/>
-                  <div style="font-size:11px;color:#888;margin-top:5px">{_nom_courtier}</div>
-                </div>""", unsafe_allow_html=True)
+                # Logo deviné en ligne, avec repli sur les initiales
+                if _nom_courtier and len(_nom_courtier.strip()) >= 2:
+                    _slug_crt = "".join(ch for ch in _nom_courtier.lower()
+                                        if ch.isalnum())
+                    _logo_url = f"https://logo.clearbit.com/{_slug_crt}.com"
+                    _logo_q   = _nom_courtier.strip().replace(" ", "+")
+                    _fallback = (f"https://ui-avatars.com/api/?name={_logo_q}"
+                                 f"&background=003366&color=fff&size=200"
+                                 f"&bold=true&font-size=0.38&format=png")
+                    st.markdown(f"""
+                    <div style="text-align:center;margin:8px 0 14px">
+                      <img src="{_logo_url}"
+                           onerror="this.onerror=null;this.src='{_fallback}'"
+                           style="height:72px;object-fit:contain;border-radius:10px;
+                                  box-shadow:0 2px 12px rgba(0,0,0,.12)"
+                           alt="{_nom_courtier}"/>
+                      <div style="font-size:11px;color:#888;margin-top:5px">{_nom_courtier}</div>
+                    </div>""", unsafe_allow_html=True)
 
             if st.button("▶ Commencer la saisie BIA", type="primary",
                          use_container_width=True, key="pa_go"):
@@ -5901,7 +6271,11 @@ elif "Saisie BIA" in page:
             def save_bia(statut_ov=None):
                 ass = st.session_state.get("f_ass_meme", True)
                 _crt_n = st.session_state.get("f_courtier_nom", "").strip()
-                _num_bia = gen_bia(_crt_n) if (_crt_n and prod["code"] == "PA0") else gen_bia()
+                # Le prefixe vient du compte courtier connecte : chaque
+                # distributeur dispose ainsi de sa propre serie de numeros.
+                _pfx_n = user.get("prefixe_bia") if is_courtier(user) else None
+                _num_bia = (gen_bia(_crt_n, _pfx_n)
+                            if (_crt_n and prod["code"] == "PA0") else gen_bia())
                 st.session_state["_last_bia_num"] = _num_bia
                 data = {
                     "numero_bia":       _num_bia,
@@ -5995,16 +6369,28 @@ elif "Saisie BIA" in page:
                     st_sm = ParagraphStyle("Sm",fontName="Helvetica",fontSize=8,textColor=rl_colors.grey,alignment=TA_CENTER)
                     st_bf = ParagraphStyle("Bf",fontName="Helvetica-Bold",fontSize=9,textColor=C_N)
 
+                    # Logo à imprimer : celui du courtier connecté pour la
+                    # Prévoyance Auto, celui d'AFG pour les autres produits.
+                    _logo_impr = None
+                    if prod["code"] == "PA0" and is_courtier(user):
+                        _logo_impr = user.get("logo_b64")
+                    _logo_impr = _logo_impr or LOGO_B64
+
                     def _exemplaire(label):
                         items = []
-                        # Logo
                         try:
-                            _img = _RLImg(_io.BytesIO(_b64.b64decode(LOGO_B64)), width=3.5*cm, height=1.5*cm)
-                            _img.hAlign = "CENTER"; items.append(_img); items.append(Spacer(1,0.15*cm))
-                        except Exception: pass
+                            _img = _RLImg(_io.BytesIO(_b64.b64decode(_logo_impr)),
+                                          width=3.5*cm, height=1.5*cm)
+                            _img.hAlign = "CENTER"
+                            items.append(_img); items.append(Spacer(1,0.15*cm))
+                        except Exception:
+                            pass
                         # En-tête adapté au produit
+                        _ent_org = (user.get("raison_sociale")
+                                    if (prod["code"] == "PA0" and is_courtier(user))
+                                    else "AFG Assurances Bénin Vie")
                         h = Table([[Paragraph("BULLETIN INDIVIDUEL D'ADHÉSION",st_ti)],
-                                    [Paragraph(f"{prod['nom']} · AFG Assurances Bénin Vie",st_su)],
+                                    [Paragraph(f"{prod['nom']} · {_ent_org}",st_su)],
                                     [Paragraph(f"Exemplaire : {label}",st_su)]],
                                    colWidths=[17*cm])
                         h.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,-1),C_N),
