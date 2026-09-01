@@ -3546,16 +3546,30 @@ elif "Commerciaux" in page and "Partenaires" not in page:
                                    if _inte_ca else pd.NA)
 
             def _libelle_agent(r):
-                """Nom de l'agent si connu, sinon rattachement a son agence."""
+                """Compose le libelle d'un apporteur.
+
+                Format retenu : « AGENCE (code) - NOM APPORTEUR ».
+                L'agence en tete regroupe visuellement les agents d'un meme
+                bureau dans les listes triees ; le nom de l'apporteur reste
+                present dans la chaine, ce qui permet la recherche sur l'un
+                comme sur l'autre.
+                """
                 _cd = str(r["_AGENT"]).strip()
                 _na = r.get("_N_AGENT")
-                if pd.notna(_na) and str(_na).strip():
-                    return f"{str(_na).strip()} ({_cd})" if _cd else str(_na).strip()
                 _ag = r.get("_N_AGENCE")
-                if pd.notna(_ag) and str(_ag).strip():
-                    return (f"{str(_ag).strip()} · agent {_cd}" if _cd
-                            else f"{str(_ag).strip()} · sans code agent")
-                return f"Agent {_cd}" if _cd else "Apporteur non identifié"
+                _na = str(_na).strip() if pd.notna(_na) else ""
+                _ag = str(_ag).strip() if pd.notna(_ag) else ""
+
+                # Un nom d'apporteur identique au nom d'agence n'apporte rien
+                if _na and _ag and _na.upper() == _ag.upper():
+                    _na = ""
+
+                _tete = _ag or _na            # libelle principal
+                if not _tete:                 # aucun nom disponible
+                    return f"Apporteur {_cd}" if _cd else "Apporteur non identifié"
+
+                _base = f"{_tete} ({_cd})" if _cd else _tete
+                return f"{_base} - {_na}" if (_ag and _na) else _base
 
             df_com["_APPORTEUR"] = df_com.apply(_libelle_agent, axis=1)
             ag_k = "_APPORTEUR"
@@ -3986,8 +4000,11 @@ elif "Partenaires" in page:
             _ev_base["_NOM_PART"] = _ev_base["_CODE_STR"].map(_ref_nom)
             _ev_base["_NOM_PART"] = _ev_base["_NOM_PART"].fillna(
                 "Code " + _ev_base["_CODE_STR"].astype(str))
-            _ev_base["_LBL"] = (_ev_base["_NOM_PART"].astype(str).str[:26]
-                                + " (" + _ev_base["_CODE_STR"] + ")")
+            _nm_e = _ev_base["_NOM_PART"].fillna("").astype(str).str.strip()
+            _ev_base["_LBL"] = np.where(
+                _nm_e != "",
+                _nm_e.str[:30] + " (" + _ev_base["_CODE_STR"] + ")",
+                "Apporteur " + _ev_base["_CODE_STR"])
             # Restreindre aux partenaires financiers : code 3 chiffres, hors 100
             _mp = (_ev_base["_CODE_STR"].str.fullmatch(r"\d{3}", na=False)
                    & (_ev_base["_CODE_STR"] != "100"))
@@ -4109,9 +4126,12 @@ elif "Partenaires" in page:
                 with c1p:
                     # Libellé "NOM (CODE)" — jamais vide, jamais un index numérique
                     if _col_nom in dp.columns:
-                        dp["_LBL"] = (dp[_col_nom].fillna("").astype(str).str.strip()
-                                        .str[:24] + " (" + dp["_CODE_STR"].astype(str) + ")")
-                        dp["_LBL"] = dp["_LBL"].str.replace(r"^\s*\(", "Code (", regex=True)
+                        # Format « NOM (code) », identique a l'onglet Commerciaux
+                        _nm_p = dp[_col_nom].fillna("").astype(str).str.strip()
+                        dp["_LBL"] = np.where(
+                            _nm_p != "",
+                            _nm_p.str[:30] + " (" + dp["_CODE_STR"].astype(str) + ")",
+                            "Apporteur " + dp["_CODE_STR"].astype(str))
                     else:
                         dp["_LBL"] = "Code " + dp["_CODE_STR"].astype(str)
                     _par_lbl_col = "_LBL"
