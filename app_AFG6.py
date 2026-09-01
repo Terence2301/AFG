@@ -3364,34 +3364,45 @@ elif "Commerciaux" in page and "Partenaires" not in page:
                 st.markdown("**Taux de correspondance entre les paires de colonnes**")
                 _rec = []
                 for _cc in _cands_ca[:5]:
-                    _sc = set(ca[_cc].dropna().astype(str).str.strip()) - {""}
+                    # Brut : tel quel dans le fichier
+                    _sc_b = set(ca[_cc].dropna().astype(str).str.strip()) - {""}
+                    # Normalise : sans espaces (separateur de milliers a l'export)
+                    # et sans decimale parasite issue d'une lecture en flottant
+                    _sc_n = set(code_propre(ca[_cc]).replace("", pd.NA).dropna())
                     for _cp in _cands_pf[:5]:
-                        _sp = set(pf[_cp].dropna().astype(str).str.strip()) - {""}
-                        if not _sc or not _sp: continue
-                        _inter = _sc & _sp
-                        # Test complémentaire avec normalisation sur 3 puis 4 chiffres
-                        _sc3 = {v.zfill(3) for v in _sc}
-                        _sp3 = {v.zfill(3) for v in _sp}
-                        _sc4 = {v.zfill(4) for v in _sc}
-                        _sp4 = {v.zfill(4) for v in _sp}
+                        _sp_b = set(pf[_cp].dropna().astype(str).str.strip()) - {""}
+                        _sp_n = set(code_propre(pf[_cp]).replace("", pd.NA).dropna())
+                        if not _sc_n or not _sp_n: continue
+                        _i_b = _sc_b & _sp_b
+                        _i_n = _sc_n & _sp_n
+                        # Alignement sur longueur commune (3 ou 4 caracteres)
+                        _i_3 = {v.zfill(3) for v in _sc_n} & {v.zfill(3) for v in _sp_n}
+                        _i_4 = {v.zfill(4) for v in _sc_n} & {v.zfill(4) for v in _sp_n}
                         _rec.append([
                             f"CA.{_cc}", f"PF.{_cp}",
-                            nb_full(len(_sc)), nb_full(len(_sp)),
-                            nb_full(len(_inter)),
-                            f"{len(_inter)/max(len(_sc),1)*100:.1f} %",
-                            f"{len(_sc3 & _sp3)/max(len(_sc3),1)*100:.1f} %",
-                            f"{len(_sc4 & _sp4)/max(len(_sc4),1)*100:.1f} %"])
+                            nb_full(len(_sc_n)), nb_full(len(_sp_n)),
+                            nb_full(len(_i_n)),
+                            f"{len(_i_b)/max(len(_sc_b),1)*100:.1f} %",
+                            f"{len(_i_n)/max(len(_sc_n),1)*100:.1f} %",
+                            f"{len(_i_3)/max(len(_sc_n),1)*100:.1f} %",
+                            f"{len(_i_4)/max(len(_sc_n),1)*100:.1f} %"])
                 if _rec:
                     _dfr = pd.DataFrame(_rec, columns=[
                         "Colonne CA","Colonne PF","Codes CA","Codes PF",
-                        "Communs","Recouvrement","Sur 3 car.","Sur 4 car."])
-                    _dfr = _dfr.sort_values("Recouvrement", ascending=False)
+                        "Communs","Brut","Sans espaces","Sur 3 car.","Sur 4 car."])
+                    _dfr["_tri"] = (_dfr["Sans espaces"].str.rstrip(" %")
+                                        .astype(float))
+                    _dfr = _dfr.sort_values("_tri", ascending=False).drop(columns="_tri")
                     st.dataframe(_dfr, use_container_width=True, hide_index=True)
                     _best = _dfr.iloc[0]
                     st.info(f"Meilleure correspondance : **{_best['Colonne CA']}** "
                             f"vers **{_best['Colonne PF']}** — "
-                            f"{_best['Recouvrement']} des codes du CA trouvent "
-                            f"leur nom dans le Portefeuille.")
+                            f"{_best['Sans espaces']} des codes du CA trouvent leur "
+                            f"nom après suppression des espaces "
+                            f"(contre {_best['Brut']} sans normalisation).")
+                    st.caption("La colonne « Brut » mesure le recouvrement tel quel. "
+                               "« Sans espaces » retire le séparateur de milliers "
+                               "introduit à l'export : c'est la mesure de référence.")
 
             # Codes du CA restés sans nom
             _cc0 = next((c for c in ["CODEAPPO","CODE_APPO","CODEAPP","CODEINTE"]
@@ -3402,10 +3413,8 @@ elif "Commerciaux" in page and "Partenaires" not in page:
                 _np0 = next((c for c in ["NOM_APP","NOM_APPORT","NOM_APPO"]
                              if c in pf.columns), None)
                 if _cp0 and _np0:
-                    _known = set(pf.loc[pf[_np0].notna(), _cp0]
-                                   .astype(str).str.strip())
-                    _all_ca = (ca[_cc0].dropna().astype(str).str.strip()
-                                 .value_counts())
+                    _known = set(code_propre(pf.loc[pf[_np0].notna(), _cp0])) - {""}
+                    _all_ca = code_propre(ca[_cc0]).replace("", pd.NA).dropna().value_counts()
                     _orph = _all_ca[~_all_ca.index.isin(_known)]
                     _cak0 = "CHIFAFFA" if "CHIFAFFA" in ca.columns else None
                     st.markdown("**Codes du CA sans nom dans le Portefeuille**")
@@ -3414,7 +3423,7 @@ elif "Commerciaux" in page and "Partenaires" not in page:
                     else:
                         _lig = []
                         for _cd, _nq in _orph.head(20).items():
-                            _mt = (float(ca.loc[ca[_cc0].astype(str).str.strip()==_cd,
+                            _mt = (float(ca.loc[code_propre(ca[_cc0]) == _cd,
                                                 _cak0].sum()) if _cak0 else 0)
                             _lig.append([_cd, nb_full(_nq), fmt_full(_mt,"")])
                         st.dataframe(pd.DataFrame(_lig, columns=[
@@ -3481,16 +3490,25 @@ elif "Commerciaux" in page and "Partenaires" not in page:
                     for _c, _n in zip(_ta[_code_ca].astype(str).str.strip(),
                                       _ta[_cn].astype(str).str.strip()):
                         _ref_agent.setdefault(_c, _n)
+            # Jointure CODEAPPO du Portefeuille. Les codes y sont exportes
+            # avec un separateur de milliers (« 2 745 ») : sans normalisation
+            # le recouvrement tombe a 1 %, avec elle il devient exploitable.
             if pf is not None:
-                _apf = next((c for c in ["CODEAPPO","CODE_APPO"] if c in pf.columns), None)
-                _anp = next((c for c in ["NOM_APP","NOM_APPORT"] if c in pf.columns), None)
+                _apf = next((c for c in ["CODEAPPO","CODE_APPO","CODEAPP"]
+                             if c in pf.columns), None)
+                _anp = next((c for c in ["NOM_APP","NOM_APPORT","NOM_APPO"]
+                             if c in pf.columns), None)
                 if _apf and _anp:
                     _tb = pf[[_apf, _anp]].dropna()
                     _tb = _tb[_tb[_anp].astype(str).str.strip() != ""]
-                    for _c, _n in zip(_tb[_apf].astype(str).str.strip()
-                                          .str.replace(r"\s+", "", regex=True),
-                                      _tb[_anp].astype(str).str.strip()):
-                        _ref_agent.setdefault(_c, _n)
+                    _cb = code_propre(_tb[_apf])
+                    for _c, _n in zip(_cb, _tb[_anp].astype(str).str.strip()):
+                        if _c:
+                            _ref_agent.setdefault(_c, _n)
+                            # Variante alignee sur 4 caracteres : le CA code
+                            # ses agents sur 4 chiffres, le Portefeuille peut
+                            # omettre un zero initial.
+                            _ref_agent.setdefault(_c.zfill(4), _n)
 
         if _code_ca is not None:
             df_com = df_com.copy()
@@ -3513,7 +3531,16 @@ elif "Commerciaux" in page and "Partenaires" not in page:
             df_com["_AGENT"]  = _code_propre(df_com[_code_ca])
             df_com["_AGENCE"] = (_code_propre(df_com[_inte_ca])
                                  if _inte_ca else "")
-            df_com["_N_AGENT"]  = df_com["_AGENT"].map(_ref_agent)
+            # Recherche du nom : code tel quel, puis aligne sur 4 caracteres
+            df_com["_N_AGENT"] = df_com["_AGENT"].map(_ref_agent)
+            _manq = df_com["_N_AGENT"].isna() & (df_com["_AGENT"] != "")
+            if _manq.any():
+                df_com.loc[_manq, "_N_AGENT"] = (
+                    df_com.loc[_manq, "_AGENT"].str.zfill(4).map(_ref_agent))
+            _manq = df_com["_N_AGENT"].isna() & (df_com["_AGENT"] != "")
+            if _manq.any():
+                df_com.loc[_manq, "_N_AGENT"] = (
+                    df_com.loc[_manq, "_AGENT"].str.lstrip("0").map(_ref_agent))
             df_com["_N_AGENCE"] = df_com["_AGENCE"].map(_ref_agence)
 
             def _libelle_agent(r):
