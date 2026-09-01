@@ -575,6 +575,61 @@ def code_propre(serie):
     return _s.mask(_s.str.lower().isin(_CODES_VIDES), "")
 
 
+def variantes_code(code: str):
+    """Retourne les ecritures possibles d'un meme code.
+
+    Les deux bases ne codent pas les apporteurs de facon identique :
+    zeros de tete presents ou non, longueur sur 3 ou 4 caracteres.
+    Enregistrer toutes les variantes evite les echecs de jointure.
+    """
+    _c = str(code).strip()
+    if not _c:
+        return []
+    _v = {_c, _c.lstrip("0") or _c, _c.zfill(3), _c.zfill(4), _c.zfill(5)}
+    return [x for x in _v if x]
+
+
+def construire_referentiel(sources) -> dict:
+    """Construit un dictionnaire code -> nom a partir de plusieurs sources.
+
+    `sources` est une liste de triplets (dataframe, colonne_code,
+    liste_colonnes_nom), traitee dans l'ordre : la premiere source qui
+    fournit un nom pour un code l'emporte. Chaque code est indexe sous
+    toutes ses ecritures possibles pour absorber les differences de
+    formatage entre les bases.
+    """
+    _ref = {}
+    for _df, _col_code, _cols_nom in sources:
+        if _df is None or _col_code not in _df.columns:
+            continue
+        for _cn in _cols_nom:
+            if _cn not in _df.columns:
+                continue
+            _t = _df[[_col_code, _cn]].copy()
+            _t["_K"] = code_propre(_t[_col_code])
+            _t["_V"] = _t[_cn].fillna("").astype(str).str.strip()
+            _t = _t[(_t["_K"] != "") & (_t["_V"] != "")]
+            _t = _t[~_t["_V"].str.lower().isin(_CODES_VIDES)]
+            for _k, _v in zip(_t["_K"], _t["_V"]):
+                for _var in variantes_code(_k):
+                    _ref.setdefault(_var, _v)
+    return _ref
+
+
+def chercher_nom(serie_codes, referentiel: dict):
+    """Resout un nom pour chaque code, en testant toutes ses variantes."""
+    _c = code_propre(serie_codes)
+    _r = _c.map(referentiel)
+    for _tr in (lambda s: s.str.zfill(4),
+                lambda s: s.str.zfill(3),
+                lambda s: s.str.lstrip("0")):
+        _m = _r.isna() & (_c != "")
+        if not _m.any():
+            break
+        _r.loc[_m] = _tr(_c[_m]).map(referentiel)
+    return _r
+
+
 def normaliser_nature(serie):
     """Regroupe les variantes de deces sous un libelle unique.
 
@@ -3451,128 +3506,106 @@ elif "Commerciaux" in page and "Partenaires" not in page:
         _inte_ca = next((c for c in ["CODEINTE","CODE_INTER","CODEINTER"]
                          if c in df_com.columns), None)
 
-        # 1. Referentiel agence : CODEINTE -> nom, construit sur les bases completes
-        _ref_agence = {}
-        if pf is not None:
-            _ipf = next((c for c in ["CODEINTE_P","CODEINTE","CODE_INTER"]
-                         if c in pf.columns), None)
-            _npf = next((c for c in ["NOM_APP","NOM_APPORT","NOM_APPO",
-                                     "NOM_INTERMEDIAIRE"] if c in pf.columns), None)
-            if _ipf and _npf:
-                _tp = pf[[_ipf, _npf]].dropna()
-                _tp = _tp[_tp[_npf].astype(str).str.strip() != ""]
-                for _c, _n in zip(_tp[_ipf].astype(str).str.strip(),
-                                  _tp[_npf].astype(str).str.strip()):
-                    _ref_agence.setdefault(_c, _n)
-        _ica = next((c for c in ["CODEINTE","CODE_INTER","CODEINTER"]
-                     if c in ca.columns), None)
-        # Seul NOM_INTERMEDIAIRE nomme une agence. NOM_APPORT designe une
-        # personne physique : l'employer ici ferait porter le nom du premier
-        # agent rencontre a tous ses collegues de la meme agence.
-        _nca = next((c for c in ["NOM_INTERMEDIAIRE"] if c in ca.columns), None)
-        if _ica and _nca:
-            _tc = ca[[_ica, _nca]].dropna()
-            _tc = _tc[_tc[_nca].astype(str).str.strip() != ""]
-            for _c, _n in zip(_tc[_ica].astype(str).str.strip(),
-                              _tc[_nca].astype(str).str.strip()):
-                _ref_agence.setdefault(_c, _n)
+        # ── Referentiels de noms ─────────────────────────────────────────────
+        # Un seul constructeur, une seule normalisation. Chaque code est
+        # indexe sous toutes ses ecritures (avec ou sans zeros de tete,
+        # sur 3, 4 ou 5 caracteres), ce qui absorbe les differences de
+        # formatage entre les exports Megasoft.
 
-        # 2. Referentiel agent : CODEAPPO -> nom, si un nom d'agent existe
-        _ref_agent = {}
-        if _code_ca:
-            # RAISOCIN d'abord : raison sociale de l'organisme apporteur.
-            # Puis les noms de personnes, en dernier recours.
-            for _cn in ["RAISOCIN","RAISOC","RAISON_SOCIALE",
-                        "NOM_APPORT","NOM_APPO","NOM_COMMERCIAL","NOM_AGENT"]:
-                if _cn in ca.columns:
-                    _ta = ca[[_code_ca, _cn]].dropna()
-                    _ta = _ta[_ta[_cn].astype(str).str.strip() != ""]
-                    for _c, _n in zip(_ta[_code_ca].astype(str).str.strip(),
-                                      _ta[_cn].astype(str).str.strip()):
-                        _ref_agent.setdefault(_c, _n)
-            # Jointure CODEAPPO du Portefeuille. Les codes y sont exportes
-            # avec un separateur de milliers (« 2 745 ») : sans normalisation
-            # le recouvrement tombe a 1 %, avec elle il devient exploitable.
-            if pf is not None:
-                _apf = next((c for c in ["CODEAPPO","CODE_APPO","CODEAPP"]
-                             if c in pf.columns), None)
-                _anp = next((c for c in ["NOM_APP","NOM_APPORT","NOM_APPO"]
-                             if c in pf.columns), None)
-                if _apf and _anp:
-                    _tb = pf[[_apf, _anp]].dropna()
-                    _tb = _tb[_tb[_anp].astype(str).str.strip() != ""]
-                    _cb = code_propre(_tb[_apf])
-                    for _c, _n in zip(_cb, _tb[_anp].astype(str).str.strip()):
-                        if _c:
-                            _ref_agent.setdefault(_c, _n)
-                            # Variante alignee sur 4 caracteres : le CA code
-                            # ses agents sur 4 chiffres, le Portefeuille peut
-                            # omettre un zero initial.
-                            _ref_agent.setdefault(_c.zfill(4), _n)
+        # Agence : le nom vient de NOM_INTERMEDIAIRE (CA) ou NOM_APP (PF).
+        # NOM_APPORT est exclu ici : il porte des noms de personnes, et
+        # l'associer au code agence ferait porter le nom du premier agent
+        # rencontre a tous ses collegues.
+        _ref_agence = construire_referentiel([
+            (ca, _inte_ca, ["NOM_INTERMEDIAIRE"]),
+            (pf, next((c for c in ["CODEINTE_P","CODEINTE","CODE_INTER"]
+                       if pf is not None and c in pf.columns), None),
+                 ["NOM_APP","NOM_INTERMEDIAIRE"]),
+        ])
+
+        # Agent : la raison sociale prime, puis les noms de personnes,
+        # puis le referentiel du Portefeuille.
+        _ref_agent = construire_referentiel([
+            (ca, _code_ca, ["RAISOCIN","RAISOC","RAISON_SOCIALE",
+                            "NOM_APPORT","NOM_APPO","NOM_COMMERCIAL","NOM_AGENT"]),
+            (pf, next((c for c in ["CODEAPPO","CODE_APPO","CODEAPP"]
+                       if pf is not None and c in pf.columns), None),
+                 ["NOM_APP","NOM_APPORT","NOM_APPO"]),
+            # Dernier recours : le code agent peut correspondre a un code
+            # intermediaire dans certaines saisies anciennes.
+            (ca, _code_ca, ["NOM_INTERMEDIAIRE"]),
+        ])
 
         if _code_ca is not None:
             df_com = df_com.copy()
-            # Les valeurs manquantes deviennent la chaine « nan » apres astype(str) :
-            # on les neutralise explicitement pour eviter des libelles parasites.
-            _VIDES = {"", "nan", "none", "null", "<na>", "nat"}
-
-            def _code_propre(serie):
-                """Normalise une colonne de code en chaine, vide si absente.
-
-                astype(str) laisse les NaN sous forme de flottant : on les
-                remplace d'abord par une chaine vide, sinon le masque suivant
-                ne les capte pas et produit des libelles « agent nan ».
-                """
-                _s = serie.fillna("").astype(str).str.strip()
-                # Un code numerique lu en flottant s'ecrit « 2016.0 »
-                _s = _s.str.replace(r"\.0+$", "", regex=True)
-                return _s.mask(_s.str.lower().isin(_VIDES), "")
-
-            df_com["_AGENT"]  = _code_propre(df_com[_code_ca])
-            df_com["_AGENCE"] = (_code_propre(df_com[_inte_ca])
+            df_com["_AGENT"]  = code_propre(df_com[_code_ca])
+            df_com["_AGENCE"] = (code_propre(df_com[_inte_ca])
                                  if _inte_ca else "")
-            # Recherche du nom : code tel quel, puis aligne sur 4 caracteres
-            df_com["_N_AGENT"] = df_com["_AGENT"].map(_ref_agent)
-            _manq = df_com["_N_AGENT"].isna() & (df_com["_AGENT"] != "")
-            if _manq.any():
-                df_com.loc[_manq, "_N_AGENT"] = (
-                    df_com.loc[_manq, "_AGENT"].str.zfill(4).map(_ref_agent))
-            _manq = df_com["_N_AGENT"].isna() & (df_com["_AGENT"] != "")
-            if _manq.any():
-                df_com.loc[_manq, "_N_AGENT"] = (
-                    df_com.loc[_manq, "_AGENT"].str.lstrip("0").map(_ref_agent))
-            df_com["_N_AGENCE"] = df_com["_AGENCE"].map(_ref_agence)
+            df_com["_N_AGENT"]  = chercher_nom(df_com[_code_ca], _ref_agent)
+            df_com["_N_AGENCE"] = (chercher_nom(df_com[_inte_ca], _ref_agence)
+                                   if _inte_ca else pd.NA)
 
             def _libelle_agent(r):
                 """Nom de l'agent si connu, sinon rattachement a son agence."""
                 _cd = str(r["_AGENT"]).strip()
-                if _cd == "":
-                    _ag = r.get("_N_AGENCE")
-                    return (f"{_ag} · sans code agent"
-                            if pd.notna(_ag) and str(_ag).strip()
-                            else "Apporteur non identifié")
                 _na = r.get("_N_AGENT")
                 if pd.notna(_na) and str(_na).strip():
-                    return f"{str(_na).strip()} ({_cd})"
+                    return f"{str(_na).strip()} ({_cd})" if _cd else str(_na).strip()
                 _ag = r.get("_N_AGENCE")
                 if pd.notna(_ag) and str(_ag).strip():
-                    return f"{str(_ag).strip()} · agent {_cd}"
-                return f"Agent {_cd}"
+                    return (f"{str(_ag).strip()} · agent {_cd}" if _cd
+                            else f"{str(_ag).strip()} · sans code agent")
+                return f"Agent {_cd}" if _cd else "Apporteur non identifié"
 
             df_com["_APPORTEUR"] = df_com.apply(_libelle_agent, axis=1)
             ag_k = "_APPORTEUR"
 
-            # Taux de resolution affiche sous les indicateurs
-            _n_tot_ag = df_com["_AGENT"].nunique()
-            _n_res_ag = df_com.loc[
-                df_com["_N_AGENT"].notna() | df_com["_N_AGENCE"].notna(),
-                "_AGENT"].nunique()
-            _tx_res = _n_res_ag / max(_n_tot_ag, 1) * 100
+            # ── Couverture de la resolution des noms ─────────────────────
+            _cak_cv  = "CHIFAFFA" if "CHIFAFFA" in df_com.columns else "MONTENCA"
+            _n_tot   = df_com["_AGENT"].nunique()
+            _m_nom   = df_com["_N_AGENT"].notna()
+            _m_ag    = df_com["_N_AGENT"].isna() & df_com["_N_AGENCE"].notna()
+            _m_rien  = df_com["_N_AGENT"].isna() & df_com["_N_AGENCE"].isna()
+            _n_nom   = df_com.loc[_m_nom,  "_AGENT"].nunique()
+            _n_ag    = df_com.loc[_m_ag,   "_AGENT"].nunique()
+            _n_rien  = df_com.loc[_m_rien, "_AGENT"].nunique()
+            _ca_tot  = float(df_com[_cak_cv].fillna(0).sum())
+            _ca_rien = float(df_com.loc[_m_rien, _cak_cv].fillna(0).sum())
+            _tx      = (_n_nom + _n_ag) / max(_n_tot, 1) * 100
+
+            _coul = GREEN if _tx >= 90 else (AMBER if _tx >= 70 else RED)
             st.markdown(
-                f"<div style='font-size:11px;color:#667;margin:-4px 0 10px'>"
-                f"<b>{nb_full(_n_tot_ag)}</b> agents commerciaux sur la période · "
-                f"<b>{nb_full(_n_res_ag)}</b> rattachés à une agence identifiée "
-                f"({_tx_res:.1f} %)</div>", unsafe_allow_html=True)
+                f"<div style='font-size:11px;color:#667;margin:-4px 0 6px'>"
+                f"<b>{nb_full(_n_tot)}</b> apporteurs sur la période · "
+                f"<b style='color:{_coul}'>{_tx:.1f} %</b> identifiés "
+                f"({nb_full(_n_nom)} nommés, {nb_full(_n_ag)} rattachés "
+                f"à leur agence)"
+                + (f" · <b>{nb_full(_n_rien)}</b> sans nom pour "
+                   f"{fmt_full(_ca_rien)} "
+                   f"({_ca_rien/max(_ca_tot,1)*100:.1f} % du CA)"
+                   if _n_rien else "")
+                + "</div>", unsafe_allow_html=True)
+
+            # Detail des apporteurs non resolus, pour action correctrice
+            if _n_rien:
+                with st.expander(f"Apporteurs sans nom ({nb_full(_n_rien)})"):
+                    st.caption("Ces codes n'apparaissent ni dans RAISOCIN, ni "
+                               "dans NOM_APPORT, ni dans le Portefeuille. "
+                               "Les renseigner dans Megasoft les fera "
+                               "apparaître nominativement.")
+                    _orph = (df_com[_m_rien].groupby("_AGENT")
+                                .agg(CA=(_cak_cv,"sum"), Quittances=(_cak_cv,"count"))
+                                .reset_index().sort_values("CA", ascending=False))
+                    _orph_d = pd.DataFrame({
+                        "Code agent":  _orph["_AGENT"],
+                        "CA (FCFA)":   _orph["CA"].apply(lambda x: fmt_full(x,"")),
+                        "Quittances":  _orph["Quittances"].apply(nb_full),
+                        "Part du CA":  (_orph["CA"]/max(_ca_tot,1)*100)
+                                        .apply(lambda x: f"{x:.2f} %")})
+                    st.dataframe(_orph_d, use_container_width=True, hide_index=True)
+                    st.download_button("📥 Export des codes sans nom",
+                        dl_csv(_orph), "apporteurs_sans_nom.csv", "text/csv",
+                        use_container_width=True, key="dl_orph_com")
         else:
             # Repli : colonnes nom presentes directement dans le CA
             ag_k = next((c for c in ["NOM_APPORT","NOM_APPO","NOM_INTERMEDIAIRE","NOM_APP"]
@@ -3761,8 +3794,16 @@ elif "Partenaires" in page:
         # La colonne nom du CA est vide sur certains exercices (ex. 2025) ; on la
         # complète systématiquement par une table de correspondance code -> nom
         # construite sur l'INTÉGRALITÉ du Portefeuille et de la base CA.
-        _ref_nom = {}
+        # Referentiel unifie : toutes les sources, toutes les variantes de code
+        _ref_nom = construire_referentiel([
+            (ca, _col_code, ["RAISOCIN","RAISOC","RAISON_SOCIALE",
+                             "NOM_INTERMEDIAIRE","NOM_APPORT","NOM_APPO"]),
+            (pf, next((c for c in ["CODEINTE_P","CODEINTE","CODEAPPO","CODE_APPO"]
+                       if pf is not None and c in pf.columns), None),
+                 ["NOM_APP","NOM_APPORT","NOM_APPO","NOM_INTERMEDIAIRE"]),
+        ])
 
+        # Sources historiques conservees en complement
         # 1) Depuis le Portefeuille (source de référence)
         if pf is not None:
             _cpf = next((c for c in ["CODEINTE_P","CODEINTE","CODEAPPO","CODE_APPO"]
