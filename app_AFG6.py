@@ -3544,6 +3544,28 @@ elif "Commerciaux" in page and "Partenaires" not in page:
             df_com["_AGENCE"] = (code_propre(df_com[_inte_ca])
                                  if _inte_ca else "")
             df_com["_N_AGENT"]  = chercher_nom(df_com[_code_ca], _ref_agent)
+
+            # Repli par police : lorsque le code apporteur ne correspond a
+            # rien, le numero de police relie les deux bases et permet de
+            # retrouver l'apporteur enregistre a la souscription.
+            _m_sans = df_com["_N_AGENT"].isna()
+            if _m_sans.any() and pf is not None:
+                _pol_ca = next((c for c in ["NUMEPOLI","POLICE_KEY","NUMEPOLI_P"]
+                                if c in df_com.columns), None)
+                _pol_pf = next((c for c in ["NUMEPOLI_P","NUMEPOLI","POLICE_KEY"]
+                                if c in pf.columns), None)
+                _nom_pf = next((c for c in ["NOM_APP","NOM_APPORT","NOM_APPO"]
+                                if c in pf.columns), None)
+                if _pol_ca and _pol_pf and _nom_pf:
+                    _tp2 = pf[[_pol_pf, _nom_pf]].dropna()
+                    _tp2 = _tp2[_tp2[_nom_pf].astype(str).str.strip() != ""]
+                    _map_pol = dict(zip(
+                        _tp2[_pol_pf].astype(str).str.strip(),
+                        _tp2[_nom_pf].astype(str).str.strip()))
+                    if _map_pol:
+                        df_com.loc[_m_sans, "_N_AGENT"] = (
+                            df_com.loc[_m_sans, _pol_ca]
+                                  .astype(str).str.strip().map(_map_pol))
             df_com["_N_AGENCE"] = (chercher_nom(df_com[_inte_ca], _ref_agence)
                                    if _inte_ca else pd.NA)
 
@@ -3562,10 +3584,11 @@ elif "Commerciaux" in page and "Partenaires" not in page:
                 _na = str(_na).strip() if pd.notna(_na) else ""
                 _ag = str(_ag).strip() if pd.notna(_ag) else ""
 
-                # Un nom d'agence remonte comme nom d'agent n'apporte rien
-                # et peut meme contredire le rattachement reel.
-                if _na and (est_reseau_interne(_na)
-                            or (_ag and _na.upper() == _ag.upper())):
+                # Un nom d'agence remonte comme nom d'agent est ecarte, mais
+                # seulement si une agence est deja identifiee : sinon on
+                # perdrait la seule information disponible.
+                if _na and _ag and (est_reseau_interne(_na)
+                                    or _na.upper() == _ag.upper()):
                     _na = ""
 
                 _tete = _ag or _na            # libelle principal
@@ -3633,13 +3656,111 @@ elif "Commerciaux" in page and "Partenaires" not in page:
                       "ni CODEAPPO dans la base CA, ni colonne nom apporteur.","danger")
                 st.stop()
 
+        # ── Controle : la colonne des noms est-elle presente ? ────────────────
+        # Les bases enregistrees avant l'ajout de NOM_APPORT dans CA_COLS ne
+        # contiennent pas cette colonne : il faut les recharger pour que les
+        # noms d'apporteurs apparaissent.
+        _cols_nom_ca = [c for c in ["NOM_APPORT","NOM_APPO","RAISOCIN",
+                                    "NOM_COMMERCIAL","NOM_AGENT"]
+                        if c in ca.columns]
+        if not _cols_nom_ca:
+            st.warning(
+                "La base CA chargée ne contient aucune colonne de nom "
+                "d'apporteur (NOM_APPORT, RAISOCIN). Seules l'agence et le "
+                "code sont affichés. **Rechargez la base CA depuis le fichier "
+                "source** pour faire apparaître les noms : la version "
+                "enregistrée date d'avant leur prise en compte.")
+        else:
+            _vides = sum(ca[c].isna().all() for c in _cols_nom_ca)
+            if _vides == len(_cols_nom_ca):
+                st.warning(
+                    f"Les colonnes de noms ({', '.join(_cols_nom_ca)}) sont "
+                    "présentes mais entièrement vides sur cette base.")
+
+        # ── Diagnostic de la resolution des noms ─────────────────────────────
+        with st.expander("Origine des noms d'apporteurs", expanded=False):
+            _lig_src = []
+            # Sources cote CA
+            for _c in ["RAISOCIN","RAISOC","NOM_APPORT","NOM_APPO",
+                       "NOM_COMMERCIAL","NOM_AGENT"]:
+                if _c in ca.columns:
+                    _nn = int(ca[_c].notna().sum())
+                    _lig_src.append(["Base CA", _c, nb_full(_nn),
+                                     f"{_nn/max(len(ca),1)*100:.1f} %",
+                                     " · ".join(ca[_c].dropna().astype(str)
+                                                  .head(2).tolist())[:52] or "—"])
+            # Sources cote Portefeuille
+            if pf is not None:
+                for _c in ["NOM_APP","NOM_APPORT","NOM_APPO","NOM_INTERMEDIAIRE"]:
+                    if _c in pf.columns:
+                        _nn = int(pf[_c].notna().sum())
+                        _lig_src.append(["Portefeuille", _c, nb_full(_nn),
+                                         f"{_nn/max(len(pf),1)*100:.1f} %",
+                                         " · ".join(pf[_c].dropna().astype(str)
+                                                      .head(2).tolist())[:52] or "—"])
+            if _lig_src:
+                st.dataframe(pd.DataFrame(_lig_src, columns=[
+                    "Base","Colonne","Valeurs renseignées","Taux","Exemples"]),
+                    use_container_width=True, hide_index=True)
+            else:
+                st.warning("Aucune colonne de nom d'apporteur dans les bases chargées.")
+
+            # Efficacite de la jointure CODEAPPO entre les deux bases
+            _cp_pf = next((c for c in ["CODEAPPO","CODE_APPO","CODEAPP"]
+                           if pf is not None and c in pf.columns), None)
+            _np_pf = next((c for c in ["NOM_APP","NOM_APPORT","NOM_APPO"]
+                           if pf is not None and c in pf.columns), None)
+            if _code_ca and _cp_pf and _np_pf:
+                _k_ca = set(code_propre(ca[_code_ca])) - {""}
+                _k_pf = set(code_propre(pf.loc[pf[_np_pf].notna(), _cp_pf])) - {""}
+                _com  = _k_ca & _k_pf
+                _tx_j = len(_com)/max(len(_k_ca),1)*100
+                _c_j  = GREEN if _tx_j >= 70 else (AMBER if _tx_j >= 30 else RED)
+                st.markdown(
+                    f"<div style='font-size:12px;margin-top:8px'>"
+                    f"Jointure <b>CA.{_code_ca}</b> vers <b>PF.{_cp_pf}</b> : "
+                    f"<b style='color:{_c_j}'>{_tx_j:.1f} %</b> "
+                    f"({nb_full(len(_com))} codes communs sur "
+                    f"{nb_full(len(_k_ca))} dans le CA)</div>",
+                    unsafe_allow_html=True)
+                if _tx_j < 30:
+                    st.caption(
+                        "Le faible recouvrement indique que les deux bases "
+                        "n'emploient pas la même codification des apporteurs. "
+                        "Les noms proviendront alors surtout de la base CA.")
+
+        # ── Colonnes d'identification separees ───────────────────────────────
+        # Le libelle composite sert au groupement et aux graphiques ; le code,
+        # l'agence et le nom de l'apporteur restent disponibles en colonnes
+        # distinctes pour le tableau, le tri et la recherche.
+        if "_AGENT" not in df_com.columns:
+            df_com["_AGENT"] = ""
+        if "_N_AGENCE" not in df_com.columns:
+            df_com["_N_AGENCE"] = pd.NA
+        if "_N_AGENT" not in df_com.columns:
+            df_com["_N_AGENT"] = pd.NA
+
+        df_com["_C_CODE"]  = df_com["_AGENT"].fillna("").astype(str)
+        df_com["_C_AGENCE"] = (df_com["_N_AGENCE"].fillna("")
+                                 .astype(str).str.strip()
+                                 .replace("", "Non rattaché"))
+        df_com["_C_NOM"]   = (df_com["_N_AGENT"].fillna("")
+                                .astype(str).str.strip()
+                                .replace("", "Non renseigné"))
+
         # Agrégation commerciale complète
         _agg_com = {"CA":("CHIFAFFA","sum"), "NbQ":("CHIFAFFA","count")}
         if "COMMAPPO" in df_com.columns:  _agg_com["Comm"]     = ("COMMAPPO","sum")
         else:                             _agg_com["Comm"]     = ("CHIFAFFA","count")
         if "POLICE_KEY" in df_com.columns: _agg_com["NbPolices"] = ("POLICE_KEY","nunique")
         else:                              _agg_com["NbPolices"] = ("CHIFAFFA","count")
-        grp = (df_com.groupby(ag_k, dropna=False).agg(**_agg_com)
+
+        _cles_grp = [ag_k]
+        for _c_sup in ["_C_CODE","_C_AGENCE","_C_NOM"]:
+            if _c_sup in df_com.columns and _c_sup != ag_k:
+                _cles_grp.append(_c_sup)
+
+        grp = (df_com.groupby(_cles_grp, dropna=False).agg(**_agg_com)
                      .reset_index().sort_values("CA",ascending=False).reset_index(drop=True))
         grp[ag_k] = grp[ag_k].fillna("Non renseigné").astype(str)
         grp.index += 1
@@ -3678,22 +3799,61 @@ elif "Commerciaux" in page and "Partenaires" not in page:
             "🏆 Classement complet","📊 Pareto CA","📈 Statistiques détaillées","🔍 Données par date"])
 
         with t_cl:
-            # Recherche
-            srch_com = st.text_input("🔍 Rechercher un commercial",
-                label_visibility="collapsed", placeholder="Nom…", key="srch_com")
+            # Recherche sur toutes les colonnes d'identification
+            srch_com = st.text_input(
+                "🔍 Rechercher un commercial",
+                label_visibility="collapsed",
+                placeholder="Nom de l'apporteur, agence ou code…", key="srch_com")
             df_show = grp.copy()
             if srch_com:
-                df_show = df_show[df_show[ag_k].str.lower().str.contains(srch_com.lower(),na=False)]
-            df_disp = df_show.copy()
-            df_disp["CA"]        = df_disp["CA"].apply(fmt)
-            df_disp["Comm"]      = df_disp["Comm"].apply(fmt)
-            df_disp["Ticket moy"]= df_disp["Ticket moy"].apply(fmt)
-            df_disp["Part %"]    = df_disp["Part %"].apply(lambda x:f"{x:.2f}%")
-            df_disp["Part cum %"]= df_disp["Part cum %"].apply(lambda x:f"{x:.1f}%")
-            df_disp["Tx comm %"] = df_disp["Tx comm %"].apply(lambda x:f"{x:.2f}%")
-            df_disp.columns = [ag_k,"CA","Nb quittances","Commissions","Nb polices uniques",
-                               "Part CA","Part cumulée","Tx commission","Ticket moyen"]
-            st.dataframe(df_disp, use_container_width=True, height=480)
+                _q = srch_com.lower()
+                _m = pd.Series(False, index=df_show.index)
+                for _c in [ag_k, "_C_CODE", "_C_AGENCE", "_C_NOM"]:
+                    if _c in df_show.columns:
+                        _m |= df_show[_c].astype(str).str.lower().str.contains(
+                            _q, na=False, regex=False)
+                df_show = df_show[_m]
+
+            # Colonnes d'identification en tete, indicateurs ensuite
+            _ordre, _titres = [], []
+            for _c, _t in [("_C_CODE", "Code"), ("_C_AGENCE", "Agence"),
+                           ("_C_NOM", "Nom de l'apporteur")]:
+                if _c in df_show.columns:
+                    _ordre.append(_c); _titres.append(_t)
+            if not _ordre:                       # repli si pas de colonnes separees
+                _ordre, _titres = [ag_k], ["Apporteur"]
+
+            for _c, _t in [("CA","CA (FCFA)"), ("NbQ","Nb quittances"),
+                           ("Comm","Commissions (FCFA)"),
+                           ("NbPolices","Nb polices"), ("Part %","Part CA"),
+                           ("Part cum %","Part cumulée"),
+                           ("Tx comm %","Tx commission"),
+                           ("Ticket moy","Ticket moyen")]:
+                if _c in df_show.columns:
+                    _ordre.append(_c); _titres.append(_t)
+
+            df_disp = df_show[_ordre].copy()
+            for _c in ["CA","Comm","Ticket moy"]:
+                if _c in df_disp.columns:
+                    df_disp[_c] = df_disp[_c].apply(lambda x: fmt_full(x, ""))
+            for _c in ["NbQ","NbPolices"]:
+                if _c in df_disp.columns:
+                    df_disp[_c] = df_disp[_c].apply(nb_full)
+            if "Part %"     in df_disp.columns:
+                df_disp["Part %"]     = df_disp["Part %"].apply(lambda x: f"{x:.2f} %")
+            if "Part cum %" in df_disp.columns:
+                df_disp["Part cum %"] = df_disp["Part cum %"].apply(lambda x: f"{x:.1f} %")
+            if "Tx comm %"  in df_disp.columns:
+                df_disp["Tx comm %"]  = df_disp["Tx comm %"].apply(
+                    lambda x: "—" if pd.isna(x) else f"{x:.2f} %")
+            df_disp.columns = _titres
+
+            st.markdown(f"<div style='font-size:11px;color:#667;margin-bottom:4px'>"
+                        f"<b>{nb_full(len(df_show))}</b> apporteur(s) affiché(s)"
+                        + (f" sur {nb_full(len(grp))}" if srch_com else "")
+                        + "</div>", unsafe_allow_html=True)
+            st.dataframe(df_disp, use_container_width=True, height=480,
+                         hide_index=True)
             a,b = st.columns(2)
             a.download_button("📥 CSV",dl_csv(grp),"commerciaux.csv","text/csv",use_container_width=True,key="dl_com_csv")
             b.download_button("📥 Excel",dl_xlsx(grp),"commerciaux.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_com_xl")
