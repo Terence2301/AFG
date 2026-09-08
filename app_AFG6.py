@@ -1003,6 +1003,25 @@ _DDL_DATA_SQ = _DDL_DATA.replace("BYTEA", "BLOB")
 # SHA-256, jamais stocké en clair), de sa raison sociale, de son préfixe BIA
 # et de son logo. Le logo est conservé en base64 dans la base : il reste
 # disponible hors ligne et suit le courtier d'un poste à l'autre.
+# Journal des modifications de contrats. Chaque correction est tracee :
+# qui, quand, quel champ, ancienne et nouvelle valeur. Exigence de base
+# en assurance : une piece modifiee doit rester auditable.
+_DDL_AUDIT = """
+CREATE TABLE IF NOT EXISTS bia_audit (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    bia_id       INTEGER NOT NULL,
+    numero_bia   TEXT,
+    champ        TEXT NOT NULL,
+    ancienne_val TEXT,
+    nouvelle_val TEXT,
+    modifie_par  TEXT,
+    role         TEXT,
+    modifie_le   TEXT
+)
+"""
+_DDL_AUDIT_PG = _DDL_AUDIT.replace(
+    "INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
+
 _DDL_COURTIERS = """
 CREATE TABLE IF NOT EXISTS courtiers (
     identifiant   TEXT PRIMARY KEY,
@@ -1028,9 +1047,126 @@ def init_db():
         cur.execute(_DDL_BASES_META if pg else _DDL_BASES_META_SQ)
         cur.execute(_DDL_DATA       if pg else _DDL_DATA_SQ)
         cur.execute(_DDL_COURTIERS)
+        cur.execute(_DDL_AUDIT_PG if pg else _DDL_AUDIT)
         conn.commit(); cur.close(); conn.close()
     except Exception as e:
         st.warning(f"⚠️ Init DB : {e}")
+
+
+# ── Regles de modification d'un contrat enregistre ───────────────────────────
+# Trois niveaux, conformes a la pratique en assurance :
+#   · figes      : identite du contrat, jamais modifiable
+#   · courants   : etat civil, corrigeables par le saisisseur
+#   · sensibles  : engagement financier, reserves aux profils habilites
+CHAMPS_FIGES = {
+    "id", "numero_bia", "date_saisie", "saisi_par", "produit", "created_at",
+}
+CHAMPS_COURANTS = {
+    "nom_souscripteur":            "Nom du souscripteur",
+    "prenom_souscripteur":         "Prénoms",
+    "telephone_souscripteur":      "Téléphone",
+    "adresse_souscripteur":        "Adresse",
+    "date_naissance_souscripteur": "Date de naissance",
+    "nationalite_souscripteur":    "Nationalité",
+    "obs":                         "Observations",
+}
+CHAMPS_SENSIBLES = {
+    "cotisation":          "Cotisation (FCFA)",
+    "capital_garanti":     "Capital garanti (FCFA)",
+    "periodicite":         "Périodicité",
+    "date_effet":          "Date d'effet",
+    "date_echeance":       "Date de terme",
+    "mode_reglement":      "Mode de règlement",
+    "reference_reglement": "Référence de règlement",
+    "statut":              "Statut",
+}
+ROLES_SENSIBLES = {"PDG", "DG", "ADMIN", "ACTUAIRE"}
+
+
+def champs_modifiables(user_dict: dict) -> dict:
+    """Retourne les champs que cet utilisateur peut corriger."""
+    _c = dict(CHAMPS_COURANTS)
+    if user_dict.get("role","").upper() in ROLES_SENSIBLES:
+        _c.update(CHAMPS_SENSIBLES)
+    return _c
+
+
+def journaliser(bia_id, numero_bia, champ, ancienne, nouvelle,
+                par, role) -> None:
+    """Consigne une modification dans le journal d'audit."""
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        _p = "%s" if _is_pg(conn) else "?"
+        cur.execute(
+            f"INSERT INTO bia_audit (bia_id, numero_bia, champ, ancienne_val, "
+            f"nouvelle_val, modifie_par, role, modifie_le) "
+            f"VALUES ({_p},{_p},{_p},{_p},{_p},{_p},{_p},{_p})",
+            (int(bia_id), str(numero_bia), str(champ),
+             "" if ancienne is None else str(ancienne),
+             "" if nouvelle is None else str(nouvelle),
+             str(par), str(role),
+             datetime.now().strftime("%Y-%m-%d %H:%M")))
+        conn.commit(); cur.close(); conn.close()
+    except Exception:
+        pass
+
+
+def modifier_bia(bia_id, numero_bia, modifs: dict, par: str, role: str) -> tuple:
+    """Applique des corrections a un contrat et les journalise.
+
+    `modifs` associe le nom de colonne a la nouvelle valeur. Les champs
+    figes sont ecartes, ainsi que ceux hors du perimetre du role.
+    Retourne (nombre de champs modifies, message).
+    """
+    _autorises = set(CHAMPS_COURANTS)
+    if str(role).upper() in ROLES_SENSIBLES:
+        _autorises |= set(CHAMPS_SENSIBLES)
+    _retenus = {k: v for k, v in modifs.items()
+                if k in _autorises and k not in CHAMPS_FIGES}
+    if not _retenus:
+        return 0, "Aucun champ modifiable dans cette demande."
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        _p = "%s" if _is_pg(conn) else "?"
+        # Valeurs actuelles, pour le journal
+        _cols = list(_retenus.keys())
+        cur.execute(f"SELECT {', '.join(_cols)} FROM bulletins_bia "
+                    f"WHERE id={_p}", (int(bia_id),))
+        _av = cur.fetchone() or tuple([None]*len(_cols))
+        _anciennes = dict(zip(_cols, _av))
+        # Mise a jour
+        _set = ", ".join(f"{c}={_p}" for c in _cols)
+        cur.execute(f"UPDATE bulletins_bia SET {_set} WHERE id={_p}",
+                    list(_retenus.values()) + [int(bia_id)])
+        conn.commit(); cur.close(); conn.close()
+    except Exception as e:
+        return 0, f"Modification impossible : {e}"
+
+    _n = 0
+    for _c, _nv in _retenus.items():
+        _anc = _anciennes.get(_c)
+        if str(_anc or "") != str(_nv or ""):
+            journaliser(bia_id, numero_bia, _c, _anc, _nv, par, role)
+            _n += 1
+    return _n, (f"{_n} champ(s) corrigé(s) et journalisé(s)." if _n
+                else "Aucune valeur n'a changé.")
+
+
+def historique_bia(bia_id=None) -> pd.DataFrame:
+    """Retourne le journal des modifications, filtre sur un contrat si fourni."""
+    try:
+        conn = get_conn()
+        if bia_id is None:
+            _df = pd.read_sql("SELECT * FROM bia_audit ORDER BY id DESC", conn)
+        else:
+            _p = "%s" if _is_pg(conn) else "?"
+            _df = pd.read_sql(
+                f"SELECT * FROM bia_audit WHERE bia_id={_p} ORDER BY id DESC",
+                conn, params=[int(bia_id)])
+        conn.close()
+        return _df
+    except Exception:
+        return pd.DataFrame()
 
 
 def _hash_mdp(mdp: str) -> str:
@@ -1882,7 +2018,7 @@ ALL_PAGES = [
     "📄  Rapport PDF",
 ]
 # Seule page visible sans aucune base chargée
-VISIBLE_DEFAULT = ["📝  Saisie BIA"]
+VISIBLE_DEFAULT = ["📝  Saisie BIA", "🗂️  Base BIA"]
 
 # ── Calcul des pages disponibles selon les bases chargées ─────────────────────
 # RÈGLE : Saisie BIA toujours visible.
@@ -6222,27 +6358,72 @@ elif "Saisie BIA" in page:
             st.markdown("---")
 
             # ── Signatures ────────────────────────────────────────────────────────
+            # Les signatures déposées ici sont reproduites sur le bulletin
+            # imprimé. Sans dépôt, un cadre vide est laissé pour la signature
+            # manuscrite après impression.
             section("Signatures")
-            st.markdown(f"""
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:10px 0">
-              <div style="border:1.5px dashed #888;border-radius:8px;padding:14px;
-                   min-height:90px;text-align:center;background:#fafafa">
-                <div style="font-size:10px;color:#888;font-weight:600;text-transform:uppercase;
-                     margin-bottom:4px">Signature du souscripteur</div>
-                <div style="font-size:11px;color:{NAVY};font-weight:700;margin-top:8px">
-                  {st.session_state.get('f_c_tit','')} {st.session_state.get('f_c_nom','').upper()}
-                  {st.session_state.get('f_c_prn','')}
-                </div>
-              </div>
-              <div style="border:1.5px dashed #888;border-radius:8px;padding:14px;
-                   min-height:90px;text-align:center;background:#fafafa">
-                <div style="font-size:10px;color:#888;font-weight:600;text-transform:uppercase;
-                     margin-bottom:4px">Cachet & Signature</div>
-                <div style="font-size:11px;color:{NAVY};font-weight:700;margin-top:8px">
-                  {st.session_state.get('f_nom_appo','AFG Assurances Bénin Vie')}
-                </div>
-              </div>
-            </div>""", unsafe_allow_html=True)
+            st.caption("Déposez une image de signature pour qu'elle figure sur "
+                       "le bulletin imprimé, ou laissez vide pour signer à la main.")
+
+            _sg1, _sg2 = st.columns(2)
+
+            with _sg1:
+                _nom_sous_sig = (f"{st.session_state.get('f_c_tit','')} "
+                                 f"{st.session_state.get('f_c_nom','').upper()} "
+                                 f"{st.session_state.get('f_c_prn','')}").strip()
+                st.markdown(
+                    f"<div style='font-size:10px;color:#888;font-weight:600;"
+                    f"text-transform:uppercase'>Signature du souscripteur</div>"
+                    f"<div style='font-size:12px;color:{NAVY};font-weight:700;"
+                    f"margin:2px 0 6px'>{_nom_sous_sig or '—'}</div>",
+                    unsafe_allow_html=True)
+                _up_sous = st.file_uploader(
+                    "Signature du souscripteur", type=["png","jpg","jpeg"],
+                    key="up_sig_sous", label_visibility="collapsed")
+                if _up_sous is not None:
+                    import base64 as _b64s
+                    st.session_state["f_sig_sous"] = _b64s.b64encode(
+                        _up_sous.getvalue()).decode("ascii")
+                if st.session_state.get("f_sig_sous"):
+                    st.markdown(
+                        f'<img src="data:image/png;base64,'
+                        f'{st.session_state["f_sig_sous"]}" '
+                        f'style="height:62px;object-fit:contain;'
+                        f'border:1px solid #DDD;border-radius:6px;'
+                        f'background:white;padding:4px"/>',
+                        unsafe_allow_html=True)
+                    if st.button("Retirer", key="clr_sig_sous"):
+                        st.session_state.pop("f_sig_sous", None)
+                        st.rerun()
+
+            with _sg2:
+                _nom_org_sig = (st.session_state.get("f_courtier_nom")
+                                or st.session_state.get("f_nom_appo")
+                                or "AFG Assurances Bénin Vie")
+                st.markdown(
+                    f"<div style='font-size:10px;color:#888;font-weight:600;"
+                    f"text-transform:uppercase'>Cachet et signature</div>"
+                    f"<div style='font-size:12px;color:{NAVY};font-weight:700;"
+                    f"margin:2px 0 6px'>{_nom_org_sig}</div>",
+                    unsafe_allow_html=True)
+                _up_org = st.file_uploader(
+                    "Cachet et signature", type=["png","jpg","jpeg"],
+                    key="up_sig_org", label_visibility="collapsed")
+                if _up_org is not None:
+                    import base64 as _b64o
+                    st.session_state["f_sig_org"] = _b64o.b64encode(
+                        _up_org.getvalue()).decode("ascii")
+                if st.session_state.get("f_sig_org"):
+                    st.markdown(
+                        f'<img src="data:image/png;base64,'
+                        f'{st.session_state["f_sig_org"]}" '
+                        f'style="height:62px;object-fit:contain;'
+                        f'border:1px solid #DDD;border-radius:6px;'
+                        f'background:white;padding:4px"/>',
+                        unsafe_allow_html=True)
+                    if st.button("Retirer", key="clr_sig_org"):
+                        st.session_state.pop("f_sig_org", None)
+                        st.rerun()
 
             # Upload signature souscripteur (optionnel)
             _sig_file = st.file_uploader(
@@ -6276,6 +6457,10 @@ elif "Saisie BIA" in page:
                 _pfx_n = user.get("prefixe_bia") if is_courtier(user) else None
                 _num_bia = (gen_bia(_crt_n, _pfx_n)
                             if (_crt_n and prod["code"] == "PA0") else gen_bia())
+                # Les signatures suivent le contrat : elles restent
+                # disponibles pour une réimpression ultérieure.
+                st.session_state["_sig_sous_saved"] = st.session_state.get("f_sig_sous")
+                st.session_state["_sig_org_saved"]  = st.session_state.get("f_sig_org")
                 st.session_state["_last_bia_num"] = _num_bia
                 data = {
                     "numero_bia":       _num_bia,
@@ -6421,13 +6606,37 @@ elif "Saisie BIA" in page:
                         items.append(t); items.append(Spacer(1,0.3*cm))
                         items.append(Paragraph("Je soussigné(e) certifie l'exactitude des informations ci-dessus et reconnais avoir reçu les conditions générales du contrat.",st_bd))
                         items.append(Spacer(1,0.5*cm))
-                        sig = Table([["Signature souscripteur","Cachet & Signature AFG"],["",""],["",""]],
-                                     colWidths=[8.5*cm,8.5*cm])
+                        # Zone de signature : l'image déposée est reproduite,
+                        # sinon un cadre vide accueille la signature manuscrite.
+                        def _cell_sig(_b64_sig):
+                            if not _b64_sig:
+                                return ""
+                            try:
+                                _si = _RLImg(_io.BytesIO(_b64.b64decode(_b64_sig)),
+                                             width=6.2*cm, height=1.9*cm,
+                                             kind="proportional")
+                                _si.hAlign = "CENTER"
+                                return _si
+                            except Exception:
+                                return ""
+
+                        _lbl_org = ("Cachet et signature"
+                                    if _ent_org == "AFG Assurances Bénin Vie"
+                                    else f"Cachet et signature{chr(10)}{_ent_org}")
+                        sig = Table(
+                            [["Signature du souscripteur", _lbl_org],
+                             [_cell_sig(st.session_state.get("f_sig_sous")),
+                              _cell_sig(st.session_state.get("f_sig_org"))],
+                             ["", ""]],
+                            colWidths=[8.5*cm, 8.5*cm],
+                            rowHeights=[None, 2.1*cm, None])
                         sig.setStyle(TableStyle([
-                            ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("FONTSIZE",(0,0),(-1,-1),8),
+                            ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
+                            ("FONTSIZE",(0,0),(-1,-1),8),
                             ("ALIGN",(0,0),(-1,-1),"CENTER"),
+                            ("VALIGN",(0,1),(-1,1),"MIDDLE"),
                             ("BOX",(0,1),(0,2),0.5,C_N),("BOX",(1,1),(1,2),0.5,C_N),
-                            ("BOTTOMPADDING",(0,1),(-1,2),25),
+                            ("BOTTOMPADDING",(0,2),(-1,2),18),
                         ]))
                         items.append(sig)
                         items.append(Spacer(1,0.15*cm))
@@ -6682,6 +6891,11 @@ elif "Saisie BIA" in page:
 elif "Base BIA" in page:
     try:
         df_bia = bia_all()
+        # Un courtier ne consulte que les contrats qu'il a lui-meme saisis.
+        if is_courtier(user) and not df_bia.empty and "saisi_par" in df_bia.columns:
+            _rs_u = str(user.get("raison_sociale") or user.get("nom","")).strip().upper()
+            df_bia = df_bia[df_bia["saisi_par"].fillna("").astype(str)
+                              .str.strip().str.upper() == _rs_u]
         section("🗂️ Base BIA — Registre des contrats","CONSULTATION · EXPORT · GESTION")
 
         if df_bia.empty:
@@ -6771,6 +6985,190 @@ elif "Base BIA" in page:
         ec.download_button("📥 Export affiché",
             dl_csv(df_show), f"bia_{_prod_sel}_{_stat_sel}.csv", "text/csv",
             use_container_width=True, key="dl_bia_filt")
+
+        # ══════════════════════════════════════════════════════════════════════
+        #  GESTION DES CONTRATS
+        #  Modification du statut et suppression, reservees aux profils
+        #  habilites. La suppression exige une confirmation explicite.
+        # ══════════════════════════════════════════════════════════════════════
+        # Le courtier corrige ses propres saisies ; la Direction et
+        # l'actuariat disposent en plus des champs financiers.
+        _peut_gerer = (user.get("role","").upper() in {"PDG","DG","ADMIN","ACTUAIRE"}
+                       or is_courtier(user))
+        if _peut_gerer and not df_show.empty:
+            st.markdown("---")
+            section("Gestion des contrats", "STATUT · SUPPRESSION", espace=False)
+            st.caption("La suppression est définitive. Exportez la base avant "
+                       "toute opération de nettoyage.")
+
+            # Selection d'un contrat parmi ceux affiches
+            _opts_bia = {}
+            for _, _r in df_show.iterrows():
+                _lbl = (f"{_r.get('numero_bia','—')} · "
+                        f"{str(_r.get('nom_souscripteur','')).upper()} "
+                        f"{_r.get('prenom_souscripteur','')} · "
+                        f"{_r.get('produit','—')} · {_r.get('statut','—')}")
+                _opts_bia[_lbl.strip()] = _r.get("id")
+
+            _sel_bia = st.selectbox("Contrat concerné",
+                                    list(_opts_bia.keys()), key="bia_sel_gest")
+            _id_bia  = _opts_bia.get(_sel_bia)
+
+            # ── Correction des champs ─────────────────────────────────────
+            _ligne = df_show[df_show["id"] == _id_bia]
+            _ligne = _ligne.iloc[0] if not _ligne.empty else None
+            _modifiables = champs_modifiables(user)
+            _est_habilite = user.get("role","").upper() in ROLES_SENSIBLES
+
+            with st.expander("Corriger des champs", expanded=False):
+                if _ligne is None:
+                    st.info("Sélectionnez un contrat.")
+                else:
+                    st.caption(
+                        "Le numéro de BIA, la date de saisie, le produit et "
+                        "l'auteur de la saisie ne sont pas modifiables : ils "
+                        "identifient le contrat. Toute correction est "
+                        "enregistrée dans le journal."
+                        + ("" if _est_habilite else
+                           " Les montants et dates d'effet relèvent de la "
+                           "Direction et du service actuariat."))
+
+                    _saisie = {}
+                    _cle_pref = f"corr_{_id_bia}_"
+                    _ncol = 2
+                    _items = list(_modifiables.items())
+                    for _k in range(0, len(_items), _ncol):
+                        _cc = st.columns(_ncol)
+                        for _j, (_col, _lbl) in enumerate(_items[_k:_k+_ncol]):
+                            if _col not in _ligne.index:
+                                continue
+                            _val = _ligne.get(_col)
+                            _val = "" if pd.isna(_val) else str(_val)
+                            with _cc[_j]:
+                                if _col == "statut":
+                                    _opts_s = ["Validé","Brouillon","En cours","Annulé"]
+                                    _idx = _opts_s.index(_val) if _val in _opts_s else 0
+                                    _saisie[_col] = st.selectbox(
+                                        _lbl, _opts_s, index=_idx,
+                                        key=_cle_pref+_col)
+                                elif _col in ("cotisation","capital_garanti"):
+                                    try:    _num = float(_val or 0)
+                                    except: _num = 0.0
+                                    _saisie[_col] = st.number_input(
+                                        _lbl, value=_num, step=1000.0,
+                                        format="%.0f", key=_cle_pref+_col)
+                                elif _col == "obs":
+                                    _saisie[_col] = st.text_area(
+                                        _lbl, value=_val, height=70,
+                                        key=_cle_pref+_col)
+                                else:
+                                    _saisie[_col] = st.text_input(
+                                        _lbl, value=_val, key=_cle_pref+_col)
+
+                    if st.button("Enregistrer les corrections", type="primary",
+                                 use_container_width=True, key="bia_corr_save"):
+                        _chg = {c: v for c, v in _saisie.items()
+                                if str(v) != str(_ligne.get(c) if pd.notna(
+                                    _ligne.get(c)) else "")}
+                        if not _chg:
+                            st.info("Aucune valeur n'a été modifiée.")
+                        else:
+                            _n, _msg = modifier_bia(
+                                _id_bia, _ligne.get("numero_bia",""), _chg,
+                                user.get("nom",""), user.get("role",""))
+                            if _n:
+                                st.success(_msg); st.rerun()
+                            else:
+                                st.warning(_msg)
+
+                    # Journal du contrat
+                    _hist = historique_bia(_id_bia)
+                    if not _hist.empty:
+                        st.markdown("**Historique des corrections**")
+                        _hd = _hist[["modifie_le","champ","ancienne_val",
+                                     "nouvelle_val","modifie_par","role"]].copy()
+                        _hd["champ"] = _hd["champ"].map(
+                            lambda c: {**CHAMPS_COURANTS, **CHAMPS_SENSIBLES}.get(c, c))
+                        _hd.columns = ["Date","Champ","Ancienne valeur",
+                                       "Nouvelle valeur","Auteur","Profil"]
+                        st.dataframe(_hd, use_container_width=True,
+                                     hide_index=True, height=200)
+
+            _g1, _g2, _g3 = st.columns([2, 1.2, 1.2])
+            _nv_statut = _g1.selectbox(
+                "Nouveau statut", ["Validé", "Brouillon", "En cours", "Annulé"],
+                key="bia_nv_statut")
+            if _g2.button("Changer le statut", use_container_width=True,
+                          key="bia_maj_statut"):
+                if _id_bia is not None:
+                    _anc_st = _ligne.get("statut") if _ligne is not None else ""
+                    update_bia_statut(int(_id_bia), _nv_statut)
+                    journaliser(_id_bia,
+                                _ligne.get("numero_bia","") if _ligne is not None else "",
+                                "statut", _anc_st, _nv_statut,
+                                user.get("nom",""), user.get("role",""))
+                    st.success(f"Statut passé à « {_nv_statut} ».")
+                    st.rerun()
+                else:
+                    st.error("Contrat introuvable.")
+
+            # La suppression reste hors de portee du courtier : une piece
+            # enregistree ne disparait que sur decision de la Direction.
+            if _est_habilite:
+                if _g3.button("Supprimer", use_container_width=True,
+                              key="bia_dem_suppr"):
+                    st.session_state["_bia_a_supprimer"] = (_id_bia, _sel_bia)
+            else:
+                _g3.caption("Suppression réservée à la Direction.")
+
+            # Confirmation en deux temps
+            _cible_bia = st.session_state.get("_bia_a_supprimer")
+            if _cible_bia and _cible_bia[0] is not None:
+                st.warning(f"Supprimer définitivement ce contrat ?\n\n"
+                           f"**{_cible_bia[1]}**\n\n"
+                           f"Cette opération est irréversible.")
+                _cf1, _cf2 = st.columns(2)
+                if _cf1.button("Confirmer la suppression", type="primary",
+                               use_container_width=True, key="bia_conf_suppr"):
+                    delete_bia(int(_cible_bia[0]))
+                    st.session_state.pop("_bia_a_supprimer", None)
+                    st.success("Contrat supprimé.")
+                    st.rerun()
+                if _cf2.button("Annuler", use_container_width=True,
+                               key="bia_ann_suppr"):
+                    st.session_state.pop("_bia_a_supprimer", None)
+                    st.rerun()
+
+            # Suppression en lot des brouillons
+            _nb_bro_aff = int((df_show["statut"] == "Brouillon").sum())
+            if _nb_bro_aff:
+                with st.expander(f"Purger les brouillons ({nb_full(_nb_bro_aff)})"):
+                    st.caption("Supprime tous les brouillons de la sélection "
+                               "courante. Les contrats validés ne sont pas touchés.")
+                    if st.button("Supprimer tous les brouillons affichés",
+                                 key="bia_purge_bro"):
+                        st.session_state["_bia_purge"] = True
+                    if st.session_state.get("_bia_purge"):
+                        st.warning(f"Confirmer la suppression de "
+                                   f"{nb_full(_nb_bro_aff)} brouillon(s) ?")
+                        _p1, _p2 = st.columns(2)
+                        if _p1.button("Confirmer", type="primary",
+                                      use_container_width=True, key="bia_conf_purge"):
+                            _n = 0
+                            for _, _rb in df_show[df_show["statut"]=="Brouillon"].iterrows():
+                                if pd.notna(_rb.get("id")):
+                                    delete_bia(int(_rb["id"])); _n += 1
+                            st.session_state.pop("_bia_purge", None)
+                            st.success(f"{nb_full(_n)} brouillon(s) supprimé(s).")
+                            st.rerun()
+                        if _p2.button("Annuler", use_container_width=True,
+                                      key="bia_ann_purge"):
+                            st.session_state.pop("_bia_purge", None)
+                            st.rerun()
+        elif not _peut_gerer:
+            st.markdown("---")
+            st.caption("La modification et la suppression des contrats sont "
+                       "réservées à la Direction et au service actuariat.")
 
         # Graphiques synthèse
         if nb_all > 0:
