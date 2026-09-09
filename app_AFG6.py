@@ -538,6 +538,59 @@ _CATEG_APPORTEUR = [
 ]
 
 
+# Regroupement des partenaires en trois familles, tel qu'il figure dans
+# les etats de la Direction technique : banques, institutions de
+# microfinance, et acceptations (compagnies cedantes).
+_GROUPES_PARTENAIRES = [
+    ("Banques locales", [
+        "BANK", "BANQUE", "B.I.I.C", "BIIC", "BOA", "UBA", "ECOBANK",
+        "BSIC", "CORIS BANK", "ORABANK", "BGFI", "DIAMOND", "SGB",
+        "SOCIETE GENERALE", "NSIA BANQUE", "ATLANTIQUE BENIN",
+    ]),
+    ("IMF", [
+        "MESO FINANCE", "PADME", "FINADEV", "RENACA", "AGRIFINANCE",
+        "MICROFINANCE", "MICRO FINANCE", "CLCAM", "FECECAM", "COMUBA",
+        "PEBCO", "ASSEF", "ALIDE", "COOPEC", "MUTUELLE", "CAISSE",
+    ]),
+    ("Acceptations", [
+        "ASSUR", "ASSURANCE", "ASSURANCES", "VIE", "SUNU", "SAHAM",
+        "ALLIANZ", "SANLAM", "ACTIVA", "AFRICAINE", "COMORES",
+        "ATLANTIQUE ASSURANCES", "NSIA VIE", "COLINA",
+    ]),
+]
+
+
+def groupe_partenaire(nom) -> str:
+    """Classe un partenaire dans l'une des trois familles de l'etat.
+
+    L'ordre de test compte : « CORIS MESO FINANCE » doit tomber en IMF
+    et non en banque, « ATLANTIQUE ASSURANCES » en acceptation et non
+    en banque. Les motifs les plus specifiques sont donc evalues avant.
+    """
+    _n = str(nom or "").upper().strip()
+    if not _n or _n in ("NAN", "NONE", "NAT"):
+        return "Non classé"
+    # Une filiale du groupe reste une acceptation : elle cede des risques.
+    # « AFG ASSUR COMORES » n'est pas un point de vente du reseau beninois.
+    if "AFG" in _n and any(m in _n for m in ("ASSUR", "VIE", "COMORES")):
+        return "Acceptations"
+    if est_reseau_interne(_n):
+        return "Réseau propre"
+    # Cas particuliers qui prevalent sur le motif generique
+    if "MESO FINANCE" in _n or "AGRIFINANCE" in _n:
+        return "IMF"
+    if "ASSURANCES VIE" in _n or "ASSUR" in _n and "BANQUE" not in _n:
+        if any(m in _n for m in ("BANK", "BANQUE")):
+            pass
+        else:
+            return "Acceptations"
+    for _grp, _mots in _GROUPES_PARTENAIRES:
+        for _m in _mots:
+            if _m in _n:
+                return _grp
+    return "Autres partenaires"
+
+
 def categoriser_apporteur(nom) -> str:
     """Classe un apporteur selon la nature de son organisme.
 
@@ -4375,329 +4428,378 @@ elif "Partenaires" in page:
         kpi(p4,"Ticket moyen",fmt(ca_pf_tot/max(_nq_pf,1)),"CA / quittance","amber",icon="🎫")
 
         st.markdown("")
-        tp1,tpC,tp2,tpE,tp3 = st.tabs(
-            ["📊 Par partenaire","🏛️ Par nature d'organisme",
-             "🥧 Réseau vs Partenaires","📈 Évolution & comparaison N/N-1",
-             "🔍 Données brutes"])
+        # ══════════════════════════════════════════════════════════════════════
+        #  PARTENAIRES FINANCIERS
+        #  Trois familles : banques locales, institutions de microfinance,
+        #  acceptations. Pour chacune : evolution mensuelle detaillee,
+        #  comparaison a l'exercice precedent, et synthese inter-groupes.
+        # ══════════════════════════════════════════════════════════════════════
+        df_pf["_GROUPE"] = df_pf["_RS"].apply(groupe_partenaire)
+        df_pf = df_pf[df_pf["_GROUPE"] != "Réseau propre"]
+
+        _cak_p = "CHIFAFFA" if "CHIFAFFA" in df_pf.columns else "MONTENCA"
+        _cdt_p = next((c for c in ["DATECOMP","DATEEFFE","DATESOUS"]
+                       if c in df_pf.columns), None)
+        _cprod = next((c for c in ["NOMPRODUIT","LIBECATE"]
+                       if c in df_pf.columns), None)
+
+        if _cdt_p is None or df_pf.empty:
+            bloc_vide("Aucune date exploitable pour construire les états "
+                      "mensuels des partenaires.", "🏦")
+            st.stop()
+
+        # Base de travail sur l'ensemble des exercices : la comparaison
+        # annuelle exige de disposer de N et de N-1 simultanement.
+        _pb = ca.copy()
+        _pb["_CODE_STR"] = code_propre(_pb[_col_code]).str.zfill(3)
+        _pb["_RS"] = (_pb[_col_rs].fillna("").astype(str).str.strip()
+                      if _col_rs else _pb["_CODE_STR"])
+        _pb.loc[_pb["_RS"] == "", "_RS"] = _pb.loc[_pb["_RS"] == "", "_CODE_STR"].map(_ref_nom)
+        _pb["_RS"] = _pb["_RS"].fillna("").astype(str).str.strip()
+        _pb = _pb[_pb["_RS"] != ""]
+        _pb["_GROUPE"] = _pb["_RS"].apply(groupe_partenaire)
+        _pb = _pb[~_pb["_GROUPE"].isin(["Réseau propre", "Non classé"])]
+        _pb["_DT"] = pd.to_datetime(_pb[_cdt_p], errors="coerce")
+        _pb = _pb.dropna(subset=["_DT"])
+        _pb["_AN"]  = _pb["_DT"].dt.year
+        _pb["_MOI"] = _pb["_DT"].dt.month
+
+        _MOIS_AB = ["janv","févr","mars","avr","mai","juin",
+                    "juil","août","sept","oct","nov","déc"]
+        _ans_dispo = sorted(_pb["_AN"].dropna().astype(int).unique().tolist())
+        if not _ans_dispo:
+            bloc_vide("Aucun exercice exploitable.", "🏦"); st.stop()
+
+        _an_ref = (int(SEL_YEAR) if SEL_YEAR and int(SEL_YEAR) in _ans_dispo
+                   else _ans_dispo[-1])
+        _prec   = [a for a in _ans_dispo if a < _an_ref]
+        _an_pre = int(_prec[-1]) if _prec else None
+
+        def _tableau_mensuel(_d, _cle):
+            """Croise partenaires en lignes et mois en colonnes."""
+            if _d.empty:
+                return pd.DataFrame()
+            _t = (_d.pivot_table(index=_cle, columns="_MOI", values=_cak_p,
+                                 aggfunc="sum", fill_value=0)
+                    .reindex(columns=range(1,13), fill_value=0))
+            _t.columns = _MOIS_AB
+            _t["Total"] = _t.sum(axis=1)
+            return _t.sort_values("Total", ascending=False)
+
+        def _formater(_t):
+            _f = _t.copy()
+            for _c in _f.columns:
+                _f[_c] = _f[_c].apply(lambda v: fmt_full(v, "") if v else "—")
+            return _f.reset_index()
+
+        _grp_ordre = ["Banques locales", "IMF", "Acceptations", "Autres partenaires"]
+        _grp_present = [g for g in _grp_ordre if g in _pb["_GROUPE"].unique()]
+
+        # ── Synthèse d'ouverture ─────────────────────────────────────────────
+        _dN = _pb[_pb["_AN"] == _an_ref]
+        _syn = (_dN.groupby("_GROUPE")[_cak_p].agg(["sum","count"])
+                   .reindex(_grp_present).fillna(0))
+        _tot_N = float(_syn["sum"].sum())
+
+        _sc = st.columns(len(_grp_present) + 1)
+        for _i, _g in enumerate(_grp_present):
+            _v = float(_syn.loc[_g, "sum"])
+            kpi(_sc[_i], _g, fmt_full(_v),
+                f"{_v/max(_tot_N,1)*100:.1f} % du total",
+                ["blue","teal","amber","",""][_i % 5], icon="🏦")
+        kpi(_sc[-1], f"Total {_an_ref}", fmt_full(_tot_N),
+            f"{nb_full(int(_syn['count'].sum()))} quittances", "", icon="Σ")
+
+        st.markdown("")
+        _t_grp, _t_ban, _t_imf, _t_acc, _t_cmp, _t_brut = st.tabs([
+            "Synthèse par groupe", "Banques", "IMF", "Acceptations",
+            f"Comparaison {_an_ref} / {_an_pre or '—'}", "Données"])
 
         # ══════════════════════════════════════════════════════════════════════
-        #  REPARTITION PAR NATURE D'ORGANISME
-        #  Banques, systemes financiers decentralises, courtiers, compagnies.
+        #  Fabrique commune : evolution mensuelle d'une famille de partenaires
         # ══════════════════════════════════════════════════════════════════════
-        with tpC:
-            if "_CATEG_PART" not in df_pf.columns or df_pf.empty:
-                bloc_vide("La colonne RAISOCIN est nécessaire pour classer "
-                          "les partenaires par nature d'organisme.", "🏛️")
+        def _volet_famille(_nom_grp, _icone, _cle_ui):
+            """Affiche l'evolution mensuelle detaillee d'une famille."""
+            _df_g = _pb[(_pb["_GROUPE"] == _nom_grp) & (_pb["_AN"] == _an_ref)]
+            if _df_g.empty:
+                bloc_vide(f"Aucune production {_nom_grp.lower()} sur {_an_ref}.",
+                          _icone)
+                return
+
+            _tab = _tableau_mensuel(_df_g, "_NOM")
+            _tot_g = float(_tab["Total"].sum())
+            _nb_p  = len(_tab)
+            _act   = int((_tab["Total"] > 0).sum())
+
+            _k1, _k2, _k3, _k4 = st.columns(4)
+            kpi(_k1, f"Production {_an_ref}", fmt_full(_tot_g),
+                _nom_grp, "teal", icon=_icone)
+            kpi(_k2, "Partenaires", nb_full(_nb_p),
+                f"{nb_full(_act)} actifs sur la période", "blue", icon="🤝")
+            _moy = _tot_g / max(_act, 1)
+            kpi(_k3, "Production moyenne", fmt_full(_moy),
+                "par partenaire actif", "", icon="📊")
+            _mois_act = [m for m in _MOIS_AB if _tab[m].sum() > 0]
+            _pic = max(_mois_act, key=lambda m: _tab[m].sum()) if _mois_act else "—"
+            kpi(_k4, "Mois le plus fort", str(_pic).capitalize(),
+                fmt_full(_tab[_pic].sum()) if _pic != "—" else "—",
+                "amber", icon="📈")
+
+            # Tableau croise partenaires x mois
+            st.markdown(f"**Production mensuelle par partenaire · {_an_ref}**")
+            _aff = _formater(_tab).rename(columns={"_NOM": "Partenaire"})
+            st.dataframe(_aff, use_container_width=True, hide_index=True,
+                         height=min(60 + 35*len(_aff), 460))
+
+            # Courbes d'evolution
+            _top = _tab.head(8)
+            _fig_e = go.Figure()
+            for _nm2 in _top.index:
+                _fig_e.add_scatter(
+                    x=_MOIS_AB, y=_top.loc[_nm2, _MOIS_AB].tolist(),
+                    mode="lines+markers", name=str(_nm2)[:26],
+                    hovertemplate="%{fullData.name}<br>%{x} : %{y:,.0f} FCFA<extra></extra>")
+            _fig_e.update_layout(yaxis=dict(title="CA (FCFA)"),
+                                 legend=dict(orientation="h", y=-0.22,
+                                             font=dict(size=9)))
+            fig_style(_fig_e, 400, f"Évolution mensuelle · {_nom_grp} · {_an_ref}")
+            st.plotly_chart(_fig_e, use_container_width=True,
+                            key=f"fig_evo_{_cle_ui}")
+
+            # Poids relatif
+            _fig_p = go.Figure(go.Bar(
+                x=_tab["Total"], y=_tab.index.astype(str).str[:30],
+                orientation="h", marker_color=GREEN,
+                text=[fmt_full(v, "") for v in _tab["Total"]],
+                textposition="outside", textfont=dict(size=9),
+                hovertemplate="%{y}<br>%{x:,.0f} FCFA<extra></extra>"))
+            _fig_p.update_layout(yaxis=dict(autorange="reversed"),
+                                 xaxis=dict(title="CA (FCFA)"))
+            fig_style(_fig_p, max(280, 40*len(_tab)),
+                      f"Production totale par partenaire · {_an_ref}")
+            st.plotly_chart(_fig_p, use_container_width=True,
+                            key=f"fig_tot_{_cle_ui}")
+
+            # Comparaison a l'exercice precedent
+            if _an_pre:
+                _dfp = _pb[(_pb["_GROUPE"] == _nom_grp) & (_pb["_AN"] == _an_pre)]
+                _sN  = _df_g.groupby("_NOM")[_cak_p].sum()
+                _sP  = _dfp.groupby("_NOM")[_cak_p].sum()
+                _cmp = pd.DataFrame({str(_an_pre): _sP, str(_an_ref): _sN}).fillna(0)
+                _cmp = _cmp[(_cmp.sum(axis=1) != 0)]
+                if not _cmp.empty:
+                    _cmp["Écart"] = _cmp[str(_an_ref)] - _cmp[str(_an_pre)]
+                    _cmp["Var %"] = np.where(
+                        _cmp[str(_an_pre)] > 0,
+                        _cmp["Écart"] / _cmp[str(_an_pre)] * 100, np.nan)
+                    _cmp = _cmp.sort_values(str(_an_ref), ascending=False)
+
+                    st.markdown(f"**{_an_ref} face à {_an_pre}**")
+                    _fig_c = go.Figure()
+                    _lbl_c = _cmp.index.astype(str).str[:26]
+                    _fig_c.add_bar(x=_lbl_c, y=_cmp[str(_an_pre)],
+                                   name=str(_an_pre), marker_color=NAVY, opacity=.55)
+                    _fig_c.add_bar(x=_lbl_c, y=_cmp[str(_an_ref)],
+                                   name=str(_an_ref), marker_color=GREEN)
+                    _fig_c.update_layout(barmode="group",
+                                         yaxis=dict(title="CA (FCFA)"),
+                                         legend=dict(orientation="h", y=-0.24))
+                    fig_style(_fig_c, 360,
+                              f"{_nom_grp} · {_an_ref} face à {_an_pre}")
+                    st.plotly_chart(_fig_c, use_container_width=True,
+                                    key=f"fig_cmp_{_cle_ui}")
+
+                    _cd = _cmp.copy()
+                    for _c in [str(_an_pre), str(_an_ref), "Écart"]:
+                        _cd[_c] = _cd[_c].apply(lambda v: fmt_full(v, ""))
+                    _cd["Var %"] = _cmp["Var %"].apply(
+                        lambda v: "n. s." if pd.isna(v) else f"{v:+.1f} %")
+                    _cd = _cd.reset_index().rename(columns={"_NOM": "Partenaire"})
+                    st.dataframe(_cd, use_container_width=True, hide_index=True)
+
+                    # Lecture
+                    _tN, _tP = float(_sN.sum()), float(_sP.sum())
+                    _var_g = ((_tN - _tP) / _tP * 100) if _tP else 0
+                    _hausse = int((_cmp["Écart"] > 0).sum())
+                    _sig = _cmp[_cmp["Var %"].notna()]
+                    _mx = _sig.nlargest(1, "Var %") if not _sig.empty else None
+                    _mn = _sig.nsmallest(1, "Var %") if not _sig.empty else None
+                    _txt = (f"La production {_nom_grp.lower()} "
+                            f"{'progresse' if _var_g >= 0 else 'recule'} de "
+                            f"**{abs(_var_g):.1f} %**, passant de "
+                            f"**{fmt_full(_tP)}** à **{fmt_full(_tN)}**. "
+                            f"**{_hausse} partenaire(s) sur {len(_cmp)}** "
+                            f"progressent d'un exercice à l'autre.")
+                    if _mx is not None and not _mx.empty:
+                        _txt += (f" La plus forte hausse revient à "
+                                 f"**{str(_mx.index[0])[:30]}** "
+                                 f"({_mx['Var %'].iloc[0]:+.0f} %)")
+                    if _mn is not None and not _mn.empty:
+                        _txt += (f", le repli le plus marqué à "
+                                 f"**{str(_mn.index[0])[:30]}** "
+                                 f"({_mn['Var %'].iloc[0]:+.0f} %)")
+                    st.info(_txt + ".")
+
+            st.download_button(
+                f"Export {_nom_grp}",
+                dl_csv(_tab.reset_index()),
+                f"partenaires_{_cle_ui}_{_an_ref}.csv", "text/csv",
+                use_container_width=True, key=f"dl_{_cle_ui}")
+
+        # ══════════════════════════════════════════════════════════════════════
+        #  Onglet 1 : synthese des trois groupes
+        # ══════════════════════════════════════════════════════════════════════
+        with _t_grp:
+            _tg = _tableau_mensuel(_dN, "_GROUPE").reindex(_grp_present).fillna(0)
+
+            st.markdown(f"**Production mensuelle par groupe · {_an_ref}**")
+            st.dataframe(_formater(_tg).rename(columns={"_GROUPE": "Groupe"}),
+                         use_container_width=True, hide_index=True)
+
+            _c1, _c2 = st.columns([1.4, 1])
+            with _c1:
+                _fg = go.Figure()
+                for _g in _grp_present:
+                    _fg.add_scatter(x=_MOIS_AB, y=_tg.loc[_g, _MOIS_AB].tolist(),
+                                    mode="lines+markers", name=_g,
+                                    hovertemplate="%{fullData.name}<br>"
+                                                  "%{x} : %{y:,.0f} FCFA<extra></extra>")
+                _fg.update_layout(yaxis=dict(title="CA (FCFA)"),
+                                  legend=dict(orientation="h", y=-0.2))
+                fig_style(_fg, 380, f"Évolution mensuelle des trois groupes · {_an_ref}")
+                st.plotly_chart(_fg, use_container_width=True, key="fig_grp_evo")
+            with _c2:
+                _fp = go.Figure(go.Pie(
+                    labels=_grp_present, values=_tg["Total"].tolist(), hole=.44,
+                    textinfo="percent", textfont=dict(size=11),
+                    hovertemplate="%{label}<br>%{value:,.0f} FCFA<br>"
+                                  "%{percent}<extra></extra>"))
+                _fp.update_layout(legend=dict(font=dict(size=10)))
+                fig_style(_fp, 380, "Poids de chaque groupe")
+                st.plotly_chart(_fp, use_container_width=True, key="fig_grp_part")
+
+            # Barres empilees mensuelles
+            _fs = go.Figure()
+            for _g in _grp_present:
+                _fs.add_bar(x=_MOIS_AB, y=_tg.loc[_g, _MOIS_AB].tolist(), name=_g)
+            _fs.update_layout(barmode="stack", yaxis=dict(title="CA (FCFA)"),
+                              legend=dict(orientation="h", y=-0.2))
+            fig_style(_fs, 340, f"Composition mensuelle de la production · {_an_ref}")
+            st.plotly_chart(_fs, use_container_width=True, key="fig_grp_stack")
+
+            # Lecture de la structure
+            _dom = _tg["Total"].idxmax()
+            _pdom = _tg.loc[_dom, "Total"] / max(_tot_N, 1) * 100
+            _mois_pleins = [m for m in _MOIS_AB if _tg[m].sum() > 0]
+            _pic_g = max(_mois_pleins, key=lambda m: _tg[m].sum()) if _mois_pleins else "—"
+            st.info(
+                f"Sur {_an_ref}, la production repose principalement sur "
+                f"**{_dom}** avec **{_pdom:.1f} %** du total, soit "
+                f"**{fmt_full(_tg.loc[_dom,'Total'])}**. Le mois de "
+                f"**{str(_pic_g)}** concentre la production la plus élevée "
+                f"({fmt_full(_tg[_pic_g].sum()) if _pic_g != '—' else '—'}), "
+                f"tous groupes confondus."
+                + (f" La concentration sur un seul canal appelle une "
+                   f"diversification des sources d'affaires."
+                   if _pdom >= 65 else
+                   f" La répartition entre les canaux reste équilibrée."))
+
+        with _t_ban:
+            _volet_famille("Banques locales", "🏦", "ban")
+        with _t_imf:
+            _volet_famille("IMF", "🏛️", "imf")
+        with _t_acc:
+            _volet_famille("Acceptations", "🤝", "acc")
+
+        # ══════════════════════════════════════════════════════════════════════
+        #  Onglet comparaison : les trois groupes face a N-1
+        # ══════════════════════════════════════════════════════════════════════
+        with _t_cmp:
+            if not _an_pre:
+                bloc_vide("Un seul exercice disponible : "
+                          "aucune comparaison possible.", "📊")
             else:
-                _cak_c = "CHIFAFFA" if "CHIFAFFA" in df_pf.columns else "MONTENCA"
-                _gcat = (df_pf.groupby("_CATEG_PART")
-                              .agg(CA=(_cak_c,"sum"), NbQ=(_cak_c,"count"),
-                                   Nb=("_RS","nunique"))
-                              .reset_index().sort_values("CA", ascending=False))
-                _tc = float(_gcat["CA"].sum())
+                _dP = _pb[_pb["_AN"] == _an_pre]
+                _gN = _dN.groupby("_GROUPE")[_cak_p].sum().reindex(_grp_present).fillna(0)
+                _gP = _dP.groupby("_GROUPE")[_cak_p].sum().reindex(_grp_present).fillna(0)
+                _cg = pd.DataFrame({str(_an_pre): _gP, str(_an_ref): _gN})
+                _cg["Écart"] = _cg[str(_an_ref)] - _cg[str(_an_pre)]
+                _cg["Var %"] = np.where(_cg[str(_an_pre)] > 0,
+                                        _cg["Écart"]/_cg[str(_an_pre)]*100, np.nan)
 
-                k1,k2,k3 = st.columns(3)
-                kpi(k1,"Natures représentées", nb_full(len(_gcat)),
-                    "Familles d'organismes","blue", icon="🏛️")
-                kpi(k2,"Partenaires distincts", nb_full(int(_gcat["Nb"].sum())),
-                    "Raisons sociales","teal", icon="🤝")
-                _dom = _gcat.iloc[0]
-                kpi(k3,"Nature dominante", str(_dom["_CATEG_PART"])[:22],
-                    f"{_dom['CA']/max(_tc,1)*100:.1f} % du CA","", icon="🥇")
+                _m1, _m2, _m3 = st.columns(3)
+                _tN2, _tP2 = float(_gN.sum()), float(_gP.sum())
+                _v2 = ((_tN2-_tP2)/_tP2*100) if _tP2 else 0
+                kpi(_m1, f"Production {_an_ref}", fmt_full(_tN2),
+                    "Tous partenaires", "teal", icon="Σ")
+                kpi(_m2, f"Production {_an_pre}", fmt_full(_tP2),
+                    "Exercice précédent", "", icon="📅")
+                kpi(_m3, "Variation", f"{_v2:+.1f} %",
+                    f"{_an_ref} face à {_an_pre}",
+                    "teal" if _v2 >= 0 else "red",
+                    icon="📈" if _v2 >= 0 else "📉")
 
-                cc1, cc2 = st.columns([1.3,1])
-                with cc1:
-                    figC = go.Figure(go.Bar(
-                        x=_gcat["CA"], y=_gcat["_CATEG_PART"].astype(str),
-                        orientation="h", marker_color=BLUE,
-                        text=[fmt_full(v,"") for v in _gcat["CA"]],
-                        textposition="outside", textfont=dict(size=10),
-                        hovertemplate="%{y}<br>CA : %{x:,.0f} FCFA<extra></extra>"))
-                    figC.update_layout(yaxis=dict(autorange="reversed"),
-                                       xaxis=dict(title="CA (FCFA)"))
-                    fig_style(figC, 360, "Chiffre d'affaires par nature d'organisme")
-                    st.plotly_chart(figC, use_container_width=True)
-                with cc2:
-                    figD = go.Figure(go.Pie(
-                        labels=_gcat["_CATEG_PART"].astype(str),
-                        values=_gcat["CA"], hole=.42,
-                        textinfo="percent", textfont=dict(size=11),
-                        hovertemplate="%{label}<br>%{value:,.0f} FCFA"
-                                      "<br>%{percent}<extra></extra>"))
-                    figD.update_layout(legend=dict(font=dict(size=9)))
-                    fig_style(figD, 360, "Poids relatif")
-                    st.plotly_chart(figD, use_container_width=True)
+                _fc = go.Figure()
+                _fc.add_bar(x=_grp_present, y=_gP.tolist(), name=str(_an_pre),
+                            marker_color=NAVY, opacity=.55,
+                            text=[fmt_full(v,"") for v in _gP], textposition="outside")
+                _fc.add_bar(x=_grp_present, y=_gN.tolist(), name=str(_an_ref),
+                            marker_color=GREEN,
+                            text=[fmt_full(v,"") for v in _gN], textposition="outside")
+                _fc.update_layout(barmode="group", yaxis=dict(title="CA (FCFA)"),
+                                  legend=dict(orientation="h", y=-0.18))
+                fig_style(_fc, 380, f"Les trois groupes · {_an_ref} face à {_an_pre}")
+                st.plotly_chart(_fc, use_container_width=True, key="fig_cmp_grp")
 
-                _gd = _gcat.copy()
-                _gd["Part %"] = (_gd["CA"]/max(_tc,1)*100).round(2)
-                _gd["CA"]  = _gd["CA"].apply(lambda x: fmt_full(x,""))
-                _gd["NbQ"] = _gd["NbQ"].apply(nb_full)
-                _gd["Nb"]  = _gd["Nb"].apply(nb_full)
-                _gd.columns = ["Nature d'organisme","CA (FCFA)","Quittances",
-                               "Partenaires","Part %"]
-                st.dataframe(_gd, use_container_width=True, hide_index=True)
+                _cgd = _cg.copy()
+                for _c in [str(_an_pre), str(_an_ref), "Écart"]:
+                    _cgd[_c] = _cgd[_c].apply(lambda v: fmt_full(v, ""))
+                _cgd["Var %"] = _cg["Var %"].apply(
+                    lambda v: "n. s." if pd.isna(v) else f"{v:+.1f} %")
+                st.dataframe(_cgd.reset_index().rename(columns={"_GROUPE":"Groupe"}),
+                             use_container_width=True, hide_index=True)
 
-                # Detail nominatif par nature
-                st.markdown("")
-                _cat_sel = st.selectbox("Détail d'une nature",
-                                        _gcat["_CATEG_PART"].astype(str).tolist(),
-                                        key="part_cat_sel")
-                _sub = (df_pf[df_pf["_CATEG_PART"] == _cat_sel]
-                          .groupby("_RS")[_cak_c].sum()
-                          .sort_values(ascending=False).head(15))
-                if not _sub.empty:
-                    _ts = float(_sub.sum())
-                    figS = go.Figure(go.Bar(
-                        x=_sub.values, y=_sub.index.astype(str).str[:34],
-                        orientation="h", marker_color=GREEN,
-                        text=[fmt_full(v,"") for v in _sub.values],
-                        textposition="outside", textfont=dict(size=9),
-                        hovertemplate="%{y}<br>CA : %{x:,.0f} FCFA<extra></extra>"))
-                    figS.update_layout(yaxis=dict(autorange="reversed"),
-                                       xaxis=dict(title="CA (FCFA)"))
-                    fig_style(figS, 420, f"{_cat_sel} · principaux partenaires")
-                    st.plotly_chart(figS, use_container_width=True)
+                # Evolution mensuelle comparee
+                _tgN = _tableau_mensuel(_dN, "_GROUPE").reindex(_grp_present).fillna(0)
+                _tgP = _tableau_mensuel(_dP, "_GROUPE").reindex(_grp_present).fillna(0)
+                _fm = go.Figure()
+                _fm.add_scatter(x=_MOIS_AB, y=_tgP[_MOIS_AB].sum().tolist(),
+                                mode="lines+markers", name=str(_an_pre),
+                                line=dict(color=NAVY, width=2, dash="dot"))
+                _fm.add_scatter(x=_MOIS_AB, y=_tgN[_MOIS_AB].sum().tolist(),
+                                mode="lines+markers", name=str(_an_ref),
+                                line=dict(color=GREEN, width=2.5))
+                _fm.update_layout(yaxis=dict(title="CA (FCFA)"),
+                                  legend=dict(orientation="h", y=-0.18))
+                fig_style(_fm, 340, f"Production mensuelle cumulée · {_an_ref} face à {_an_pre}")
+                st.plotly_chart(_fm, use_container_width=True, key="fig_cmp_mois")
 
-                    _dts = pd.DataFrame({
-                        "Partenaire": _sub.index.astype(str),
-                        "CA (FCFA)":  [fmt_full(v,"") for v in _sub.values],
-                        "Part %":     [f"{v/_ts*100:.2f} %" for v in _sub.values]})
-                    st.dataframe(_dts, use_container_width=True, hide_index=True)
-                    st.download_button("📥 Export par nature",
-                        dl_csv(_gcat), "partenaires_par_nature.csv", "text/csv",
-                        use_container_width=True, key="dl_part_cat")
+                _prog = _cg[_cg["Écart"] > 0].index.tolist()
+                _recu = _cg[_cg["Écart"] < 0].index.tolist()
+                _txt2 = (f"L'ensemble du réseau partenaire "
+                         f"{'progresse' if _v2 >= 0 else 'recule'} de "
+                         f"**{abs(_v2):.1f} %** entre {_an_pre} et {_an_ref}.")
+                if _prog:
+                    _txt2 += f" Progression pour **{', '.join(_prog)}**."
+                if _recu:
+                    _txt2 += (f" Retrait pour **{', '.join(_recu)}**, "
+                              f"à examiner avec les responsables de compte.")
+                st.info(_txt2)
 
-        # ══════════════════════════════════════════════════════════════════════════
-        #  EVOLUTION MENSUELLE PAR PARTENAIRE + COMPARAISON N vs N-1
-        #  Le perimetre est volontairement la base CA complete : une comparaison
-        #  annuelle exige de disposer des deux exercices simultanement.
-        # ══════════════════════════════════════════════════════════════════════════
-        with tpE:
-            _ev_base = ca.copy()
-            _ev_base["_CODE_STR"] = (_ev_base[_col_code].astype(str)
-                                     .str.strip().str.zfill(3))
-            _ev_base["_NOM_PART"] = _ev_base["_CODE_STR"].map(_ref_nom)
-            _ev_base["_NOM_PART"] = _ev_base["_NOM_PART"].fillna(
-                "Code " + _ev_base["_CODE_STR"].astype(str))
-            _nm_e = _ev_base["_NOM_PART"].fillna("").astype(str).str.strip()
-            _ev_base["_LBL"] = np.where(
-                _nm_e != "",
-                _nm_e.str[:30] + " (" + _ev_base["_CODE_STR"] + ")",
-                "Apporteur " + _ev_base["_CODE_STR"])
-            # Restreindre aux partenaires financiers : code 3 chiffres, hors 100
-            _mp = (_ev_base["_CODE_STR"].str.fullmatch(r"\d{3}", na=False)
-                   & (_ev_base["_CODE_STR"] != "100"))
-            _ev_base = _ev_base[_mp]
+        with _t_brut:
+            _brut = _pb[_pb["_AN"] == _an_ref][
+                ["_NOM","_GROUPE","_DT",_cak_p]].copy()
+            _brut.columns = ["Partenaire","Groupe","Date","CA (FCFA)"]
+            _brut = _brut.sort_values("Date", ascending=False)
+            st.markdown(f"**{nb_full(len(_brut))} quittances · exercice {_an_ref}**")
+            _bd = _brut.head(500).copy()
+            _bd["Date"] = _bd["Date"].dt.strftime("%d/%m/%Y")
+            _bd["CA (FCFA)"] = _bd["CA (FCFA)"].apply(lambda v: fmt_full(v, ""))
+            st.dataframe(_bd, use_container_width=True, hide_index=True, height=460)
+            st.download_button("Export des données", dl_csv(_brut),
+                               f"partenaires_donnees_{_an_ref}.csv", "text/csv",
+                               use_container_width=True, key="dl_part_brut")
 
-            _cdt_e = next((c for c in ["DATECOMP","DATEEFFE","DATESOUS"]
-                           if c in _ev_base.columns), None)
-            if _cdt_e is None or _ev_base.empty:
-                alert("Aucune date exploitable pour construire l'évolution mensuelle.","warn")
-            else:
-                _ev_base["_DT"] = pd.to_datetime(_ev_base[_cdt_e], errors="coerce")
-                _ev_base = _ev_base.dropna(subset=["_DT"])
-                _ev_base["_AN"]   = _ev_base["_DT"].dt.year
-                _ev_base["_MOIS"] = _ev_base["_DT"].dt.month
-                _cak = "CHIFAFFA" if "CHIFAFFA" in _ev_base.columns else "MONTENCA"
-
-                # ── Selecteurs ────────────────────────────────────────────────────
-                _tous  = ["Tous les partenaires"] + sorted(
-                            _ev_base.groupby("_LBL")[_cak].sum()
-                                    .sort_values(ascending=False).index.tolist())
-                _annees_e = sorted(_ev_base["_AN"].dropna().astype(int).unique().tolist(),
-                                   reverse=True)
-                e1,e2 = st.columns([2,1])
-                _part_sel = e1.selectbox("Partenaire", _tous, key="part_evo_sel")
-                _an_n     = e2.selectbox("Exercice N", _annees_e,
-                                         index=0, key="part_evo_an")
-                _an_n1    = _an_n - 1
-
-                _dfe = _ev_base if _part_sel == "Tous les partenaires" else \
-                       _ev_base[_ev_base["_LBL"] == _part_sel]
-
-                _MOIS_FR = ["Jan","Fév","Mar","Avr","Mai","Juin",
-                            "Juil","Août","Sep","Oct","Nov","Déc"]
-
-                # ── 1. Evolution mensuelle : N et N-1 superposes ──────────────────
-                _sN  = (_dfe[_dfe["_AN"] == _an_n ].groupby("_MOIS")[_cak].sum()
-                            .reindex(range(1,13), fill_value=0))
-                _sN1 = (_dfe[_dfe["_AN"] == _an_n1].groupby("_MOIS")[_cak].sum()
-                            .reindex(range(1,13), fill_value=0))
-
-                figE = go.Figure()
-                if _sN1.sum() > 0:
-                    figE.add_bar(x=_MOIS_FR, y=_sN1.values, name=f"{_an_n1}",
-                        marker_color=NAVY, opacity=.55,
-                        hovertemplate="%{x} "+str(_an_n1)+"<br>%{y:,.0f} FCFA<extra></extra>")
-                figE.add_bar(x=_MOIS_FR, y=_sN.values, name=f"{_an_n}",
-                    marker_color=GREEN,
-                    hovertemplate="%{x} "+str(_an_n)+"<br>%{y:,.0f} FCFA<extra></extra>")
-                figE.add_scatter(x=_MOIS_FR, y=_sN.values, mode="lines+markers",
-                    name=f"Tendance {_an_n}", line=dict(color=RED, width=2))
-                figE.update_layout(barmode="group",
-                                   yaxis=dict(title="CA (FCFA)"),
-                                   legend=dict(orientation="h", y=-0.16))
-                fig_style(figE, 400,
-                          f"Évolution mensuelle — {_part_sel} · {_an_n} vs {_an_n1}")
-                st.plotly_chart(figE, use_container_width=True)
-
-                # ── 2. Comparaison mois par mois N / N-1 ──────────────────────────
-                _cmp = pd.DataFrame({
-                    "Mois":  _MOIS_FR,
-                    f"{_an_n1}": _sN1.values,
-                    f"{_an_n}":  _sN.values,
-                })
-                _cmp["Écart"] = _cmp[f"{_an_n}"] - _cmp[f"{_an_n1}"]
-                _cmp["Var %"] = np.where(_cmp[f"{_an_n1}"] > 0,
-                                         _cmp["Écart"] / _cmp[f"{_an_n1}"] * 100,
-                                         np.nan)
-
-                figV = go.Figure(go.Bar(
-                    x=_MOIS_FR, y=_cmp["Var %"],
-                    marker_color=[GREEN if (pd.notna(v) and v >= 0) else RED
-                                  for v in _cmp["Var %"]],
-                    text=[("—" if pd.isna(v) else f"{v:+.0f}%") for v in _cmp["Var %"]],
-                    textposition="outside", textfont=dict(size=9),
-                    hovertemplate="%{x}<br>Variation : %{y:+.1f}%<extra></extra>"))
-                figV.add_hline(y=0, line_color="#888", line_width=1)
-                figV.update_layout(yaxis=dict(title="Variation (%)"))
-                fig_style(figV, 300, f"Variation mensuelle {_an_n} / {_an_n1}")
-                st.plotly_chart(figV, use_container_width=True)
-
-                # ── 3. Indicateurs de synthese ────────────────────────────────────
-                _tN, _tN1 = float(_sN.sum()), float(_sN1.sum())
-                _vG  = ((_tN - _tN1)/_tN1*100) if _tN1 else 0
-                _mMx = _cmp.loc[_cmp[f"{_an_n}"].idxmax()]
-                _nbM = int((_cmp[f"{_an_n}"] > 0).sum())
-                g1,g2,g3,g4 = st.columns(4)
-                kpi(g1, f"CA {_an_n}",  fmt_full(_tN),  f"{_nbM} mois actifs", "teal", icon="💰")
-                kpi(g2, f"CA {_an_n1}", fmt_full(_tN1), "Exercice précédent",  "",     icon="📅")
-                kpi(g3, "Variation",    f"{_vG:+.1f} %", f"{_an_n} vs {_an_n1}",
-                    "teal" if _vG >= 0 else "red", icon="📈" if _vG >= 0 else "📉")
-                kpi(g4, "Meilleur mois", str(_mMx["Mois"]), fmt_full(_mMx[f"{_an_n}"]),
-                    "blue", icon="🏆")
-
-                # ── 4. Tableau detaille ───────────────────────────────────────────
-                _cmp_d = _cmp.copy()
-                for _c in [f"{_an_n1}", f"{_an_n}", "Écart"]:
-                    _cmp_d[_c] = _cmp_d[_c].apply(lambda x: fmt_full(x, ""))
-                _cmp_d["Var %"] = _cmp["Var %"].apply(
-                    lambda x: "—" if pd.isna(x) else f"{x:+.1f} %")
-                st.dataframe(_cmp_d, use_container_width=True, hide_index=True)
-                st.download_button("📥 Export comparaison mensuelle",
-                    dl_csv(_cmp), f"evolution_{_an_n}_vs_{_an_n1}.csv", "text/csv",
-                    use_container_width=True, key="dl_evo_part")
-
-
-        with tp1:
-            if not df_pf.empty:
-                _grp_cols = ["_CODE_STR"]
-                if _col_nom and _col_nom in df_pf.columns:
-                    _grp_cols.append(_col_nom)
-                _agg_p = {"CA":("CHIFAFFA","sum"), "NbQ":("CHIFAFFA","count")}
-                if "COMMAPPO" in df_pf.columns: _agg_p["Commission"] = ("COMMAPPO","sum")
-                dp = df_pf.groupby(_grp_cols, dropna=False).agg(**_agg_p).reset_index()
-                dp = dp.sort_values("CA",ascending=False)
-                dp["Part %"] = (dp["CA"]/max(ca_pf_tot,1)*100).round(2)
-                dp.index = range(1, len(dp)+1)
-
-                c1p,c2p = st.columns(2)
-                with c1p:
-                    # Libellé "NOM (CODE)" — jamais vide, jamais un index numérique
-                    if _col_nom in dp.columns:
-                        # Format « NOM (code) », identique a l'onglet Commerciaux
-                        _nm_p = dp[_col_nom].fillna("").astype(str).str.strip()
-                        dp["_LBL"] = np.where(
-                            _nm_p != "",
-                            _nm_p.str[:30] + " (" + dp["_CODE_STR"].astype(str) + ")",
-                            "Apporteur " + dp["_CODE_STR"].astype(str))
-                    else:
-                        dp["_LBL"] = "Code " + dp["_CODE_STR"].astype(str)
-                    _par_lbl_col = "_LBL"
-                    _d15         = dp.head(15)
-                    _par_lbl15   = _d15["_LBL"]
-                    _par_val15   = _d15["CA"]
-
-                    fig = go.Figure(go.Bar(
-                        x=_par_val15, y=_par_lbl15,
-                        orientation="h", marker_color=BLUE,
-                        text=[fmt_full(v,"") for v in _par_val15],
-                        textposition="outside", textfont=dict(size=9),
-                        customdata=_par_val15,
-                        hovertemplate="%{y}<br>CA : %{customdata:,.0f} FCFA<extra></extra>"))
-                    fig.update_layout(yaxis=dict(autorange="reversed"))
-                    _yr_lbl_p = f" · {SEL_YEAR}" if SEL_YEAR else f" · {period_lbl}"
-                    fig_style(fig, 420, f"CA par partenaire{_yr_lbl_p}")
-                    st.plotly_chart(fig, use_container_width=True)
-                with c2p:
-                    dp_top = dp.head(10)
-                    fig2 = go.Figure(go.Pie(
-                        labels=dp_top["_LBL"].astype(str).str[:26],
-                        values=dp_top["CA"], hole=.4,
-                        textinfo="percent", textfont=dict(size=10),
-                        hovertemplate="%{label}<br>CA : %{value:,.0f} FCFA<br>"
-                                      "Part : %{percent}<extra></extra>"))
-                    fig2.update_layout(legend=dict(font=dict(size=9)))
-                    fig_style(fig2, 420, "Part de marché — Top 10")
-                    st.plotly_chart(fig2, use_container_width=True)
-
-                # Tableau — renommer proprement sans réindexer colonnes
-                dp_d = dp.drop(columns=["_LBL"], errors="ignore").copy()
-                if _col_nom in dp_d.columns:
-                    dp_d[_col_nom] = (dp_d[_col_nom].fillna("").astype(str).str.strip()
-                                        .replace("", "—"))
-                if "CA" in dp_d.columns:
-                    dp_d["CA"] = dp_d["CA"].apply(lambda x: fmt_full(x,""))
-                if "NbQ" in dp_d.columns:
-                    dp_d["NbQ"] = dp_d["NbQ"].apply(nb_full)
-                if "Commission" in dp_d.columns:
-                    dp_d["Commission"] = dp_d["Commission"].apply(lambda x: fmt_full(x,""))
-                if "Part %" in dp_d.columns:
-                    dp_d["Part %"] = dp_d["Part %"].apply(lambda x: f"{x:.2f}%")
-                # Renommer les colonnes de façon lisible
-                _rename_dp = {"_CODE_STR": "Code", "CA": "CA (FCFA)", "NbQ": "Nb quittances",
-                              "Commission": "Commission (FCFA)", "Part %": "Part %"}
-                if _col_nom and _col_nom in dp_d.columns:
-                    _rename_dp[_col_nom] = "Partenaire"
-                dp_d = dp_d.rename(columns=_rename_dp)
-                st.dataframe(dp_d, use_container_width=True, height=380, hide_index=True)
-                # Export
-                _dl1, _dl2 = st.columns(2)
-                _dl1.download_button("📥 CSV partenaires", dl_csv(dp),
-                    "partenaires.csv", "text/csv",
-                    use_container_width=True, key="dl_part_csv")
-                _dl2.download_button("📥 Excel partenaires", dl_xlsx(dp),
-                    "partenaires.xlsx",
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True, key="dl_part_xl")
-                a,b = st.columns(2)
-                a.download_button("📥 CSV",dl_csv(dp),"partenaires.csv","text/csv",
-                    use_container_width=True,key="dl_pf_csv_b")
-                b.download_button("📥 Excel",dl_xlsx(dp),"partenaires.xlsx",
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,key="dl_pf_xl_b")
-            else:
-                alert("Aucun partenaire financier identifié dans les données.","info")
-
-        with tp2:
-            labels = ["Partenaires financiers","Réseau interne / Autres"]
-            vals   = [ca_pf_tot, ca_ri_tot]
-            fig3 = go.Figure(go.Pie(labels=labels, values=vals, hole=.5,
-                marker_colors=[BLUE, GREEN], textinfo="percent+label+value",
-                textfont=dict(size=12)))
-            fig_style(fig3, 400, f"Réseau vs Partenaires — {period_lbl}")
-            st.plotly_chart(fig3, use_container_width=True)
-
-        with tp3:
-            if not df_pf.empty:
-                _show_cols = [c for c in ["_CODE_STR", _col_nom, "CHIFAFFA","COMMAPPO","PRIMNETT"]
-                              if c and c in df_pf.columns]
-                _raw = df_pf[_show_cols].rename(columns={"_CODE_STR":"Code"}).copy()
-                for mc in ["CHIFAFFA","COMMAPPO","PRIMNETT"]:
-                    if mc in _raw.columns: _raw[mc] = _raw[mc].apply(fmt)
-                st.dataframe(_raw.head(500), use_container_width=True, hide_index=True)
-                st.download_button("📥 CSV brut",dl_csv(df_pf),"pf_brut.csv","text/csv",
-                    use_container_width=True,key="dl_pf_raw")
     except Exception as _e_page:
         _erreur_onglet(_e_page, "Partenaires")
 
@@ -4860,8 +4962,12 @@ elif "Sinistres" in page:
             df_sf = sin_f()
             _sin_scope = period_lbl
         if df_sf is None or df_sf.empty:
-            alert(f"Aucun dossier sur <b>{_sin_scope}</b>. Affichage de toutes les périodes.","warn")
-            df_sf, _sin_scope = sin.copy(), "Toutes périodes"
+            # Un exercice sans prestation doit afficher zéro plutôt que
+            # les chiffres d'une autre période : le repli fausserait
+            # la lecture des indicateurs.
+            alert(f"Aucun dossier de prestation sur <b>{_sin_scope}</b>. "
+                  f"Les indicateurs sont à zéro pour cette période.", "info")
+            df_sf = sin.iloc[0:0].copy()
         # Résolution colonnes sinistres — noms exacts vérifiés sur fichier AFG réel
         def _find_col(df, *candidates):
             """
@@ -7903,16 +8009,36 @@ elif "Rapport PDF" in page:
                             story.append(_tbl_style(cd,[7*cm,4*cm,6*cm]))
                             if "LIBECATE" in _ca_r.columns:
                                 story.append(Spacer(1,0.2*cm))
-                                story.append(Paragraph("Ventilation par produit", st_h2))
-                                _cp = _ca_r.groupby("LIBECATE")["CHIFAFFA"].sum().reset_index()
-                                _cp = _cp.sort_values("CHIFAFFA",ascending=False).head(8)
+                                story.append(Paragraph(
+                                    "Ventilation par produit", st_h2))
+                                # Le code produit accompagne le libellé : il
+                                # sert de référence dans les échanges avec
+                                # Megasoft et le service actuariat.
+                                _ccod = next((c for c in ["CODERISQ","CODEPROD",
+                                                          "CODE_PRODUIT","CODEPRODUIT"]
+                                              if c in _ca_r.columns), None)
+                                _grp_p = ["LIBECATE"] + ([_ccod] if _ccod else [])
+                                _cp = (_ca_r.groupby(_grp_p)["CHIFAFFA"].sum()
+                                            .reset_index()
+                                            .sort_values("CHIFAFFA", ascending=False)
+                                            .head(8))
                                 _cp["Part"] = (_cp["CHIFAFFA"]/_cat*100).round(1)
-                                pd_   = [["Produit","CA (FCFA)","Part %"]] + [
-                                    [str(r["LIBECATE"])[:38],
-                                     fmt_full(r["CHIFAFFA"],""),
-                                     f"{r['Part']:.1f}%"]
-                                    for _,r in _cp.iterrows()]
-                                story.append(_tbl_style(pd_,[9*cm,4.5*cm,3.5*cm]))
+                                if _ccod:
+                                    pd_ = [["Code","Produit","CA (FCFA)","Part %"]] + [
+                                        [str(r[_ccod])[:8],
+                                         str(r["LIBECATE"])[:34],
+                                         fmt_full(r["CHIFAFFA"],""),
+                                         f"{r['Part']:.1f} %"]
+                                        for _, r in _cp.iterrows()]
+                                    story.append(_tbl_style(
+                                        pd_, [2.2*cm, 7.3*cm, 4.3*cm, 3.2*cm]))
+                                else:
+                                    pd_ = [["Produit","CA (FCFA)","Part %"]] + [
+                                        [str(r["LIBECATE"])[:38],
+                                         fmt_full(r["CHIFAFFA"],""),
+                                         f"{r['Part']:.1f} %"]
+                                        for _, r in _cp.iterrows()]
+                                    story.append(_tbl_style(pd_,[9*cm,4.5*cm,3.5*cm]))
                                 story.append(Spacer(1,0.15*cm))
                                 story.append(_mpl_barh(
                                     _cp["LIBECATE"].astype(str).tolist(),
@@ -8118,6 +8244,169 @@ elif "Rapport PDF" in page:
                                                             f"{int(r['NbAff']):,}".replace(",", " ")])
                                         _pw = [2*cm,6*cm,4.5*cm,4.5*cm] if _col_ni else [3*cm,8*cm,6*cm]
                                         story.append(_tbl_style(_pD, _pw))
+
+                            # ══════════════════════════════════════════════════
+                            #  Detail par famille : banques, IMF, acceptations
+                            #  Un tableau mensuel et un graphique par famille,
+                            #  suivis d'une comparaison a l'exercice precedent.
+                            # ══════════════════════════════════════════════════
+                            _cd_pf = next((c for c in ["DATECOMP","DATEEFFE"]
+                                           if c in ca.columns), None)
+                            _nm_pf = next((c for c in ["RAISOCIN","RAISOC",
+                                                       "NOM_INTERMEDIAIRE"]
+                                           if c in ca.columns), None)
+                            if _cd_pf and _nm_pf:
+                                _pr = ca[[_cd_pf, _nm_pf, "CHIFAFFA"]].copy()
+                                _pr["_NM"] = (_pr[_nm_pf].fillna("")
+                                                .astype(str).str.strip())
+                                _pr = _pr[_pr["_NM"] != ""]
+                                _pr["_GR"] = _pr["_NM"].apply(groupe_partenaire)
+                                _pr = _pr[~_pr["_GR"].isin(
+                                    ["Réseau interne","Non classé"])]
+                                _pr["_DT"] = pd.to_datetime(_pr[_cd_pf], errors="coerce")
+                                _pr = _pr.dropna(subset=["_DT"])
+                                _pr["_AN"]  = _pr["_DT"].dt.year
+                                _pr["_MOI"] = _pr["_DT"].dt.month
+
+                                _ans_pr = sorted(_pr["_AN"].unique().tolist())
+                                if _ans_pr:
+                                    _aR = (int(SEL_YEAR)
+                                           if SEL_YEAR and int(SEL_YEAR) in _ans_pr
+                                           else int(_ans_pr[-1]))
+                                    _avt = [a for a in _ans_pr if a < _aR]
+                                    _aP2 = int(_avt[-1]) if _avt else None
+                                    _MA = ["Jan","Fév","Mar","Avr","Mai","Juin",
+                                           "Juil","Août","Sep","Oct","Nov","Déc"]
+                                    _dR = _pr[_pr["_AN"] == _aR]
+
+                                    # ── Synthese des trois groupes ─────────────
+                                    _ordre_g = ["Banques locales","IMF","Acceptations"]
+                                    _pres_g  = [g for g in _ordre_g
+                                                if g in _dR["_GR"].unique()]
+                                    if _pres_g:
+                                        _tg2 = (_dR.pivot_table(
+                                                    index="_GR", columns="_MOI",
+                                                    values="CHIFAFFA", aggfunc="sum",
+                                                    fill_value=0)
+                                                  .reindex(index=_pres_g,
+                                                           columns=range(1,13),
+                                                           fill_value=0))
+                                        _tot_g2 = float(_tg2.sum().sum())
+
+                                        story.append(Spacer(1,0.3*cm))
+                                        story.append(Paragraph(
+                                            f"Évolution mensuelle par groupe · {_aR}",
+                                            st_h2))
+                                        story.append(_mpl_barv(
+                                            _MA,
+                                            [_tg2.loc[g].tolist() for g in _pres_g],
+                                            _pres_g,
+                                            f"Production mensuelle des trois "
+                                            f"groupes · {_aR}", haut=4.6))
+
+                                        _tb_g = [["Groupe"] + _MA + ["Total"]]
+                                        for _g in _pres_g:
+                                            _tb_g.append(
+                                                [_g[:16]]
+                                                + [fmt_full(v,"") if v else "—"
+                                                   for v in _tg2.loc[_g]]
+                                                + [fmt_full(_tg2.loc[_g].sum(),"")])
+                                        story.append(Spacer(1,0.15*cm))
+                                        story.append(_tbl_style(
+                                            _tb_g,
+                                            [2.4*cm] + [1.05*cm]*12 + [2*cm]))
+
+                                        _dom_g = _tg2.sum(axis=1).idxmax()
+                                        _pd_g  = (_tg2.sum(axis=1).max()
+                                                  / max(_tot_g2,1) * 100)
+                                        story.append(Spacer(1,0.12*cm))
+                                        story.append(Paragraph(
+                                            f"<b>Lecture.</b> La production "
+                                            f"partenaires de {_aR} s'élève à "
+                                            f"<b>{fmt_full(_tot_g2)}</b>. Le canal "
+                                            f"<b>{_dom_g.lower()}</b> en apporte "
+                                            f"<b>{_pd_g:.1f} %</b>. "
+                                            + ("Cette concentration expose la "
+                                               "production à la défaillance d'un "
+                                               "seul canal et justifie un effort "
+                                               "de diversification."
+                                               if _pd_g >= 65 else
+                                               "La répartition entre canaux reste "
+                                               "équilibrée."), st_bd))
+
+                                    # ── Un volet par famille ───────────────────
+                                    for _fam in _pres_g:
+                                        _dF = _dR[_dR["_GR"] == _fam]
+                                        if _dF.empty: continue
+                                        _tF = (_dF.pivot_table(
+                                                   index="_NM", columns="_MOI",
+                                                   values="CHIFAFFA", aggfunc="sum",
+                                                   fill_value=0)
+                                                 .reindex(columns=range(1,13),
+                                                          fill_value=0))
+                                        _tF["Tot"] = _tF.sum(axis=1)
+                                        _tF = _tF.sort_values("Tot", ascending=False)
+                                        _totF = float(_tF["Tot"].sum())
+                                        if _totF <= 0: continue
+
+                                        story.append(Spacer(1,0.28*cm))
+                                        story.append(Paragraph(
+                                            f"{_fam} · exercice {_aR}", st_h2))
+
+                                        _tbF = [["Partenaire"] + _MA + ["Total"]]
+                                        for _nmF in _tF.head(10).index:
+                                            _tbF.append(
+                                                [str(_nmF)[:18]]
+                                                + [fmt_full(v,"") if v else "—"
+                                                   for v in _tF.loc[_nmF, range(1,13)]]
+                                                + [fmt_full(_tF.loc[_nmF,"Tot"],"")])
+                                        story.append(_tbl_style(
+                                            _tbF, [2.6*cm] + [1.02*cm]*12 + [1.9*cm]))
+
+                                        story.append(Spacer(1,0.15*cm))
+                                        story.append(_mpl_barh(
+                                            _tF.head(8).index.astype(str).tolist(),
+                                            _tF.head(8)["Tot"].tolist(),
+                                            f"{_fam} · production par partenaire · {_aR}",
+                                            coul="#2E86C1", haut=3.4))
+
+                                        # Comparaison a N-1
+                                        _cmt = ""
+                                        if _aP2:
+                                            _dFP = _pr[(_pr["_AN"] == _aP2)
+                                                       & (_pr["_GR"] == _fam)]
+                                            _sFN = _dF.groupby("_NM")["CHIFAFFA"].sum()
+                                            _sFP = _dFP.groupby("_NM")["CHIFAFFA"].sum()
+                                            _tFN, _tFP = float(_sFN.sum()), float(_sFP.sum())
+                                            _vF = ((_tFN-_tFP)/_tFP*100) if _tFP else 0
+                                            _cF = pd.DataFrame(
+                                                {"P": _sFP, "N": _sFN}).fillna(0)
+                                            _nh = int((_cF["N"] > _cF["P"]).sum())
+                                            _cmt = (f" Face à {_aP2}, la production "
+                                                    f"{'progresse' if _vF>=0 else 'recule'} "
+                                                    f"de <b>{abs(_vF):.1f} %</b> "
+                                                    f"({fmt_full(_tFP)} vers "
+                                                    f"{fmt_full(_tFN)}), avec "
+                                                    f"<b>{_nh}</b> partenaire(s) en hausse.")
+                                            if len(_cF) <= 10 and _tFP > 0:
+                                                story.append(Spacer(1,0.12*cm))
+                                                story.append(_mpl_barv(
+                                                    [str(i)[:12] for i in _cF.index],
+                                                    [_cF["P"].tolist(), _cF["N"].tolist()],
+                                                    [str(_aP2), str(_aR)],
+                                                    f"{_fam} · {_aR} face à {_aP2}",
+                                                    haut=4.0))
+
+                                        _n1F = _tF.index[0]
+                                        _p1F = _tF["Tot"].iloc[0]/max(_totF,1)*100
+                                        story.append(Spacer(1,0.12*cm))
+                                        story.append(Paragraph(
+                                            f"<b>Lecture.</b> {_fam} totalise "
+                                            f"<b>{fmt_full(_totF)}</b> sur {_aR}, "
+                                            f"répartis entre "
+                                            f"<b>{nb_full(len(_tF))}</b> partenaires. "
+                                            f"<b>{str(_n1F)[:30]}</b> en assure "
+                                            f"<b>{_p1F:.1f} %</b>." + _cmt, st_bd))
 
                             # ── Comparaison de production N / N-1 ─────────────────
                             # Etablie sur la base CA complete : une comparaison
@@ -8418,6 +8707,119 @@ elif "Rapport PDF" in page:
                                                 f"confondues. Le suivi mensuel permet d'identifier les "
                                                 f"périodes creuses et d'ajuster l'animation commerciale du "
                                                 f"réseau partenaire.", st_bd))
+
+                        # ── Etats mensuels par famille de partenaires ─────────────────────
+                        _cdp = next((c for c in ["DATECOMP","DATEEFFE"] if c in ca.columns), None)
+                        _crs = next((c for c in ["RAISOCIN","RAISOC","RAISON_SOCIALE"]
+                                     if c in ca.columns), None)
+                        if _cdp and _crs:
+                            _pr = ca.copy()
+                            _pr["_RS"] = _pr[_crs].fillna("").astype(str).str.strip()
+                            _pr = _pr[_pr["_RS"] != ""]
+                            _pr["_GR"] = _pr["_RS"].apply(groupe_partenaire)
+                            _pr = _pr[~_pr["_GR"].isin(["Réseau propre","Non classé"])]
+                            _pr["_DT"] = pd.to_datetime(_pr[_cdp], errors="coerce")
+                            _pr = _pr.dropna(subset=["_DT"])
+                            _pr["_AN"] = _pr["_DT"].dt.year
+                            _pr["_MO"] = _pr["_DT"].dt.month
+                            _ckp = "CHIFAFFA" if "CHIFAFFA" in _pr.columns else "MONTENCA"
+                            _ansp = sorted(_pr["_AN"].dropna().astype(int).unique().tolist())
+                            if _ansp:
+                                _aN2 = int(SEL_YEAR) if (SEL_YEAR and int(SEL_YEAR) in _ansp) else _ansp[-1]
+                                _pre2 = [a for a in _ansp if a < _aN2]
+                                _aP2 = int(_pre2[-1]) if _pre2 else None
+                                _MB = ["janv","févr","mars","avr","mai","juin",
+                                       "juil","août","sept","oct","nov","déc"]
+                                _dNr = _pr[_pr["_AN"] == _aN2]
+                                _gp = [g for g in ["Banques locales","IMF","Acceptations",
+                                                   "Autres partenaires"] if g in _dNr["_GR"].unique()]
+                                _mgr = (_dNr.pivot_table(index="_GR", columns="_MO", values=_ckp,
+                                                         aggfunc="sum", fill_value=0)
+                                            .reindex(index=_gp, columns=range(1,13), fill_value=0))
+                                _mgr.columns = _MB
+                                _mgr["Total"] = _mgr.sum(axis=1)
+                                _totp = float(_mgr["Total"].sum())
+                                if _totp > 0:
+                                    story.append(Spacer(1,0.2*cm))
+                                    story.append(Paragraph(
+                                        f"Production mensuelle par famille · exercice {_aN2}", st_h2))
+                                    for _d1, _f1 in [(0,6),(6,12)]:
+                                        _tt = [["Famille"] + _MB[_d1:_f1] + ["Total"]]
+                                        for _g2 in _gp:
+                                            _tt.append([_g2[:18]] +
+                                                [fmt_full(_mgr.loc[_g2,_m],"") if _mgr.loc[_g2,_m] else "—"
+                                                 for _m in _MB[_d1:_f1]] +
+                                                [fmt_full(_mgr.loc[_g2,"Total"],"")])
+                                        story.append(_tbl_style(_tt, [2.7*cm]+[2.1*cm]*6+[2.5*cm]))
+                                        story.append(Spacer(1,0.1*cm))
+                                    story.append(_mpl_barv(
+                                        _MB, [_mgr.loc[_g2,_MB].tolist() for _g2 in _gp[:3]], _gp[:3],
+                                        f"Production mensuelle par famille · {_aN2}", haut=4.4))
+                                    _dm2 = _mgr["Total"].idxmax()
+                                    _mpic = _mgr[_MB].sum(axis=0).idxmax()
+                                    story.append(Spacer(1,0.12*cm))
+                                    story.append(Paragraph(
+                                        f"<b>Lecture.</b> Les partenaires apportent "
+                                        f"<b>{fmt_full(_totp)}</b> sur l'exercice {_aN2}. Les "
+                                        f"<b>{_dm2.lower()}</b> en représentent "
+                                        f"<b>{_mgr.loc[_dm2,'Total']/max(_totp,1)*100:.1f} %</b>. "
+                                        f"Le mois de <b>{_mpic}</b> enregistre le volume le plus élevé.",
+                                        st_bd))
+                                    for _g3 in _gp[:3]:
+                                        _tp3 = (_dNr[_dNr["_GR"]==_g3].groupby("_RS")[_ckp].sum()
+                                                   .sort_values(ascending=False).head(8))
+                                        if _tp3.empty or _tp3.sum() <= 0: continue
+                                        _st3 = float(_tp3.sum())
+                                        story.append(Spacer(1,0.22*cm))
+                                        story.append(Paragraph(f"{_g3} · principaux partenaires", st_h2))
+                                        _r3 = [["Partenaire","Chiffre d'affaires","Part"]]
+                                        for _n3,_v3 in _tp3.items():
+                                            _r3.append([str(_n3)[:40], fmt_full(_v3,""),
+                                                        f"{_v3/_st3*100:.1f} %"])
+                                        story.append(_tbl_style(_r3,[8.5*cm,5*cm,3.5*cm]))
+                                        story.append(Spacer(1,0.12*cm))
+                                        story.append(_mpl_barh(
+                                            _tp3.index.astype(str).tolist(), _tp3.tolist(),
+                                            f"{_g3} · chiffre d'affaires par partenaire",
+                                            coul="#2E86C1", haut=3.2))
+                                        _pc3 = float(_tp3.head(3).sum())/_st3*100
+                                        story.append(Paragraph(
+                                            f"<b>Lecture.</b> <b>{str(_tp3.index[0])[:36]}</b> apporte "
+                                            f"<b>{_tp3.iloc[0]/_st3*100:.1f} %</b> du volume de cette "
+                                            f"famille ; les trois premiers en cumulent <b>{_pc3:.1f} %</b>"
+                                            + (", concentration à surveiller." if _pc3>=75
+                                               else ", répartition équilibrée."), st_bd))
+                                    if _aP2:
+                                        _dP2 = _pr[_pr["_AN"]==_aP2]
+                                        _cN2 = _dNr.groupby("_GR")[_ckp].sum().reindex(_gp).fillna(0)
+                                        _cP2 = _dP2.groupby("_GR")[_ckp].sum().reindex(_gp).fillna(0)
+                                        story.append(Spacer(1,0.25*cm))
+                                        story.append(Paragraph(f"Comparaison {_aN2} face à {_aP2}", st_h2))
+                                        _rc2 = [["Famille",f"{_aP2}",f"{_aN2}","Écart","Var."]]
+                                        for _g4 in _gp:
+                                            _vp4,_vn4 = float(_cP2[_g4]), float(_cN2[_g4])
+                                            _vr4 = ((_vn4-_vp4)/_vp4*100) if _vp4 else None
+                                            _rc2.append([_g4[:20], fmt_full(_vp4,""), fmt_full(_vn4,""),
+                                                         fmt_full(_vn4-_vp4,""),
+                                                         "n. s." if _vr4 is None else f"{_vr4:+.0f} %"])
+                                        _tN4,_tP4 = float(_cN2.sum()), float(_cP2.sum())
+                                        _vg4 = ((_tN4-_tP4)/_tP4*100) if _tP4 else 0
+                                        _rc2.append(["TOTAL", fmt_full(_tP4,""), fmt_full(_tN4,""),
+                                                     fmt_full(_tN4-_tP4,""), f"{_vg4:+.1f} %"])
+                                        story.append(_tbl_style(_rc2,[3.5*cm,3.4*cm,3.4*cm,3.4*cm,3.3*cm]))
+                                        story.append(Spacer(1,0.15*cm))
+                                        story.append(_mpl_barv(
+                                            _gp, [_cP2.tolist(), _cN2.tolist()], [str(_aP2), str(_aN2)],
+                                            f"Production par famille · {_aN2} face à {_aP2}", haut=4.0))
+                                        _prog4 = [g for g in _gp if _cN2[g] > _cP2[g]]
+                                        story.append(Spacer(1,0.12*cm))
+                                        story.append(Paragraph(
+                                            f"<b>Lecture.</b> Le volume apporté par les partenaires "
+                                            f"{'progresse' if _vg4>=0 else 'recule'} de "
+                                            f"<b>{abs(_vg4):.1f} %</b> entre {_aP2} et {_aN2}, passant de "
+                                            f"<b>{fmt_full(_tP4)}</b> à <b>{fmt_full(_tN4)}</b>. "
+                                            + (f"Familles en progression : <b>{', '.join(_prog4)}</b>."
+                                               if _prog4 else "Aucune famille ne progresse."), st_bd))
 
                         # 4. Sinistres
                         if s_sin and _sin_r is not None:
