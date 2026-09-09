@@ -5689,8 +5689,11 @@ elif "Saisie BIA" in page:
                 st.session_state["f_peri"]      = "Annuelle"
                 st.session_state["f_gar"]       = "Avec garantie décès"
                 st.session_state["f_duree"]     = 1
-                st.session_state["f_code_appo"] = _nom_courtier
-                st.session_state["f_nom_appo"]  = _nom_courtier
+                # Le courtier n'a ni code apporteur ni agence : il est
+                # identifié par son compte. Ces champs restent vides.
+                st.session_state["f_code_appo"] = ""
+                st.session_state["f_nom_appo"]  = ""
+                st.session_state["f_agence"]    = ""
                 st.rerun()
 
             # Si BIA pas encore démarré  arrêter ici
@@ -6540,18 +6543,29 @@ elif "Saisie BIA" in page:
                     from datetime import datetime as _dt
 
                     _buf = _io.BytesIO()
+                    # Marges resserrées : les deux exemplaires doivent tenir
+                    # sur une seule page A4.
                     doc  = SimpleDocTemplate(_buf, pagesize=A4,
-                        leftMargin=1.5*cm, rightMargin=1.5*cm,
-                        topMargin=1.5*cm, bottomMargin=1.5*cm)
+                        leftMargin=1.4*cm, rightMargin=1.4*cm,
+                        topMargin=0.9*cm, bottomMargin=0.9*cm)
 
-                    C_N=rl_colors.HexColor("#0D1F3C"); C_G=rl_colors.HexColor("#1A7F6E")
-                    C_R=rl_colors.HexColor("#C0392B"); C_W=rl_colors.white
-                    C_L=rl_colors.HexColor("#F3F6FA")
+                    # Palette du bulletin, imposée par la charte :
+                    # rouge #FF0000, vert #00AD00 et #00B050, fond gris #ECEDEE.
+                    C_R = rl_colors.HexColor("#FF0000")   # rouge
+                    C_G = rl_colors.HexColor("#00AD00")   # vert principal
+                    C_V = rl_colors.HexColor("#00B050")   # vert secondaire
+                    C_L = rl_colors.HexColor("#ECEDEE")   # fond gris clair
+                    C_W = rl_colors.white
+                    C_N = C_G                              # en-têtes
 
                     st_ti = ParagraphStyle("T",fontName="Helvetica-Bold",fontSize=12,textColor=C_W,alignment=TA_CENTER)
-                    st_su = ParagraphStyle("S",fontName="Helvetica",fontSize=9,textColor=rl_colors.HexColor("#A9DFBF"),alignment=TA_CENTER)
-                    st_bd = ParagraphStyle("B",fontName="Helvetica",fontSize=9,textColor=rl_colors.HexColor("#2C3E50"),leading=13)
-                    st_sm = ParagraphStyle("Sm",fontName="Helvetica",fontSize=8,textColor=rl_colors.grey,alignment=TA_CENTER)
+                    st_su = ParagraphStyle("S",fontName="Helvetica",fontSize=8.5,
+                                           textColor=C_W,alignment=TA_CENTER)
+                    st_bd = ParagraphStyle("B",fontName="Helvetica",fontSize=8,
+                                           textColor=rl_colors.black,leading=11)
+                    st_sm = ParagraphStyle("Sm",fontName="Helvetica",fontSize=7,
+                                           textColor=rl_colors.HexColor("#666666"),
+                                           alignment=TA_CENTER)
                     st_bf = ParagraphStyle("Bf",fontName="Helvetica-Bold",fontSize=9,textColor=C_N)
 
                     # Logo à imprimer : celui du courtier connecté pour la
@@ -6567,7 +6581,7 @@ elif "Saisie BIA" in page:
                             _img = _RLImg(_io.BytesIO(_b64.b64decode(_logo_impr)),
                                           width=3.5*cm, height=1.5*cm)
                             _img.hAlign = "CENTER"
-                            items.append(_img); items.append(Spacer(1,0.15*cm))
+                            items.append(_img); items.append(Spacer(1,0.08*cm))
                         except Exception:
                             pass
                         # En-tête adapté au produit
@@ -6589,12 +6603,51 @@ elif "Saisie BIA" in page:
                         rows = [
                             ["N° BIA", st.session_state.get("_last_bia_num","—"),
                              "Date de saisie", _dt.now().strftime("%d/%m/%Y")],
-                            ["Apporteur", _appo_lbl, "Produit", prod["nom"]],
-                            ["Souscripteur", _n, "Téléphone", st.session_state.get("f_c_tel","—")],
-                            ["Prime annuelle", f"{int(st.session_state.get('f_coti',0)):,} FCFA", "Capital garanti", f"{int(st.session_state.get('f_cap',0)):,} FCFA"],
-                            ["Date effet", ds(st.session_state.get("f_deff","")), "Date terme", str(st.session_state.get("f_terme_auto","—"))],
-                            ["Mode règlement", st.session_state.get("f_mode","—"), "Référence", st.session_state.get("f_mref","—") or "—"],
+                            # Le courtier connaît son propre nom : la ligne
+                            # apporteur n'apparaît que hors parcours courtier.
+                            (["Produit", prod["nom"], "Code", prod["code"]]
+                             if is_courtier(user)
+                             else ["Apporteur", _appo_lbl, "Produit", prod["nom"]]),
+                            ["Souscripteur", _n, "Téléphone",
+                             st.session_state.get("f_c_tel","—")],
                         ]
+
+                        # Terme : date d'effet augmentée de la durée du contrat.
+                        _d_eff_p = st.session_state.get("f_deff")
+                        _dur_p   = st.session_state.get("f_duree", 1)
+                        _terme_p = st.session_state.get("f_terme_auto","")
+                        if not _terme_p and _d_eff_p:
+                            try:
+                                from dateutil.relativedelta import relativedelta as _rd
+                                _de = (_d_eff_p if isinstance(_d_eff_p, date)
+                                       else date.fromisoformat(str(_d_eff_p)[:10]))
+                                _terme_p = (_de + _rd(years=int(_dur_p or 1))).strftime("%d/%m/%Y")
+                            except Exception:
+                                _terme_p = "—"
+
+                        # Libellés adaptés au produit
+                        _lbl_prime = {
+                            "Mensuelle":"Prime mensuelle","Trimestrielle":"Prime trimestrielle",
+                            "Semestrielle":"Prime semestrielle","Annuelle":"Prime annuelle",
+                            "Unique":"Prime unique",
+                        }.get(str(st.session_state.get("f_peri","Annuelle")), "Cotisation")
+                        _lbl_cap = ("Capital constitutif" if prod["code"] == "EP0"
+                                    else "Capital garanti")
+
+                        rows.append([_lbl_prime,
+                                     f"{int(st.session_state.get('f_coti',0)):,} FCFA".replace(","," "),
+                                     _lbl_cap,
+                                     f"{int(st.session_state.get('f_cap',0)):,} FCFA".replace(","," ")])
+                        rows.append(["Date d'effet", ds(_d_eff_p),
+                                     "Date de terme", _terme_p or "—"])
+                        if prod["code"] != "PA0":
+                            rows.append(["Durée", f"{_dur_p} an(s)",
+                                         "Périodicité",
+                                         st.session_state.get("f_peri","—")])
+                        rows.append(["Mode de règlement",
+                                     st.session_state.get("f_mode","—"),
+                                     "Référence",
+                                     st.session_state.get("f_mref","—") or "—"])
                         t = Table(rows, colWidths=[4*cm,4.5*cm,4*cm,4.5*cm])
                         t.setStyle(TableStyle([
                             ("FONTNAME",(0,0),(0,-1),"Helvetica-Bold"),("FONTNAME",(2,0),(2,-1),"Helvetica-Bold"),
@@ -6603,7 +6656,7 @@ elif "Saisie BIA" in page:
                             ("GRID",(0,0),(-1,-1),0.3,rl_colors.HexColor("#DDE3EE")),
                             ("TOPPADDING",(0,0),(-1,-1),5),("BOTTOMPADDING",(0,0),(-1,-1),5),("LEFTPADDING",(0,0),(-1,-1),6),
                         ]))
-                        items.append(t); items.append(Spacer(1,0.3*cm))
+                        items.append(t); items.append(Spacer(1,0.16*cm))
                         items.append(Paragraph("Je soussigné(e) certifie l'exactitude des informations ci-dessus et reconnais avoir reçu les conditions générales du contrat.",st_bd))
                         items.append(Spacer(1,0.5*cm))
                         # Zone de signature : l'image déposée est reproduite,
@@ -6613,7 +6666,7 @@ elif "Saisie BIA" in page:
                                 return ""
                             try:
                                 _si = _RLImg(_io.BytesIO(_b64.b64decode(_b64_sig)),
-                                             width=6.2*cm, height=1.9*cm,
+                                             width=4.4*cm, height=1.15*cm,
                                              kind="proportional")
                                 _si.hAlign = "CENTER"
                                 return _si
@@ -6626,26 +6679,27 @@ elif "Saisie BIA" in page:
                         sig = Table(
                             [["Signature du souscripteur", _lbl_org],
                              [_cell_sig(st.session_state.get("f_sig_sous")),
-                              _cell_sig(st.session_state.get("f_sig_org"))],
-                             ["", ""]],
+                              _cell_sig(st.session_state.get("f_sig_org"))]],
                             colWidths=[8.5*cm, 8.5*cm],
-                            rowHeights=[None, 2.1*cm, None])
+                            rowHeights=[None, 1.25*cm])
                         sig.setStyle(TableStyle([
                             ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
-                            ("FONTSIZE",(0,0),(-1,-1),8),
+                            ("FONTSIZE",(0,0),(-1,-1),7),
+                            ("TEXTCOLOR",(0,0),(-1,0),C_G),
                             ("ALIGN",(0,0),(-1,-1),"CENTER"),
                             ("VALIGN",(0,1),(-1,1),"MIDDLE"),
-                            ("BOX",(0,1),(0,2),0.5,C_N),("BOX",(1,1),(1,2),0.5,C_N),
-                            ("BOTTOMPADDING",(0,2),(-1,2),18),
+                            ("BOX",(0,1),(0,1),0.5,C_G),("BOX",(1,1),(1,1),0.5,C_G),
+                            ("TOPPADDING",(0,0),(-1,-1),2),
+                            ("BOTTOMPADDING",(0,0),(-1,-1),2),
                         ]))
                         items.append(sig)
-                        items.append(Spacer(1,0.15*cm))
+                        items.append(Spacer(1,0.08*cm))
                         items.append(Paragraph("AFG Assurances Bénin Vie · Groupe AFG Holding · Conforme CIMA",st_sm))
                         return items
 
                     story = []
                     story.extend(_exemplaire("EXEMPLAIRE CLIENT"))
-                    story.append(Spacer(1,0.3*cm))
+                    story.append(Spacer(1,0.16*cm))
                     story.append(HRFlowable(width="100%",thickness=0.8,color=C_R,dash=[3,3],spaceAfter=3))
                     story.append(Paragraph("✂ — — — Découper ici — — — ✂",
                         ParagraphStyle("C",fontName="Helvetica",fontSize=8,textColor=rl_colors.grey,alignment=TA_CENTER)))
