@@ -1615,6 +1615,8 @@ CA_COLS = {
     #   NOM_APPORT : nom de la personne physique rattachee au CODEAPPO
     "RAISOCIN","RAISOC","RAISON_SOCIALE",
     "NOM_APPORT","NOM_APPO","NOM_COMMERCIAL","NOM_AGENT",
+    # Code de la categorie produit, affiche dans la ventilation du rapport
+    "CODECAT","CODE_CAT","CODERISQ",
 }
 # Colonnes Prestations — noms EXACTS vérifiés sur le fichier réel AFG
 # Libéllé Catégorie : double 'l' (particularité AFG)
@@ -2760,12 +2762,21 @@ def as_year(s):
     ex = s.astype(str).str.extract(r"(19\d{2}|20\d{2})", expand=False)
     return pd.to_numeric(ex, errors="coerce").astype("Int64")
 
-def year_mask(df, cols, yr):
-    """Masque des lignes dont l'annee == yr, sur la 1re colonne exploitable."""
+def year_mask(df, cols, yr, strict=True):
+    """Masque des lignes dont l'annee vaut `yr`.
+
+    La premiere colonne presente et exploitable fait autorite. En mode
+    strict, si cette colonne ne contient pas l'exercice demande, aucune
+    ligne n'est retournee : on ne bascule pas sur une autre colonne, ce
+    qui ferait apparaitre des donnees d'un exercice different.
+    """
     for c in cols:
         if c and c in df.columns:
-            m = (as_year(df[c]) == int(yr)).fillna(False)
-            if m.any(): return m
+            _a = as_year(df[c])
+            if _a.notna().any():                 # colonne exploitable
+                return (_a == int(yr)).fillna(False)
+            if strict:
+                continue
     return pd.Series(False, index=df.index)
 
 def ca_f():
@@ -3363,22 +3374,102 @@ elif "Portefeuille" in page:
     try:
         if pf is None: alert("Chargez le Portefeuille dans la barre latérale.","warn"); st.stop()
         df_all = pf  # portefeuille complet (reference pour les totaux)
-        # ── Perimetre analyse : annee de saisie (DATESOUS) puis periode ──────────
-        # Priorite : filtre annee de la sidebar > filtre periode > tout
+
+        # ── Etats normalises, utilises pour tous les comptages ───────────────
+        _ek = "ETAT_POLICE" if "ETAT_POLICE" in pf.columns else None
+
+        def _compter_etats(_d):
+            """Compte polices totales, actives, resiliees et echues."""
+            if _d is None or _d.empty or _ek is None:
+                return dict(total=0 if _d is None else len(_d),
+                            actives=0, resiliees=0, echues=0, autres=0)
+            _e = _d[_ek].fillna("").astype(str).str.strip().str.upper()
+            _act = int(_e.str.startswith("ACTIF").sum())
+            _res = int(_e.str.contains("RESILI|RÉSILI", regex=True, na=False).sum())
+            _ech = int(_e.str.contains("ECHU|ÉCHU", regex=True, na=False).sum())
+            return dict(total=len(_d), actives=_act, resiliees=_res,
+                        echues=_ech, autres=len(_d) - _act - _res - _ech)
+
+        _glob = _compter_etats(pf)
+
+        # ── Vue d'ensemble : la base entiere, hors filtre ────────────────────
+        section("📋 Portefeuille — vue d'ensemble",
+                "BASE COMPLÈTE · TOUS EXERCICES CONFONDUS")
+        _v1, _v2, _v3, _v4, _v5 = st.columns(5)
+        kpi(_v1, "Polices au total", nb_full(_glob["total"]),
+            "Toute la base", "blue", icon="📋")
+        kpi(_v2, "Polices actives", nb_full(_glob["actives"]),
+            f"{_glob['actives']/max(_glob['total'],1)*100:.1f} % du total",
+            "teal", icon="✅")
+        kpi(_v3, "Polices résiliées", nb_full(_glob["resiliees"]),
+            f"{_glob['resiliees']/max(_glob['total'],1)*100:.1f} % du total",
+            "red", icon="✖")
+        kpi(_v4, "Polices échues", nb_full(_glob["echues"]),
+            f"{_glob['echues']/max(_glob['total'],1)*100:.1f} % du total",
+            "amber", icon="⏳")
+        kpi(_v5, "Autres états", nb_full(_glob["autres"]),
+            "Suspendues, en cours…", "", icon="◦")
+
+        # ── Perimetre analyse : date d'effet du contrat ──────────────────────
+        # La date d'effet marque l'entree du risque dans le portefeuille :
+        # c'est la reference actuarielle pour rattacher une police a un
+        # exercice, plus fiable que la date de saisie administrative.
+        st.markdown("")
         if SEL_YEAR:
-            df = pf[year_mask(pf, ["DATESOUS","ANNEESOUS","ANNEE","DATEEFFE"], SEL_YEAR)].copy()
-            _pf_scope = f"Année de saisie {SEL_YEAR}"
+            df = pf[year_mask(pf, ["DATEEFFE","DATE_EFFET","DATESOUS"],
+                              SEL_YEAR)].copy()
+            _pf_scope = f"Exercice {SEL_YEAR}"
         else:
             df = pf_f()
             _pf_scope = period_lbl
-        if df is None or df.empty:
-            alert(f"Aucune police saisie sur <b>{_pf_scope}</b>. "
-                  f"Affichage du portefeuille complet.", "warn")
-            df, _pf_scope = df_all, "Toutes périodes"
 
-        # Titre dynamique selon filtre année
-        section(f"📋 Portefeuille — {_pf_scope}",
-                "PÉRIMÈTRE : DATE DE SAISIE · FILTRES · EXPORT")
+        if df is None or df.empty:
+            alert(f"Aucune police prenant effet sur <b>{_pf_scope}</b>. "
+                  f"Les indicateurs de cette section sont à zéro.", "info")
+            df = pf.iloc[0:0].copy()
+
+        _per = _compter_etats(df)
+
+        section(f"Production de l'exercice — {_pf_scope}",
+                "PÉRIMÈTRE : DATE D'EFFET · FILTRES · EXPORT")
+
+        _p1, _p2, _p3, _p4, _p5, _p6 = st.columns(6)
+        kpi(_p1, "Polices prises d'effet", nb_full(_per["total"]),
+            f"{_per['total']/max(_glob['total'],1)*100:.1f} % de la base",
+            "blue", icon="📋")
+        kpi(_p2, "Actives", nb_full(_per["actives"]),
+            f"{_per['actives']/max(_per['total'],1)*100:.1f} % de l'exercice",
+            "teal", icon="✅")
+        kpi(_p3, "Résiliées", nb_full(_per["resiliees"]),
+            f"{_per['resiliees']/max(_per['total'],1)*100:.1f} % de l'exercice",
+            "red", icon="✖")
+        kpi(_p4, "Échues", nb_full(_per["echues"]),
+            f"{_per['echues']/max(_per['total'],1)*100:.1f} % de l'exercice",
+            "amber", icon="⏳")
+
+        # Indicateurs actuariels complementaires
+        _coti_c = next((c for c in ["COTI_PERIODIQUE","MONTENCA","PRIMNETT"]
+                        if c in df.columns), None)
+        _prime_tot = float(df[_coti_c].fillna(0).sum()) if _coti_c else 0.0
+        kpi(_p5, "Cotisations souscrites", fmt_full(_prime_tot),
+            "Sur les polices de l'exercice", "", icon="💰")
+        _tx_maint = (_per["actives"] / max(_per["total"], 1) * 100)
+        kpi(_p6, "Taux de maintien", f"{_tx_maint:.1f} %",
+            "Actives / prises d'effet",
+            "teal" if _tx_maint >= 75 else "amber", icon="📐")
+
+        # Prime moyenne et durée moyenne, si les colonnes existent
+        _i1, _i2, _i3 = st.columns(3)
+        _pm = _prime_tot / max(_per["total"], 1)
+        kpi(_i1, "Prime moyenne", fmt_full(_pm),
+            "Par police de l'exercice", "blue", icon="🎫")
+        _tx_res_p = _per["resiliees"] / max(_per["total"], 1) * 100
+        kpi(_i2, "Taux de résiliation", f"{_tx_res_p:.1f} %",
+            "Seuil CIMA : 25 %",
+            "red" if _tx_res_p > 25 else "teal", icon="📉")
+        _tx_ech = _per["echues"] / max(_per["total"], 1) * 100
+        kpi(_i3, "Taux d'échéance", f"{_tx_ech:.1f} %",
+            "Contrats arrivés à terme", "amber", icon="🏁")
 
         # Listes de choix construites depuis df (déjà filtré par année si SEL_YEAR)
         _base_opts = df  # base pour les options = données de l'année choisie
@@ -4551,20 +4642,91 @@ elif "Partenaires" in page:
             st.dataframe(_aff, use_container_width=True, hide_index=True,
                          height=min(60 + 35*len(_aff), 460))
 
-            # Courbes d'evolution
-            _top = _tab.head(8)
-            _fig_e = go.Figure()
-            for _nm2 in _top.index:
-                _fig_e.add_scatter(
-                    x=_MOIS_AB, y=_top.loc[_nm2, _MOIS_AB].tolist(),
-                    mode="lines+markers", name=str(_nm2)[:26],
-                    hovertemplate="%{fullData.name}<br>%{x} : %{y:,.0f} FCFA<extra></extra>")
-            _fig_e.update_layout(yaxis=dict(title="CA (FCFA)"),
-                                 legend=dict(orientation="h", y=-0.22,
-                                             font=dict(size=9)))
-            fig_style(_fig_e, 400, f"Évolution mensuelle · {_nom_grp} · {_an_ref}")
-            st.plotly_chart(_fig_e, use_container_width=True,
-                            key=f"fig_evo_{_cle_ui}")
+            # ── Évolution partenaire par partenaire ───────────────────────
+            # Barres pour le volume mensuel, courbe pour la tendance : les
+            # deux lectures se complètent sans se masquer.
+            st.markdown("**Évolution mensuelle, partenaire par partenaire**")
+            _actifs = _tab[_tab["Total"] > 0]
+            _liste_p = _actifs.index.astype(str).tolist()
+            if not _liste_p:
+                bloc_vide("Aucun partenaire actif sur l'exercice.", _icone)
+            else:
+                _sel_p = st.selectbox(
+                    "Partenaire", ["Tous (cumul)"] + _liste_p,
+                    key=f"sel_part_{_cle_ui}")
+
+                if _sel_p == "Tous (cumul)":
+                    _serie_n = _actifs[_MOIS_AB].sum().tolist()
+                    _titre_p = f"{_nom_grp} · cumul"
+                else:
+                    _serie_n = _actifs.loc[_sel_p, _MOIS_AB].tolist()
+                    _titre_p = _sel_p
+
+                _fc1 = go.Figure()
+                _fc1.add_bar(x=_MOIS_AB, y=_serie_n, name="Production mensuelle",
+                             marker_color=GREEN, opacity=.82,
+                             hovertemplate="%{x} : %{y:,.0f} FCFA<extra></extra>")
+                _fc1.add_scatter(x=_MOIS_AB, y=_serie_n, name="Tendance",
+                                 mode="lines+markers",
+                                 line=dict(color=RED, width=2.4),
+                                 marker=dict(size=7),
+                                 hovertemplate="%{x} : %{y:,.0f} FCFA<extra></extra>")
+                _cum = np.cumsum(_serie_n).tolist()
+                _fc1.add_scatter(x=_MOIS_AB, y=_cum, name="Cumul",
+                                 mode="lines", yaxis="y2",
+                                 line=dict(color=NAVY, width=1.6, dash="dot"))
+                _fc1.update_layout(
+                    yaxis=dict(title="Production (FCFA)"),
+                    yaxis2=dict(title="Cumul (FCFA)", overlaying="y",
+                                side="right", showgrid=False),
+                    legend=dict(orientation="h", y=-0.2))
+                fig_style(_fc1, 380, f"{_titre_p} · {_an_ref}")
+                st.plotly_chart(_fc1, use_container_width=True,
+                                key=f"fig_uni_{_cle_ui}")
+
+                # Comparaison N / N-1 pour ce partenaire
+                if _an_pre:
+                    _dP_u = _pb[(_pb["_GROUPE"] == _nom_grp)
+                                & (_pb["_AN"] == _an_pre)]
+                    if _sel_p == "Tous (cumul)":
+                        _sp_p = (_dP_u.groupby("_MOI")[_cak_p].sum()
+                                      .reindex(range(1,13), fill_value=0).tolist())
+                    else:
+                        _sp_p = (_dP_u[_dP_u["_NOM"] == _sel_p]
+                                    .groupby("_MOI")[_cak_p].sum()
+                                    .reindex(range(1,13), fill_value=0).tolist())
+
+                    if sum(_sp_p) > 0 or sum(_serie_n) > 0:
+                        _fc2 = go.Figure()
+                        _fc2.add_bar(x=_MOIS_AB, y=_sp_p, name=str(_an_pre),
+                                     marker_color=NAVY, opacity=.5,
+                                     hovertemplate="%{x} "+str(_an_pre)
+                                                   +"<br>%{y:,.0f} FCFA<extra></extra>")
+                        _fc2.add_bar(x=_MOIS_AB, y=_serie_n, name=str(_an_ref),
+                                     marker_color=GREEN,
+                                     hovertemplate="%{x} "+str(_an_ref)
+                                                   +"<br>%{y:,.0f} FCFA<extra></extra>")
+                        _fc2.add_scatter(x=_MOIS_AB, y=_serie_n,
+                                         name=f"Tendance {_an_ref}",
+                                         mode="lines", line=dict(color=RED, width=2))
+                        _fc2.update_layout(barmode="group",
+                                           yaxis=dict(title="CA (FCFA)"),
+                                           legend=dict(orientation="h", y=-0.2))
+                        fig_style(_fc2, 360,
+                                  f"{_titre_p} · {_an_ref} face à {_an_pre}")
+                        st.plotly_chart(_fc2, use_container_width=True,
+                                        key=f"fig_uni_cmp_{_cle_ui}")
+
+                        _tn, _tp2 = float(sum(_serie_n)), float(sum(_sp_p))
+                        _vp = ((_tn-_tp2)/_tp2*100) if _tp2 else None
+                        _nm_h = sum(1 for a, b in zip(_serie_n, _sp_p) if a > b)
+                        st.info(
+                            f"**{_titre_p}** réalise **{fmt_full(_tn)}** en "
+                            f"{_an_ref} contre **{fmt_full(_tp2)}** en {_an_pre}"
+                            + (f", soit **{_vp:+.1f} %**." if _vp is not None
+                               else " (aucune production l'exercice précédent).")
+                            + f" **{_nm_h} mois sur 12** dépassent le niveau "
+                              f"de l'exercice précédent.")
 
             # Poids relatif
             _fig_p = go.Figure(go.Bar(
@@ -4954,8 +5116,12 @@ elif "Sinistres" in page:
         df_s = sin  # base complete (reference)
         # ── Perimetre : exercice sinistre puis periode ───────────────────────────
         if SEL_YEAR:
+            # L'exercice de survenance fait foi. La date de comptabilisation
+            # est ecartee : un sinistre 2025 regle en 2026 ne doit pas
+            # apparaitre dans l'exercice 2026.
             df_sf = sin[year_mask(sin,
-                ["ANNEE_SIN","Exercice Sinistre","Date Survenance","DATECOMP"],
+                ["ANNEE_SIN","Exercice Sinistre","Date Survenance",
+                 "DATE_SURV","Date survenance"],
                 SEL_YEAR)].copy()
             _sin_scope = f"Exercice {SEL_YEAR}"
         else:
@@ -5043,7 +5209,10 @@ elif "Sinistres" in page:
         if _ca_ref_df is None or _ca_ref_df.empty: _ca_ref_df = ca
         ca_all = float(_ca_ref_df["CHIFAFFA"].fillna(0).sum()) if (
                  _ca_ref_df is not None and "CHIFAFFA" in _ca_ref_df.columns) else 0
-        sp=tot_sin/max(ca_all,1)*100; cout_m=tot_sin/max(nb_clos,1)
+        # Ratio S/P : charge rapportee aux primes du MEME exercice.
+        # Sans CA de reference, le ratio n'a pas de sens : on l'annule.
+        sp = (tot_sin / ca_all * 100) if ca_all > 0 else 0.0
+        cout_m = (tot_sin / nb_clos) if nb_clos > 0 else 0.0
         actifs_n=int((pf["ETAT_POLICE"].str.strip()=="ACTIF").sum()) if pf is not None and "ETAT_POLICE" in pf.columns else 1
         burning=charge_u/max(actifs_n,1)*1000
 
@@ -7964,14 +8133,12 @@ elif "Rapport PDF" in page:
                             _val_e = [_act, _res, _ec, _ina]
                             _pair  = [(l,v) for l,v in zip(_lab_e,_val_e) if v > 0]
                             if _pair:
-                                story.append(Spacer(1,0.15*cm))
-                                story.append(_mpl_pie([p[0] for p in _pair],
-                                                    [p[1] for p in _pair],
-                                                    f"Structure du portefeuille · {period_lbl}"))
+                                # Une seule representation des etats : le poids
+                                # relatif. Le camembert faisait double emploi.
                                 story.append(Spacer(1,0.18*cm))
-                                story.append(_mpl_treemap([p[0] for p in _pair],
-                                                      [p[1] for p in _pair],
-                                                      "Poids relatif de chaque état"))
+                                story.append(_mpl_treemap(
+                                    [p[0] for p in _pair], [p[1] for p in _pair],
+                                    f"Poids relatif de chaque état · {period_lbl}"))
 
                             # La ventilation par produit figure en section 2,
                         # ou elle est mise en regard du chiffre d'affaires.
@@ -8014,7 +8181,10 @@ elif "Rapport PDF" in page:
                                 # Le code produit accompagne le libellé : il
                                 # sert de référence dans les échanges avec
                                 # Megasoft et le service actuariat.
-                                _ccod = next((c for c in ["CODERISQ","CODEPROD",
+                                # CODECAT porte le code de la categorie produit
+                                # dans les extractions Megasoft.
+                                _ccod = next((c for c in ["CODECAT","CODE_CAT",
+                                                          "CODERISQ","CODEPROD",
                                                           "CODE_PRODUIT","CODEPRODUIT"]
                                               if c in _ca_r.columns), None)
                                 _grp_p = ["LIBECATE"] + ([_ccod] if _ccod else [])
@@ -8089,6 +8259,204 @@ elif "Rapport PDF" in page:
                                             f"({fmt_full(_mn['CHIFAFFA'])}), soit un rapport de "
                                             f"<b>{_mx['CHIFAFFA']/max(_mn['CHIFAFFA'],1):.1f}</b> "
                                             f"entre les deux extrêmes.", st_bd))
+
+                        # ── Comparaison de production N / N-1 ─────────────────
+                        # Etablie sur la base CA complete : une comparaison
+                        # annuelle suppose de disposer des deux exercices.
+                        _cd_r = next((c for c in ["DATECOMP","DATEEFFE","DATESOUS"]
+                                      if c in ca.columns), None)
+                        if _cd_r:
+                            _rb = ca.copy()
+                            _rb["_DT"] = pd.to_datetime(_rb[_cd_r], errors="coerce")
+                            _rb = _rb.dropna(subset=["_DT"])
+                            _rb["_AN"] = _rb["_DT"].dt.year
+                            _cak_r = "CHIFAFFA" if "CHIFAFFA" in _rb.columns else "MONTENCA"
+                            _ans_r = sorted(_rb["_AN"].unique().tolist())
+                            if len(_ans_r) >= 2:
+                                # L'exercice de reference suit le filtre annuel
+                                # de la barre laterale ; a defaut, le plus recent.
+                                if SEL_YEAR and SEL_YEAR in _ans_r:
+                                    _aN = int(SEL_YEAR)
+                                    _prec = [a for a in _ans_r if a < _aN]
+                                    _aN1  = int(_prec[-1]) if _prec else int(_ans_r[0])
+                                else:
+                                    _aN, _aN1 = int(_ans_r[-1]), int(_ans_r[-2])
+                                _mN  = (_rb[_rb["_AN"]==_aN ].groupby(_rb["_DT"].dt.month)[_cak_r]
+                                          .sum().reindex(range(1,13), fill_value=0))
+                                _mN1 = (_rb[_rb["_AN"]==_aN1].groupby(_rb["_DT"].dt.month)[_cak_r]
+                                          .sum().reindex(range(1,13), fill_value=0))
+                                _MFR = ["Jan","Fév","Mar","Avr","Mai","Juin",
+                                        "Juil","Août","Sep","Oct","Nov","Déc"]
+                                story.append(Spacer(1,0.25*cm))
+                                story.append(Paragraph(
+                                    f"Production mensuelle comparée · {_aN} face à {_aN1} :", st_h2))
+                                story.append(_mpl_barv(
+                                    _MFR, [_mN1.tolist(), _mN.tolist()],
+                                    [str(_aN1), str(_aN)],
+                                    f"Chiffre d'affaires mensuel · {_aN} face à {_aN1}",
+                                    haut=4.4))
+
+                                _tN_r, _tN1_r = float(_mN.sum()), float(_mN1.sum())
+                                _vr = ((_tN_r-_tN1_r)/_tN1_r*100) if _tN1_r else 0
+                                _cmpR = [["Mois", f"{_aN1} (FCFA)", f"{_aN} (FCFA)",
+                                          "Écart", "Var."]]
+                                for _k in range(12):
+                                    _v1, _v0 = float(_mN.iloc[_k]), float(_mN1.iloc[_k])
+                                    _vv = ((_v1-_v0)/_v0*100) if _v0 else None
+                                    _cmpR.append([_MFR[_k], fmt_full(_v0,""), fmt_full(_v1,""),
+                                                  fmt_full(_v1-_v0,""),
+                                                  "—" if _vv is None else f"{_vv:+.0f} %"])
+                                _cmpR.append(["TOTAL", fmt_full(_tN1_r,""), fmt_full(_tN_r,""),
+                                              fmt_full(_tN_r-_tN1_r,""), f"{_vr:+.1f} %"])
+                                story.append(Spacer(1,0.15*cm))
+                                story.append(_tbl_style(_cmpR,
+                                    [2.4*cm,3.9*cm,3.9*cm,3.6*cm,2.7*cm]))
+
+                                _nb_h = int(sum(1 for _k in range(12)
+                                                if _mN.iloc[_k] > _mN1.iloc[_k]))
+                                _sens = "progresse" if _vr >= 0 else "recule"
+                                story.append(Spacer(1,0.15*cm))
+                                story.append(Paragraph(
+                                    f"<b>Lecture.</b> La production {_sens} de "
+                                    f"<b>{abs(_vr):.1f} %</b> entre {_aN1} et {_aN}, "
+                                    f"passant de <b>{fmt_full(_tN1_r)}</b> à "
+                                    f"<b>{fmt_full(_tN_r)}</b>. "
+                                    f"<b>{_nb_h} mois sur 12</b> affichent une production "
+                                    f"supérieure à celle de l'exercice précédent"
+                                    + (", ce qui traduit une dynamique installée."
+                                       if _nb_h >= 8 else
+                                       ", signe d'une reprise encore inégale."
+                                       if _nb_h >= 5 else
+                                       ", ce qui appelle un examen des causes du retrait."),
+                                    st_bd))
+
+                                # ── Performance par partenaire : N face a N-1 ──
+                                # Banques, compagnies d'assurance et principaux
+                                # apporteurs, identifies par leur code a trois
+                                # chiffres (hors 100, reserve au reseau interne).
+                                _cci = next((c for c in ["CODEINTE","CODE_INTER",
+                                                         "CODEINTER","CODEAPPO"]
+                                             if c in _rb.columns), None)
+                                if _cci:
+                                    _rp = _rb.copy()
+                                    _rp["_CD"] = (_rp[_cci].astype(str)
+                                                    .str.strip().str.zfill(3))
+                                    _rp = _rp[_rp["_CD"].str.fullmatch(r"\d{3}", na=False)
+                                              & (_rp["_CD"] != "100")]
+                                    # Nom : Portefeuille puis base CA complete
+                                    _mn_r = {}
+                                    if pf is not None:
+                                        _cp = next((c for c in ["CODEINTE_P","CODEINTE",
+                                                                "CODEAPPO","CODE_APPO"]
+                                                    if c in pf.columns), None)
+                                        _np_ = next((c for c in ["NOM_APP","NOM_APPORT",
+                                                                 "NOM_APPO"]
+                                                     if c in pf.columns), None)
+                                        if _cp and _np_:
+                                            _t = pf[[_cp,_np_]].dropna()
+                                            _t = _t[_t[_np_].astype(str).str.strip() != ""]
+                                            for _c, _n in zip(
+                                                    _t[_cp].astype(str).str.strip().str.zfill(3),
+                                                    _t[_np_].astype(str).str.strip()):
+                                                _mn_r.setdefault(_c, _n)
+                                    _nc_r = next((c for c in ["NOM_APPORT","NOM_APPO",
+                                                              "NOM_INTERMEDIAIRE","NOM_APP"]
+                                                  if c in _rb.columns), None)
+                                    if _nc_r:
+                                        _t2 = _rb[[_cci,_nc_r]].dropna()
+                                        _t2 = _t2[_t2[_nc_r].astype(str).str.strip() != ""]
+                                        for _c, _n in zip(
+                                                _t2[_cci].astype(str).str.strip().str.zfill(3),
+                                                _t2[_nc_r].astype(str).str.strip()):
+                                            _mn_r.setdefault(_c, _n)
+                                    _rp["_NM"] = _rp["_CD"].map(_mn_r).fillna(
+                                                    "Code " + _rp["_CD"])
+
+                                    _pN  = (_rp[_rp["_AN"]==_aN ].groupby("_NM")[_cak_r].sum())
+                                    _pN1 = (_rp[_rp["_AN"]==_aN1].groupby("_NM")[_cak_r].sum())
+                                    _pp  = (pd.DataFrame({"N": _pN, "N1": _pN1})
+                                              .fillna(0.0))
+                                    _pp  = _pp[(_pp["N"] > 0) | (_pp["N1"] > 0)]
+
+                                    if not _pp.empty:
+                                        _pp["Ecart"] = _pp["N"] - _pp["N1"]
+                                        _pp["Var"]   = np.where(_pp["N1"] > 0,
+                                                        _pp["Ecart"]/_pp["N1"]*100, np.nan)
+                                        _pp = _pp.sort_values("N", ascending=False)
+                                        _tpN, _tpN1 = float(_pp["N"].sum()), float(_pp["N1"].sum())
+                                        _p10 = _pp.head(10)
+
+                                        story.append(Spacer(1,0.3*cm))
+                                        story.append(Paragraph(
+                                            f"Évolution {_aN1} vers {_aN}",
+                                            st_h2))
+
+                                        # Barres groupees : dix premiers partenaires
+                                        story.append(_mpl_barv(
+                                            [str(i)[:14] for i in _p10.index],
+                                            [_p10["N1"].tolist(), _p10["N"].tolist()],
+                                            [str(_aN1), str(_aN)],
+                                            f"Production des dix premiers partenaires · "
+                                            f"{_aN} face à {_aN1}", haut=4.6))
+
+                                        # Tableau detaille
+                                        _ptb = [["Partenaire", f"{_aN1} (FCFA)",
+                                                 f"{_aN} (FCFA)", "Écart", "Var.", "Part"]]
+                                        for _nmp, _r in _p10.iterrows():
+                                            _vv2 = _r["Var"]
+                                            _ptb.append([
+                                                str(_nmp)[:30],
+                                                fmt_full(_r["N1"], ""),
+                                                fmt_full(_r["N"], ""),
+                                                fmt_full(_r["Ecart"], ""),
+                                                "n. s." if pd.isna(_vv2) else f"{_vv2:+.0f} %",
+                                                f"{_r['N']/_tpN*100:.1f} %" if _tpN else "—"])
+                                        story.append(Spacer(1,0.15*cm))
+                                        story.append(_tbl_style(_ptb,
+                                            [4.2*cm,3.1*cm,3.1*cm,3*cm,1.9*cm,1.7*cm]))
+
+                                        # Progressions et retraits marquants
+                                        _sig = _pp[(_pp["N1"] > 0) & (_pp["Var"].notna())]
+                                        _hau = _sig.nlargest(3, "Var")
+                                        _bas = _sig.nsmallest(3, "Var")
+                                        if not _hau.empty:
+                                            _lh = " ; ".join(
+                                                f"<b>{str(i)[:26]}</b> {r['Var']:+.0f} %"
+                                                for i, r in _hau.iterrows())
+                                            _lb = " ; ".join(
+                                                f"<b>{str(i)[:26]}</b> {r['Var']:+.0f} %"
+                                                for i, r in _bas.iterrows())
+                                            _vpg = ((_tpN-_tpN1)/_tpN1*100) if _tpN1 else 0
+                                            _nh  = int((_pp["Ecart"] > 0).sum())
+                                            _nt  = int(len(_pp))
+                                            _c3  = (float(_pp.head(3)["N"].sum())/_tpN*100
+                                                    if _tpN else 0)
+                                            _msg_c3 = ("ce qui expose la production à la "
+                                                       "défaillance d'un seul apporteur"
+                                                       if _c3 >= 60 else
+                                                       "niveau de dépendance acceptable")
+                                            story.append(Spacer(1,0.15*cm))
+                                            story.append(Paragraph(
+                                                f"<b>Lecture.</b> Le réseau partenaire "
+                                                f"totalise <b>{fmt_full(_tpN)}</b> en {_aN}, "
+                                                f"contre <b>{fmt_full(_tpN1)}</b> en {_aN1}, "
+                                                f"soit une variation de "
+                                                f"<b>{_vpg:+.1f} %</b>. "
+                                                f"<b>{_nh} partenaires sur {_nt}</b> "
+                                                f"progressent d'un exercice à l'autre. "
+                                                f"Les trois premiers concentrent "
+                                                f"<b>{_c3:.1f} %</b> de la production, "
+                                                f"{_msg_c3}.",
+                                                st_bd))
+                                            story.append(Paragraph(
+                                                f"<b>Progressions les plus fortes :</b> {_lh}.",
+                                                st_bd))
+                                            story.append(Paragraph(
+                                                f"<b>Replis les plus marqués :</b> {_lb}. "
+                                                f"Ces reculs justifient un entretien "
+                                                f"commercial avant la clôture de l'exercice.",
+                                                st_bd))
+
 
                         # 3. Commerciaux
                         if s_com and _ca_r is not None:
@@ -8211,40 +8579,6 @@ elif "Rapport PDF" in page:
                                     f"{'une concentration élevée qui expose la compagnie au départ d un partenaire majeur' if _t5p >= 80 else 'une répartition qui limite le risque de dépendance commerciale'}.",
                                     st_bd))
                                 story.append(Spacer(1,0.2*cm))
-                                # Partenaires financiers (code intermédiaire 3 chiffres, hors 100)
-                                _col_ci = next((c for c in ["CODEINTE","CODEAPPO","CODE_INTER"] if c in _ca_r.columns), None)
-                                _col_ni = next((c for c in ["NOM_APPORT","NOM_APPO","NOM_INTERMEDIAIRE"] if c in _ca_r.columns), None)
-                                if _col_ci:
-                                    _ca_part = _ca_r.copy()   # période filtrée
-                                    _ca_part[_col_ci] = _ca_part[_col_ci].astype(str).str.strip()
-                                    _ca_part = _ca_part[
-                                        (_ca_part[_col_ci].str.len() == 3) &
-                                        (_ca_part[_col_ci] != "100") &
-                                        (_ca_part[_col_ci].str.isdigit())
-                                    ]
-                                    if not _ca_part.empty:
-                                        _grp_part_key = _col_ci if _col_ni is None else [_col_ci, _col_ni]
-                                        _gp = _ca_part.groupby(_grp_part_key).agg(
-                                            CA=("CHIFAFFA","sum"), NbAff=("CHIFAFFA","count")
-                                        ).reset_index().sort_values("CA",ascending=False).head(10)
-                                        story.append(Spacer(1,0.3*cm))
-                                        story.append(_sec("4.  PARTENAIRES FINANCIERS"))
-                                        story.append(Spacer(1,0.2*cm))
-                                        story.append(Paragraph(
-                                            "Principaux partenaires apporteurs", st_h2))
-                                        _pD_hdr = ["Code","Partenaire","CA (FCFA)","Nb quittances"] if _col_ni else ["Code","CA (FCFA)","Nb quittances"]
-                                        _pD = [_pD_hdr]
-                                        for _,r in _gp.iterrows():
-                                            if _col_ni and isinstance(_grp_part_key, list):
-                                                _pD.append([str(r[_col_ci]), str(r[_col_ni])[:25],
-                                                            fmt_full(r["CA"],""),
-                                                            f"{int(r['NbAff']):,}".replace(",", " ")])
-                                            else:
-                                                _pD.append([str(r[_col_ci]), fmt_full(r["CA"],""),
-                                                            f"{int(r['NbAff']):,}".replace(",", " ")])
-                                        _pw = [2*cm,6*cm,4.5*cm,4.5*cm] if _col_ni else [3*cm,8*cm,6*cm]
-                                        story.append(_tbl_style(_pD, _pw))
-
                             # ══════════════════════════════════════════════════
                             #  Detail par famille : banques, IMF, acceptations
                             #  Un tableau mensuel et un graphique par famille,
@@ -8314,7 +8648,7 @@ elif "Rapport PDF" in page:
                                         story.append(Spacer(1,0.15*cm))
                                         story.append(_tbl_style(
                                             _tb_g,
-                                            [2.4*cm] + [1.05*cm]*12 + [2*cm]))
+                                            [2.8*cm] + [1.06*cm]*12 + [1.9*cm]))
 
                                         _dom_g = _tg2.sum(axis=1).idxmax()
                                         _pd_g  = (_tg2.sum(axis=1).max()
@@ -8361,7 +8695,7 @@ elif "Rapport PDF" in page:
                                                    for v in _tF.loc[_nmF, range(1,13)]]
                                                 + [fmt_full(_tF.loc[_nmF,"Tot"],"")])
                                         story.append(_tbl_style(
-                                            _tbF, [2.6*cm] + [1.02*cm]*12 + [1.9*cm]))
+                                            _tbF, [3.0*cm] + [1.04*cm]*12 + [1.8*cm]))
 
                                         story.append(Spacer(1,0.15*cm))
                                         story.append(_mpl_barh(
@@ -8407,203 +8741,6 @@ elif "Rapport PDF" in page:
                                             f"<b>{nb_full(len(_tF))}</b> partenaires. "
                                             f"<b>{str(_n1F)[:30]}</b> en assure "
                                             f"<b>{_p1F:.1f} %</b>." + _cmt, st_bd))
-
-                            # ── Comparaison de production N / N-1 ─────────────────
-                            # Etablie sur la base CA complete : une comparaison
-                            # annuelle suppose de disposer des deux exercices.
-                            _cd_r = next((c for c in ["DATECOMP","DATEEFFE","DATESOUS"]
-                                          if c in ca.columns), None)
-                            if _cd_r:
-                                _rb = ca.copy()
-                                _rb["_DT"] = pd.to_datetime(_rb[_cd_r], errors="coerce")
-                                _rb = _rb.dropna(subset=["_DT"])
-                                _rb["_AN"] = _rb["_DT"].dt.year
-                                _cak_r = "CHIFAFFA" if "CHIFAFFA" in _rb.columns else "MONTENCA"
-                                _ans_r = sorted(_rb["_AN"].unique().tolist())
-                                if len(_ans_r) >= 2:
-                                    # L'exercice de reference suit le filtre annuel
-                                    # de la barre laterale ; a defaut, le plus recent.
-                                    if SEL_YEAR and SEL_YEAR in _ans_r:
-                                        _aN = int(SEL_YEAR)
-                                        _prec = [a for a in _ans_r if a < _aN]
-                                        _aN1  = int(_prec[-1]) if _prec else int(_ans_r[0])
-                                    else:
-                                        _aN, _aN1 = int(_ans_r[-1]), int(_ans_r[-2])
-                                    _mN  = (_rb[_rb["_AN"]==_aN ].groupby(_rb["_DT"].dt.month)[_cak_r]
-                                              .sum().reindex(range(1,13), fill_value=0))
-                                    _mN1 = (_rb[_rb["_AN"]==_aN1].groupby(_rb["_DT"].dt.month)[_cak_r]
-                                              .sum().reindex(range(1,13), fill_value=0))
-                                    _MFR = ["Jan","Fév","Mar","Avr","Mai","Juin",
-                                            "Juil","Août","Sep","Oct","Nov","Déc"]
-                                    story.append(Spacer(1,0.25*cm))
-                                    story.append(Paragraph(
-                                        f"Production mensuelle comparée · {_aN} face à {_aN1} :", st_h2))
-                                    story.append(_mpl_barv(
-                                        _MFR, [_mN1.tolist(), _mN.tolist()],
-                                        [str(_aN1), str(_aN)],
-                                        f"Chiffre d'affaires mensuel · {_aN} face à {_aN1}",
-                                        haut=4.4))
-
-                                    _tN_r, _tN1_r = float(_mN.sum()), float(_mN1.sum())
-                                    _vr = ((_tN_r-_tN1_r)/_tN1_r*100) if _tN1_r else 0
-                                    _cmpR = [["Mois", f"{_aN1} (FCFA)", f"{_aN} (FCFA)",
-                                              "Écart", "Var."]]
-                                    for _k in range(12):
-                                        _v1, _v0 = float(_mN.iloc[_k]), float(_mN1.iloc[_k])
-                                        _vv = ((_v1-_v0)/_v0*100) if _v0 else None
-                                        _cmpR.append([_MFR[_k], fmt_full(_v0,""), fmt_full(_v1,""),
-                                                      fmt_full(_v1-_v0,""),
-                                                      "—" if _vv is None else f"{_vv:+.0f} %"])
-                                    _cmpR.append(["TOTAL", fmt_full(_tN1_r,""), fmt_full(_tN_r,""),
-                                                  fmt_full(_tN_r-_tN1_r,""), f"{_vr:+.1f} %"])
-                                    story.append(Spacer(1,0.15*cm))
-                                    story.append(_tbl_style(_cmpR,
-                                        [2.4*cm,3.9*cm,3.9*cm,3.6*cm,2.7*cm]))
-
-                                    _nb_h = int(sum(1 for _k in range(12)
-                                                    if _mN.iloc[_k] > _mN1.iloc[_k]))
-                                    _sens = "progresse" if _vr >= 0 else "recule"
-                                    story.append(Spacer(1,0.15*cm))
-                                    story.append(Paragraph(
-                                        f"<b>Lecture.</b> La production {_sens} de "
-                                        f"<b>{abs(_vr):.1f} %</b> entre {_aN1} et {_aN}, "
-                                        f"passant de <b>{fmt_full(_tN1_r)}</b> à "
-                                        f"<b>{fmt_full(_tN_r)}</b>. "
-                                        f"<b>{_nb_h} mois sur 12</b> affichent une production "
-                                        f"supérieure à celle de l'exercice précédent"
-                                        + (", ce qui traduit une dynamique installée."
-                                           if _nb_h >= 8 else
-                                           ", signe d'une reprise encore inégale."
-                                           if _nb_h >= 5 else
-                                           ", ce qui appelle un examen des causes du retrait."),
-                                        st_bd))
-
-                                    # ── Performance par partenaire : N face a N-1 ──
-                                    # Banques, compagnies d'assurance et principaux
-                                    # apporteurs, identifies par leur code a trois
-                                    # chiffres (hors 100, reserve au reseau interne).
-                                    _cci = next((c for c in ["CODEINTE","CODE_INTER",
-                                                             "CODEINTER","CODEAPPO"]
-                                                 if c in _rb.columns), None)
-                                    if _cci:
-                                        _rp = _rb.copy()
-                                        _rp["_CD"] = (_rp[_cci].astype(str)
-                                                        .str.strip().str.zfill(3))
-                                        _rp = _rp[_rp["_CD"].str.fullmatch(r"\d{3}", na=False)
-                                                  & (_rp["_CD"] != "100")]
-                                        # Nom : Portefeuille puis base CA complete
-                                        _mn_r = {}
-                                        if pf is not None:
-                                            _cp = next((c for c in ["CODEINTE_P","CODEINTE",
-                                                                    "CODEAPPO","CODE_APPO"]
-                                                        if c in pf.columns), None)
-                                            _np_ = next((c for c in ["NOM_APP","NOM_APPORT",
-                                                                     "NOM_APPO"]
-                                                         if c in pf.columns), None)
-                                            if _cp and _np_:
-                                                _t = pf[[_cp,_np_]].dropna()
-                                                _t = _t[_t[_np_].astype(str).str.strip() != ""]
-                                                for _c, _n in zip(
-                                                        _t[_cp].astype(str).str.strip().str.zfill(3),
-                                                        _t[_np_].astype(str).str.strip()):
-                                                    _mn_r.setdefault(_c, _n)
-                                        _nc_r = next((c for c in ["NOM_APPORT","NOM_APPO",
-                                                                  "NOM_INTERMEDIAIRE","NOM_APP"]
-                                                      if c in _rb.columns), None)
-                                        if _nc_r:
-                                            _t2 = _rb[[_cci,_nc_r]].dropna()
-                                            _t2 = _t2[_t2[_nc_r].astype(str).str.strip() != ""]
-                                            for _c, _n in zip(
-                                                    _t2[_cci].astype(str).str.strip().str.zfill(3),
-                                                    _t2[_nc_r].astype(str).str.strip()):
-                                                _mn_r.setdefault(_c, _n)
-                                        _rp["_NM"] = _rp["_CD"].map(_mn_r).fillna(
-                                                        "Code " + _rp["_CD"])
-
-                                        _pN  = (_rp[_rp["_AN"]==_aN ].groupby("_NM")[_cak_r].sum())
-                                        _pN1 = (_rp[_rp["_AN"]==_aN1].groupby("_NM")[_cak_r].sum())
-                                        _pp  = (pd.DataFrame({"N": _pN, "N1": _pN1})
-                                                  .fillna(0.0))
-                                        _pp  = _pp[(_pp["N"] > 0) | (_pp["N1"] > 0)]
-
-                                        if not _pp.empty:
-                                            _pp["Ecart"] = _pp["N"] - _pp["N1"]
-                                            _pp["Var"]   = np.where(_pp["N1"] > 0,
-                                                            _pp["Ecart"]/_pp["N1"]*100, np.nan)
-                                            _pp = _pp.sort_values("N", ascending=False)
-                                            _tpN, _tpN1 = float(_pp["N"].sum()), float(_pp["N1"].sum())
-                                            _p10 = _pp.head(10)
-
-                                            story.append(Spacer(1,0.3*cm))
-                                            story.append(Paragraph(
-                                                f"Évolution {_aN1} vers {_aN}",
-                                                st_h2))
-
-                                            # Barres groupees : dix premiers partenaires
-                                            story.append(_mpl_barv(
-                                                [str(i)[:14] for i in _p10.index],
-                                                [_p10["N1"].tolist(), _p10["N"].tolist()],
-                                                [str(_aN1), str(_aN)],
-                                                f"Production des dix premiers partenaires · "
-                                                f"{_aN} face à {_aN1}", haut=4.6))
-
-                                            # Tableau detaille
-                                            _ptb = [["Partenaire", f"{_aN1} (FCFA)",
-                                                     f"{_aN} (FCFA)", "Écart", "Var.", "Part"]]
-                                            for _nmp, _r in _p10.iterrows():
-                                                _vv2 = _r["Var"]
-                                                _ptb.append([
-                                                    str(_nmp)[:30],
-                                                    fmt_full(_r["N1"], ""),
-                                                    fmt_full(_r["N"], ""),
-                                                    fmt_full(_r["Ecart"], ""),
-                                                    "n. s." if pd.isna(_vv2) else f"{_vv2:+.0f} %",
-                                                    f"{_r['N']/_tpN*100:.1f} %" if _tpN else "—"])
-                                            story.append(Spacer(1,0.15*cm))
-                                            story.append(_tbl_style(_ptb,
-                                                [4.2*cm,3.1*cm,3.1*cm,3*cm,1.9*cm,1.7*cm]))
-
-                                            # Progressions et retraits marquants
-                                            _sig = _pp[(_pp["N1"] > 0) & (_pp["Var"].notna())]
-                                            _hau = _sig.nlargest(3, "Var")
-                                            _bas = _sig.nsmallest(3, "Var")
-                                            if not _hau.empty:
-                                                _lh = " ; ".join(
-                                                    f"<b>{str(i)[:26]}</b> {r['Var']:+.0f} %"
-                                                    for i, r in _hau.iterrows())
-                                                _lb = " ; ".join(
-                                                    f"<b>{str(i)[:26]}</b> {r['Var']:+.0f} %"
-                                                    for i, r in _bas.iterrows())
-                                                _vpg = ((_tpN-_tpN1)/_tpN1*100) if _tpN1 else 0
-                                                _nh  = int((_pp["Ecart"] > 0).sum())
-                                                _nt  = int(len(_pp))
-                                                _c3  = (float(_pp.head(3)["N"].sum())/_tpN*100
-                                                        if _tpN else 0)
-                                                _msg_c3 = ("ce qui expose la production à la "
-                                                           "défaillance d'un seul apporteur"
-                                                           if _c3 >= 60 else
-                                                           "niveau de dépendance acceptable")
-                                                story.append(Spacer(1,0.15*cm))
-                                                story.append(Paragraph(
-                                                    f"<b>Lecture.</b> Le réseau partenaire "
-                                                    f"totalise <b>{fmt_full(_tpN)}</b> en {_aN}, "
-                                                    f"contre <b>{fmt_full(_tpN1)}</b> en {_aN1}, "
-                                                    f"soit une variation de "
-                                                    f"<b>{_vpg:+.1f} %</b>. "
-                                                    f"<b>{_nh} partenaires sur {_nt}</b> "
-                                                    f"progressent d'un exercice à l'autre. "
-                                                    f"Les trois premiers concentrent "
-                                                    f"<b>{_c3:.1f} %</b> de la production, "
-                                                    f"{_msg_c3}.",
-                                                    st_bd))
-                                                story.append(Paragraph(
-                                                    f"<b>Progressions les plus fortes :</b> {_lh}.",
-                                                    st_bd))
-                                                story.append(Paragraph(
-                                                    f"<b>Replis les plus marqués :</b> {_lb}. "
-                                                    f"Ces reculs justifient un entretien "
-                                                    f"commercial avant la clôture de l'exercice.",
-                                                    st_bd))
 
                         # ══════════════════════════════════════════════════════
                         #  Repartition par nature d'organisme apporteur
