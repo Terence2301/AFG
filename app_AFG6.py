@@ -3390,86 +3390,88 @@ elif "Portefeuille" in page:
             return dict(total=len(_d), actives=_act, resiliees=_res,
                         echues=_ech, autres=len(_d) - _act - _res - _ech)
 
-        _glob = _compter_etats(pf)
+        # ── Perimetre : la date d'effet marque l'entree du risque ────────────
+        _c_eff  = next((c for c in ["DATEEFFE","DATE_EFFET","DATESOUS"]
+                        if c in pf.columns), None)
+        _an_eff = as_year(pf[_c_eff]) if _c_eff else None
 
-        # ── Vue d'ensemble : la base entiere, hors filtre ────────────────────
-        section("📋 Portefeuille — vue d'ensemble",
-                "BASE COMPLÈTE · TOUS EXERCICES CONFONDUS")
+        if SEL_YEAR and _an_eff is not None:
+            # Deux perimetres complementaires :
+            #  · le cumul : polices ayant pris effet JUSQU'A l'exercice
+            #    choisi, soit le portefeuille constitue a cette date ;
+            #  · la production : polices prenant effet DANS l'annee.
+            _cumul    = pf[(_an_eff <= int(SEL_YEAR)).fillna(False)].copy()
+            df        = pf[(_an_eff == int(SEL_YEAR)).fillna(False)].copy()
+            _lbl_cum  = f"Portefeuille constitué au 31/12/{SEL_YEAR}"
+            _pf_scope = f"Exercice {SEL_YEAR}"
+        else:
+            _cumul    = pf.copy()
+            df        = pf_f()
+            _lbl_cum  = "Portefeuille complet, tous exercices"
+            _pf_scope = period_lbl
+
+        _glob = _compter_etats(_cumul)
+        _per  = _compter_etats(df)
+
+        # ── Portefeuille cumule ──────────────────────────────────────────────
+        section(f"📋 {_lbl_cum}",
+                "CUMUL DES POLICES PRISES D'EFFET · ÉTATS CONSTATÉS")
         _v1, _v2, _v3, _v4, _v5 = st.columns(5)
         kpi(_v1, "Polices au total", nb_full(_glob["total"]),
-            "Toute la base", "blue", icon="📋")
-        kpi(_v2, "Polices actives", nb_full(_glob["actives"]),
-            f"{_glob['actives']/max(_glob['total'],1)*100:.1f} % du total",
+            _lbl_cum, "blue", icon="📋")
+        kpi(_v2, "Actives", nb_full(_glob["actives"]),
+            f"{_glob['actives']/max(_glob['total'],1)*100:.1f} % du cumul",
             "teal", icon="✅")
-        kpi(_v3, "Polices résiliées", nb_full(_glob["resiliees"]),
-            f"{_glob['resiliees']/max(_glob['total'],1)*100:.1f} % du total",
+        kpi(_v3, "Résiliées", nb_full(_glob["resiliees"]),
+            f"{_glob['resiliees']/max(_glob['total'],1)*100:.1f} % du cumul",
             "red", icon="✖")
-        kpi(_v4, "Polices échues", nb_full(_glob["echues"]),
-            f"{_glob['echues']/max(_glob['total'],1)*100:.1f} % du total",
+        kpi(_v4, "Échues", nb_full(_glob["echues"]),
+            f"{_glob['echues']/max(_glob['total'],1)*100:.1f} % du cumul",
             "amber", icon="⏳")
         kpi(_v5, "Autres états", nb_full(_glob["autres"]),
             "Suspendues, en cours…", "", icon="◦")
 
-        # ── Perimetre analyse : date d'effet du contrat ──────────────────────
-        # La date d'effet marque l'entree du risque dans le portefeuille :
-        # c'est la reference actuarielle pour rattacher une police a un
-        # exercice, plus fiable que la date de saisie administrative.
+        # ── Production nouvelle de l'exercice ────────────────────────────────
         st.markdown("")
-        if SEL_YEAR:
-            df = pf[year_mask(pf, ["DATEEFFE","DATE_EFFET","DATESOUS"],
-                              SEL_YEAR)].copy()
-            _pf_scope = f"Exercice {SEL_YEAR}"
-        else:
-            df = pf_f()
-            _pf_scope = period_lbl
+        if SEL_YEAR and df.empty:
+            alert(f"Aucune police n'a pris effet en <b>{SEL_YEAR}</b>. "
+                  f"Les indicateurs de production sont à zéro.", "info")
 
-        if df is None or df.empty:
-            alert(f"Aucune police prenant effet sur <b>{_pf_scope}</b>. "
-                  f"Les indicateurs de cette section sont à zéro.", "info")
-            df = pf.iloc[0:0].copy()
-
-        _per = _compter_etats(df)
-
-        section(f"Production de l'exercice — {_pf_scope}",
-                "PÉRIMÈTRE : DATE D'EFFET · FILTRES · EXPORT")
-
-        _p1, _p2, _p3, _p4, _p5, _p6 = st.columns(6)
+        section(f"Production nouvelle — {_pf_scope}",
+                "POLICES PRENANT EFFET DANS L'EXERCICE")
+        _p1, _p2, _p3, _p4c = st.columns(4)
         kpi(_p1, "Polices prises d'effet", nb_full(_per["total"]),
-            f"{_per['total']/max(_glob['total'],1)*100:.1f} % de la base",
+            f"{_per['total']/max(_glob['total'],1)*100:.1f} % du cumul",
             "blue", icon="📋")
         kpi(_p2, "Actives", nb_full(_per["actives"]),
-            f"{_per['actives']/max(_per['total'],1)*100:.1f} % de l'exercice",
+            f"{_per['actives']/max(_per['total'],1)*100:.1f} % de la production",
             "teal", icon="✅")
         kpi(_p3, "Résiliées", nb_full(_per["resiliees"]),
-            f"{_per['resiliees']/max(_per['total'],1)*100:.1f} % de l'exercice",
+            f"{_per['resiliees']/max(_per['total'],1)*100:.1f} % de la production",
             "red", icon="✖")
-        kpi(_p4, "Échues", nb_full(_per["echues"]),
-            f"{_per['echues']/max(_per['total'],1)*100:.1f} % de l'exercice",
+        kpi(_p4c, "Échues", nb_full(_per["echues"]),
+            f"{_per['echues']/max(_per['total'],1)*100:.1f} % de la production",
             "amber", icon="⏳")
 
-        # Indicateurs actuariels complementaires
         _coti_c = next((c for c in ["COTI_PERIODIQUE","MONTENCA","PRIMNETT"]
                         if c in df.columns), None)
-        _prime_tot = float(df[_coti_c].fillna(0).sum()) if _coti_c else 0.0
-        kpi(_p5, "Cotisations souscrites", fmt_full(_prime_tot),
-            "Sur les polices de l'exercice", "", icon="💰")
-        _tx_maint = (_per["actives"] / max(_per["total"], 1) * 100)
-        kpi(_p6, "Taux de maintien", f"{_tx_maint:.1f} %",
-            "Actives / prises d'effet",
-            "teal" if _tx_maint >= 75 else "amber", icon="📐")
-
-        # Prime moyenne et durée moyenne, si les colonnes existent
-        _i1, _i2, _i3 = st.columns(3)
-        _pm = _prime_tot / max(_per["total"], 1)
-        kpi(_i1, "Prime moyenne", fmt_full(_pm),
-            "Par police de l'exercice", "blue", icon="🎫")
-        _tx_res_p = _per["resiliees"] / max(_per["total"], 1) * 100
-        kpi(_i2, "Taux de résiliation", f"{_tx_res_p:.1f} %",
+        _prime_tot = (float(df[_coti_c].fillna(0).sum())
+                      if (_coti_c and not df.empty) else 0.0)
+        _i1, _i2, _i3, _i4 = st.columns(4)
+        kpi(_i1, "Cotisations souscrites", fmt_full(_prime_tot),
+            "Production de l'exercice", "", icon="💰")
+        kpi(_i2, "Prime moyenne", fmt_full(_prime_tot / max(_per["total"], 1)),
+            "Par police nouvelle", "blue", icon="🎫")
+        _tx_m = _per["actives"] / max(_per["total"], 1) * 100
+        kpi(_i3, "Taux de maintien", f"{_tx_m:.1f} %",
+            "Actives sur production",
+            "teal" if _tx_m >= 75 else "amber", icon="📐")
+        _tx_r = _per["resiliees"] / max(_per["total"], 1) * 100
+        kpi(_i4, "Taux de résiliation", f"{_tx_r:.1f} %",
             "Seuil CIMA : 25 %",
-            "red" if _tx_res_p > 25 else "teal", icon="📉")
-        _tx_ech = _per["echues"] / max(_per["total"], 1) * 100
-        kpi(_i3, "Taux d'échéance", f"{_tx_ech:.1f} %",
-            "Contrats arrivés à terme", "amber", icon="🏁")
+            "red" if _tx_r > 25 else "teal", icon="📉")
+
+        section(f"Détail des polices — {_pf_scope}", "FILTRES · EXPORT")
 
         # Listes de choix construites depuis df (déjà filtré par année si SEL_YEAR)
         _base_opts = df  # base pour les options = données de l'année choisie
@@ -5116,13 +5118,20 @@ elif "Sinistres" in page:
         df_s = sin  # base complete (reference)
         # ── Perimetre : exercice sinistre puis periode ───────────────────────────
         if SEL_YEAR:
-            # L'exercice de survenance fait foi. La date de comptabilisation
-            # est ecartee : un sinistre 2025 regle en 2026 ne doit pas
-            # apparaitre dans l'exercice 2026.
-            df_sf = sin[year_mask(sin,
-                ["ANNEE_SIN","Exercice Sinistre","Date Survenance",
-                 "DATE_SURV","Date survenance"],
-                SEL_YEAR)].copy()
+            # La date de comptabilisation rattache la prestation a son
+            # exercice comptable et fait seule autorite. Si la base ne
+            # contient aucune ecriture sur l'exercice demande, aucune
+            # ligne ne remonte et les indicateurs restent a zero.
+            _c_dc_s = next((c for c in ["DATECOMP","Date Comptabilisation",
+                                        "DATE_COMPTA","Date comptabilisation"]
+                            if c in sin.columns), None)
+            if _c_dc_s:
+                df_sf = sin[(as_year(sin[_c_dc_s]) == int(SEL_YEAR))
+                            .fillna(False)].copy()
+            else:
+                df_sf = sin[year_mask(sin,
+                    ["ANNEE_SIN","Exercice Sinistre","Date Survenance"],
+                    SEL_YEAR)].copy()
             _sin_scope = f"Exercice {SEL_YEAR}"
         else:
             df_sf = sin_f()
@@ -8742,224 +8751,159 @@ elif "Rapport PDF" in page:
                                             f"<b>{str(_n1F)[:30]}</b> en assure "
                                             f"<b>{_p1F:.1f} %</b>." + _cmt, st_bd))
 
-                        # ══════════════════════════════════════════════════════
-                        #  Repartition par nature d'organisme apporteur
-                        #  Banques, systemes financiers decentralises, courtiers,
-                        #  compagnies d'assurance et reseau interne.
-                        # ══════════════════════════════════════════════════════
-                        if _ca_r is not None and _agk and _agk in _ca_r.columns:
-                            _cr   = _ca_r.copy()
-                            _cak2 = "CHIFAFFA" if "CHIFAFFA" in _cr.columns else "MONTENCA"
-                            _src_nom = next((c for c in ["RAISOCIN","RAISOC","NOM_INTERMEDIAIRE"]
-                                             if c in _cr.columns), None)
-                            _cr["_CATEG"] = (_cr[_src_nom].apply(categoriser_apporteur)
-                                             if _src_nom
-                                             else _cr[_agk].apply(categoriser_apporteur))
-                            _gc2 = (_cr.groupby("_CATEG")
-                                       .agg(CA=(_cak2,"sum"), NbQ=(_cak2,"count"))
-                                       .reset_index().sort_values("CA", ascending=False))
-                            _tot_c = float(_gc2["CA"].sum())
 
-                            if not _gc2.empty and _tot_c > 0:
-                                story.append(Spacer(1,0.3*cm))
-                                story.append(Paragraph(
-                                    "Répartition par nature d'organisme apporteur", st_h2))
-                                _ct = [["Catégorie","Chiffre d'affaires","Quittances","Part"]]
-                                for _, _r in _gc2.iterrows():
-                                    _ct.append([str(_r["_CATEG"]), fmt_full(_r["CA"], ""),
-                                                nb_full(int(_r["NbQ"])),
-                                                f"{_r['CA']/_tot_c*100:.1f} %"])
-                                _ct.append(["TOTAL", fmt_full(_tot_c, ""),
-                                            nb_full(int(_gc2["NbQ"].sum())), "100,0 %"])
-                                story.append(_tbl_style(_ct, [6.5*cm,4.5*cm,3*cm,3*cm]))
-                                story.append(Spacer(1,0.18*cm))
-                                story.append(_mpl_pie(
-                                    _gc2["_CATEG"].astype(str).tolist(), _gc2["CA"].tolist(),
-                                    f"Poids de chaque nature d'apporteur · {period_lbl}"))
+                        # ══════════════════════════════════════════════════════════
+                        #  SECTION 4 : PARTENAIRES FINANCIERS
+                        #  Partenaires identifies par leur raison sociale (RAISOCIN)
+                        #  et repartis en trois familles : banques locales,
+                        #  institutions de microfinance, acceptations.
+                        # ══════════════════════════════════════════════════════════
+                        _cd_p4 = next((c for c in ["DATECOMP","DATEEFFE"] if c in ca.columns), None)
+                        _rs_p4 = next((c for c in ["RAISOCIN","RAISOC","RAISON_SOCIALE"]
+                                       if c in ca.columns), None)
 
-                                _c1n = str(_gc2.iloc[0]["_CATEG"])
-                                _c1p = float(_gc2.iloc[0]["CA"])/_tot_c*100
-                                _ext = _gc2[_gc2["_CATEG"] != "Réseau interne"]
-                                _pex = float(_ext["CA"].sum())/_tot_c*100 if not _ext.empty else 0
-                                _msg_ex = ("ce qui traduit une dépendance forte aux canaux tiers."
-                                           if _pex >= 60 else
-                                           "équilibre satisfaisant entre réseau propre et partenariats."
-                                           if _pex >= 30 else
-                                           "marge de progression sur les partenariats bancaires et les SFD.")
-                                story.append(Spacer(1,0.15*cm))
-                                story.append(Paragraph(
-                                    f"<b>Lecture.</b> La distribution s'appuie principalement sur "
-                                    f"<b>{_c1n.lower()}</b>, qui apporte <b>{_c1p:.1f} %</b> du "
-                                    f"chiffre d'affaires. Les partenaires extérieurs au réseau propre "
-                                    f"pèsent <b>{_pex:.1f} %</b> de la production, {_msg_ex}", st_bd))
+                        if _cd_p4 and _rs_p4:
+                            _p4 = ca[[_cd_p4, _rs_p4, "CHIFAFFA"]].copy()
+                            _p4["_NM"] = _p4[_rs_p4].fillna("").astype(str).str.strip()
+                            _p4 = _p4[_p4["_NM"] != ""]
+                            _p4["_GR"] = _p4["_NM"].apply(groupe_partenaire)
+                            _p4 = _p4[~_p4["_GR"].isin(["Réseau interne", "Non classé"])]
+                            _p4["_DT"] = pd.to_datetime(_p4[_cd_p4], errors="coerce")
+                            _p4 = _p4.dropna(subset=["_DT"])
+                            _p4["_AN"]  = _p4["_DT"].dt.year
+                            _p4["_MOI"] = _p4["_DT"].dt.month
+                            _ans4 = sorted(_p4["_AN"].unique().tolist())
 
-                                # Detail nominatif des trois premieres categories
-                                for _cat_n in _gc2["_CATEG"].head(3):
-                                    if _cat_n == "Non identifiés": continue
-                                    _sub = (_cr[_cr["_CATEG"] == _cat_n].groupby(_agk)[_cak2].sum()
-                                              .sort_values(ascending=False).head(8))
-                                    if _sub.empty or _sub.sum() <= 0: continue
-                                    _tc2 = float(_sub.sum())
-                                    story.append(Spacer(1,0.22*cm))
-                                    story.append(Paragraph(
-                                        f"Détail · {_cat_n}", st_h2))
-                                    _st2 = [["Apporteur","Chiffre d'affaires","Part"]]
-                                    for _nm2, _v2 in _sub.items():
-                                        _st2.append([str(_nm2)[:44], fmt_full(_v2, ""),
-                                                     f"{_v2/_tc2*100:.1f} %"])
-                                    story.append(_tbl_style(_st2, [8.5*cm,5*cm,3.5*cm]))
-                                    story.append(Spacer(1,0.12*cm))
-                                    story.append(_mpl_barh(
-                                        _sub.index.astype(str).tolist(), _sub.tolist(),
-                                        f"{_cat_n} · chiffre d'affaires par apporteur",
-                                        coul="#2E86C1", haut=3.4))
+                            if _ans4:
+                                _aN4 = int(SEL_YEAR) if (SEL_YEAR and int(SEL_YEAR) in _ans4) else int(_ans4[-1])
+                                _av4 = [a for a in _ans4 if a < _aN4]
+                                _aP4 = int(_av4[-1]) if _av4 else None
+                                _M4  = ["Jan","Fév","Mar","Avr","Mai","Juin",
+                                        "Juil","Août","Sep","Oct","Nov","Déc"]
+                                _dN4 = _p4[_p4["_AN"] == _aN4]
 
-                                # Evolution mensuelle par nature d'organisme
-                                _cdm = next((c for c in ["DATECOMP","DATEEFFE"] if c in _cr.columns), None)
-                                if _cdm:
-                                    _cm2 = _cr.copy()
-                                    _cm2["_DT"] = pd.to_datetime(_cm2[_cdm], errors="coerce")
-                                    _cm2 = _cm2.dropna(subset=["_DT"])
-                                    if not _cm2.empty:
-                                        _cm2["_M"] = _cm2["_DT"].dt.month
-                                        _MF = ["Jan","Fév","Mar","Avr","Mai","Juin",
-                                               "Juil","Août","Sep","Oct","Nov","Déc"]
-                                        _ser, _nom_ser = [], []
-                                        for _tc3 in _gc2[_gc2["_CATEG"] != "Non identifiés"]["_CATEG"].head(3):
-                                            _v3 = (_cm2[_cm2["_CATEG"] == _tc3].groupby("_M")[_cak2].sum()
-                                                     .reindex(range(1,13), fill_value=0))
-                                            if _v3.sum() > 0:
-                                                _ser.append(_v3.tolist()); _nom_ser.append(str(_tc3)[:22])
-                                        if _ser:
-                                            story.append(Spacer(1,0.25*cm))
-                                            story.append(_mpl_barv(
-                                                _MF, _ser, _nom_ser,
-                                                f"Évolution mensuelle par nature d'apporteur · {period_lbl}",
-                                                haut=4.6))
-                                            _pic = max(range(12), key=lambda k: sum(s[k] for s in _ser))
-                                            story.append(Spacer(1,0.12*cm))
-                                            story.append(Paragraph(
-                                                f"<b>Lecture.</b> Le mois de <b>{_MF[_pic]}</b> concentre "
-                                                f"la production la plus élevée, toutes natures d'apporteurs "
-                                                f"confondues. Le suivi mensuel permet d'identifier les "
-                                                f"périodes creuses et d'ajuster l'animation commerciale du "
-                                                f"réseau partenaire.", st_bd))
+                                story.append(PageBreak())
+                                story.append(_sec("4.  PARTENAIRES FINANCIERS"))
+                                story.append(Spacer(1,0.2*cm))
 
-                        # ── Etats mensuels par famille de partenaires ─────────────────────
-                        _cdp = next((c for c in ["DATECOMP","DATEEFFE"] if c in ca.columns), None)
-                        _crs = next((c for c in ["RAISOCIN","RAISOC","RAISON_SOCIALE"]
-                                     if c in ca.columns), None)
-                        if _cdp and _crs:
-                            _pr = ca.copy()
-                            _pr["_RS"] = _pr[_crs].fillna("").astype(str).str.strip()
-                            _pr = _pr[_pr["_RS"] != ""]
-                            _pr["_GR"] = _pr["_RS"].apply(groupe_partenaire)
-                            _pr = _pr[~_pr["_GR"].isin(["Réseau propre","Non classé"])]
-                            _pr["_DT"] = pd.to_datetime(_pr[_cdp], errors="coerce")
-                            _pr = _pr.dropna(subset=["_DT"])
-                            _pr["_AN"] = _pr["_DT"].dt.year
-                            _pr["_MO"] = _pr["_DT"].dt.month
-                            _ckp = "CHIFAFFA" if "CHIFAFFA" in _pr.columns else "MONTENCA"
-                            _ansp = sorted(_pr["_AN"].dropna().astype(int).unique().tolist())
-                            if _ansp:
-                                _aN2 = int(SEL_YEAR) if (SEL_YEAR and int(SEL_YEAR) in _ansp) else _ansp[-1]
-                                _pre2 = [a for a in _ansp if a < _aN2]
-                                _aP2 = int(_pre2[-1]) if _pre2 else None
-                                _MB = ["janv","févr","mars","avr","mai","juin",
-                                       "juil","août","sept","oct","nov","déc"]
-                                _dNr = _pr[_pr["_AN"] == _aN2]
-                                _gp = [g for g in ["Banques locales","IMF","Acceptations",
-                                                   "Autres partenaires"] if g in _dNr["_GR"].unique()]
-                                _mgr = (_dNr.pivot_table(index="_GR", columns="_MO", values=_ckp,
-                                                         aggfunc="sum", fill_value=0)
-                                            .reindex(index=_gp, columns=range(1,13), fill_value=0))
-                                _mgr.columns = _MB
-                                _mgr["Total"] = _mgr.sum(axis=1)
-                                _totp = float(_mgr["Total"].sum())
-                                if _totp > 0:
+                                _ord4  = ["Banques locales", "IMF", "Acceptations"]
+                                _pres4 = [g for g in _ord4 if g in _dN4["_GR"].unique()]
+
+                                if _pres4:
+                                    _tg4 = (_dN4.pivot_table(index="_GR", columns="_MOI",
+                                                             values="CHIFAFFA", aggfunc="sum",
+                                                             fill_value=0)
+                                                .reindex(index=_pres4, columns=range(1,13), fill_value=0))
+                                    _tot4 = float(_tg4.sum().sum())
+
+                                    story.append(Paragraph("4.1  Vue par famille", st_h2))
+                                    _th4 = [["Famille"] + _M4 + ["Total"]]
+                                    for _g4 in _pres4:
+                                        _th4.append([_g4[:15]]
+                                                    + [fmt_full(v,"") if v else "—" for v in _tg4.loc[_g4]]
+                                                    + [fmt_full(_tg4.loc[_g4].sum(),"")])
+                                    _th4.append(["TOTAL"]
+                                                + [fmt_full(_tg4[m].sum(),"") if _tg4[m].sum() else "—"
+                                                   for m in range(1,13)]
+                                                + [fmt_full(_tot4,"")])
+                                    story.append(_tbl_style(_th4, [2.6*cm] + [1.08*cm]*12 + [1.9*cm]))
                                     story.append(Spacer(1,0.2*cm))
-                                    story.append(Paragraph(
-                                        f"Production mensuelle par famille · exercice {_aN2}", st_h2))
-                                    for _d1, _f1 in [(0,6),(6,12)]:
-                                        _tt = [["Famille"] + _MB[_d1:_f1] + ["Total"]]
-                                        for _g2 in _gp:
-                                            _tt.append([_g2[:18]] +
-                                                [fmt_full(_mgr.loc[_g2,_m],"") if _mgr.loc[_g2,_m] else "—"
-                                                 for _m in _MB[_d1:_f1]] +
-                                                [fmt_full(_mgr.loc[_g2,"Total"],"")])
-                                        story.append(_tbl_style(_tt, [2.7*cm]+[2.1*cm]*6+[2.5*cm]))
-                                        story.append(Spacer(1,0.1*cm))
                                     story.append(_mpl_barv(
-                                        _MB, [_mgr.loc[_g2,_MB].tolist() for _g2 in _gp[:3]], _gp[:3],
-                                        f"Production mensuelle par famille · {_aN2}", haut=4.4))
-                                    _dm2 = _mgr["Total"].idxmax()
-                                    _mpic = _mgr[_MB].sum(axis=0).idxmax()
-                                    story.append(Spacer(1,0.12*cm))
-                                    story.append(Paragraph(
-                                        f"<b>Lecture.</b> Les partenaires apportent "
-                                        f"<b>{fmt_full(_totp)}</b> sur l'exercice {_aN2}. Les "
-                                        f"<b>{_dm2.lower()}</b> en représentent "
-                                        f"<b>{_mgr.loc[_dm2,'Total']/max(_totp,1)*100:.1f} %</b>. "
-                                        f"Le mois de <b>{_mpic}</b> enregistre le volume le plus élevé.",
-                                        st_bd))
-                                    for _g3 in _gp[:3]:
-                                        _tp3 = (_dNr[_dNr["_GR"]==_g3].groupby("_RS")[_ckp].sum()
-                                                   .sort_values(ascending=False).head(8))
-                                        if _tp3.empty or _tp3.sum() <= 0: continue
-                                        _st3 = float(_tp3.sum())
-                                        story.append(Spacer(1,0.22*cm))
-                                        story.append(Paragraph(f"{_g3} · principaux partenaires", st_h2))
-                                        _r3 = [["Partenaire","Chiffre d'affaires","Part"]]
-                                        for _n3,_v3 in _tp3.items():
-                                            _r3.append([str(_n3)[:40], fmt_full(_v3,""),
-                                                        f"{_v3/_st3*100:.1f} %"])
-                                        story.append(_tbl_style(_r3,[8.5*cm,5*cm,3.5*cm]))
-                                        story.append(Spacer(1,0.12*cm))
-                                        story.append(_mpl_barh(
-                                            _tp3.index.astype(str).tolist(), _tp3.tolist(),
-                                            f"{_g3} · chiffre d'affaires par partenaire",
-                                            coul="#2E86C1", haut=3.2))
-                                        _pc3 = float(_tp3.head(3).sum())/_st3*100
-                                        story.append(Paragraph(
-                                            f"<b>Lecture.</b> <b>{str(_tp3.index[0])[:36]}</b> apporte "
-                                            f"<b>{_tp3.iloc[0]/_st3*100:.1f} %</b> du volume de cette "
-                                            f"famille ; les trois premiers en cumulent <b>{_pc3:.1f} %</b>"
-                                            + (", concentration à surveiller." if _pc3>=75
-                                               else ", répartition équilibrée."), st_bd))
-                                    if _aP2:
-                                        _dP2 = _pr[_pr["_AN"]==_aP2]
-                                        _cN2 = _dNr.groupby("_GR")[_ckp].sum().reindex(_gp).fillna(0)
-                                        _cP2 = _dP2.groupby("_GR")[_ckp].sum().reindex(_gp).fillna(0)
-                                        story.append(Spacer(1,0.25*cm))
-                                        story.append(Paragraph(f"Comparaison {_aN2} face à {_aP2}", st_h2))
-                                        _rc2 = [["Famille",f"{_aP2}",f"{_aN2}","Écart","Var."]]
-                                        for _g4 in _gp:
-                                            _vp4,_vn4 = float(_cP2[_g4]), float(_cN2[_g4])
-                                            _vr4 = ((_vn4-_vp4)/_vp4*100) if _vp4 else None
-                                            _rc2.append([_g4[:20], fmt_full(_vp4,""), fmt_full(_vn4,""),
-                                                         fmt_full(_vn4-_vp4,""),
-                                                         "n. s." if _vr4 is None else f"{_vr4:+.0f} %"])
-                                        _tN4,_tP4 = float(_cN2.sum()), float(_cP2.sum())
-                                        _vg4 = ((_tN4-_tP4)/_tP4*100) if _tP4 else 0
-                                        _rc2.append(["TOTAL", fmt_full(_tP4,""), fmt_full(_tN4,""),
-                                                     fmt_full(_tN4-_tP4,""), f"{_vg4:+.1f} %"])
-                                        story.append(_tbl_style(_rc2,[3.5*cm,3.4*cm,3.4*cm,3.4*cm,3.3*cm]))
-                                        story.append(Spacer(1,0.15*cm))
-                                        story.append(_mpl_barv(
-                                            _gp, [_cP2.tolist(), _cN2.tolist()], [str(_aP2), str(_aN2)],
-                                            f"Production par famille · {_aN2} face à {_aP2}", haut=4.0))
-                                        _prog4 = [g for g in _gp if _cN2[g] > _cP2[g]]
-                                        story.append(Spacer(1,0.12*cm))
-                                        story.append(Paragraph(
-                                            f"<b>Lecture.</b> Le volume apporté par les partenaires "
-                                            f"{'progresse' if _vg4>=0 else 'recule'} de "
-                                            f"<b>{abs(_vg4):.1f} %</b> entre {_aP2} et {_aN2}, passant de "
-                                            f"<b>{fmt_full(_tP4)}</b> à <b>{fmt_full(_tN4)}</b>. "
-                                            + (f"Familles en progression : <b>{', '.join(_prog4)}</b>."
-                                               if _prog4 else "Aucune famille ne progresse."), st_bd))
+                                        _M4, [_tg4.loc[g].tolist() for g in _pres4], _pres4,
+                                        f"Production mensuelle par famille · {_aN4}", haut=4.4))
 
-                        # 4. Sinistres
-                        if s_sin and _sin_r is not None:
+                                    _dom4 = _tg4.sum(axis=1).idxmax()
+                                    _pdo4 = _tg4.sum(axis=1).max() / max(_tot4,1) * 100
+                                    _mp4  = [m for m in range(1,13) if _tg4[m].sum() > 0]
+                                    _pic4 = max(_mp4, key=lambda m: _tg4[m].sum()) if _mp4 else None
+                                    _msg4 = (" Une telle concentration fragilise la production : la "
+                                             "diversification des sources d'affaires mérite d'être "
+                                             "engagée." if _pdo4 >= 65 else
+                                             " La répartition entre les trois canaux demeure équilibrée.")
+                                    story.append(Spacer(1,0.14*cm))
+                                    story.append(Paragraph(
+                                        f"<b>Lecture.</b> Les partenaires financiers apportent "
+                                        f"<b>{fmt_full(_tot4)}</b> sur l'exercice {_aN4}. La famille "
+                                        f"<b>{_dom4.lower()}</b> en représente <b>{_pdo4:.1f} %</b>"
+                                        + (f", et le mois de <b>{_M4[_pic4-1]}</b> concentre la "
+                                           f"production la plus élevée." if _pic4 else ".")
+                                        + _msg4, st_bd))
+
+                                for _fam4 in _pres4:
+                                    _dF4 = _dN4[_dN4["_GR"] == _fam4]
+                                    if _dF4.empty: continue
+                                    _tF4 = (_dF4.pivot_table(index="_NM", columns="_MOI",
+                                                             values="CHIFAFFA", aggfunc="sum",
+                                                             fill_value=0)
+                                                .reindex(columns=range(1,13), fill_value=0))
+                                    _tF4["Tot"] = _tF4.sum(axis=1)
+                                    _tF4 = _tF4[_tF4["Tot"] > 0].sort_values("Tot", ascending=False)
+                                    if _tF4.empty: continue
+                                    _ttF4 = float(_tF4["Tot"].sum())
+
+                                    story.append(Spacer(1,0.3*cm))
+                                    story.append(Paragraph(
+                                        f"4.{_pres4.index(_fam4)+2}  {_fam4} · exercice {_aN4}", st_h2))
+
+                                    _tbF4 = [["Partenaire"] + _M4 + ["Total"]]
+                                    for _nm4 in _tF4.index:
+                                        _tbF4.append([str(_nm4)[:17]]
+                                                     + [fmt_full(v,"") if v else "—"
+                                                        for v in _tF4.loc[_nm4, range(1,13)]]
+                                                     + [fmt_full(_tF4.loc[_nm4,"Tot"],"")])
+                                    story.append(_tbl_style(_tbF4, [3.0*cm] + [1.05*cm]*12 + [1.75*cm]))
+
+                                    for _nm4 in _tF4.head(6).index:
+                                        _sN4 = _tF4.loc[_nm4, range(1,13)].tolist()
+                                        _sP4 = None
+                                        if _aP4:
+                                            _dp4 = _p4[(_p4["_AN"] == _aP4) & (_p4["_NM"] == _nm4)]
+                                            if not _dp4.empty:
+                                                _sP4 = (_dp4.groupby("_MOI")["CHIFAFFA"].sum()
+                                                            .reindex(range(1,13), fill_value=0).tolist())
+                                        story.append(Spacer(1,0.18*cm))
+                                        if _sP4 and sum(_sP4) > 0:
+                                            story.append(_mpl_barv(
+                                                _M4, [_sP4, _sN4], [str(_aP4), str(_aN4)],
+                                                f"{str(_nm4)[:38]} · {_aN4} face à {_aP4}", haut=3.6))
+                                            _t1 = float(sum(_sN4)); _t0 = float(sum(_sP4))
+                                            _v4 = ((_t1-_t0)/_t0*100) if _t0 else 0
+                                            _nh4 = sum(1 for a,b in zip(_sN4,_sP4) if a > b)
+                                            story.append(Paragraph(
+                                                f"<b>{str(_nm4)[:40]}.</b> Production de "
+                                                f"<b>{fmt_full(_t1)}</b> en {_aN4} contre "
+                                                f"<b>{fmt_full(_t0)}</b> en {_aP4}, soit "
+                                                f"<b>{_v4:+.1f} %</b>. {_nh4} mois sur 12 dépassent "
+                                                f"le niveau de l'exercice précédent.", st_bd))
+                                        else:
+                                            story.append(_mpl_barv(
+                                                _M4, [_sN4], [str(_aN4)],
+                                                f"{str(_nm4)[:38]} · production mensuelle {_aN4}",
+                                                haut=3.4))
+                                            _mx4 = max(range(12), key=lambda k: _sN4[k])
+                                            story.append(Paragraph(
+                                                f"<b>{str(_nm4)[:40]}.</b> Production de "
+                                                f"<b>{fmt_full(sum(_sN4))}</b> sur {_aN4}, soit "
+                                                f"<b>{sum(_sN4)/max(_ttF4,1)*100:.1f} %</b> de la "
+                                                f"famille. Le pic se situe en <b>{_M4[_mx4]}</b> "
+                                                f"({fmt_full(_sN4[_mx4])}).", st_bd))
+
+                                    _n14 = _tF4.index[0]
+                                    _p14 = _tF4["Tot"].iloc[0] / max(_ttF4,1) * 100
+                                    _cmt4 = ""
+                                    if _aP4:
+                                        _dFP4 = _p4[(_p4["_AN"] == _aP4) & (_p4["_GR"] == _fam4)]
+                                        _tP4  = float(_dFP4["CHIFAFFA"].sum())
+                                        _vF4  = ((_ttF4-_tP4)/_tP4*100) if _tP4 else 0
+                                        _sens4 = "progresse" if _vF4 >= 0 else "recule"
+                                        _cmt4 = (f" Face à {_aP4}, la famille {_sens4} de "
+                                                 f"<b>{abs(_vF4):.1f} %</b>.")
+                                    story.append(Spacer(1,0.14*cm))
+                                    story.append(Paragraph(
+                                        f"<b>Synthèse {_fam4.lower()}.</b> "
+                                        f"<b>{nb_full(len(_tF4))}</b> partenaires actifs pour "
+                                        f"<b>{fmt_full(_ttF4)}</b>. <b>{str(_n14)[:32]}</b> en assure "
+                                        f"<b>{_p14:.1f} %</b>." + _cmt4, st_bd))
                             story.append(Spacer(1,0.3*cm))
                             story.append(_sec("5.  SINISTRES ET PRESTATIONS"))
                             story.append(Spacer(1,0.2*cm))
