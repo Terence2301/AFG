@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -7598,7 +7599,8 @@ elif "Rapport PDF" in page:
                         from reportlab.lib import colors as rl_colors
                         from reportlab.platypus import (SimpleDocTemplate, Paragraph,
                             Spacer, Table, TableStyle, HRFlowable,
-                            Image as _RLImage, PageBreak)
+                            Image as _RLImage, PageBreak, KeepTogether,
+                            CondPageBreak)
                         from reportlab.lib.enums import TA_CENTER, TA_RIGHT
                         from reportlab.graphics.shapes import Drawing, String, Rect
                         from reportlab.graphics.charts.barcharts import (
@@ -7658,8 +7660,10 @@ elif "Rapport PDF" in page:
                         import matplotlib.pyplot as _plt
                         from matplotlib.ticker import FuncFormatter as _FF
 
-                        _MPL = ["#1A7F6E","#0D1F3C","#C0392B","#CA6F1E",
-                                "#2E86C1","#7D3C98","#16A085","#616A6B"]
+                        # Trois couleurs de charte, declinees pour distinguer
+                        # jusqu'a huit series sans sortir de la palette.
+                        _MPL = ["#00AD00","#FF0000","#00B050","#7A7A7A",
+                                "#005C00","#B30000","#009A45","#B9BABB"]
 
                         def _espace(v, _p=None):
                             """Sépare les milliers par une espace insécable fine."""
@@ -7973,13 +7977,16 @@ elif "Rapport PDF" in page:
                             leftMargin=2*cm, rightMargin=2*cm,
                             topMargin=2.5*cm, bottomMargin=2*cm)
 
-                        C_N = rl_colors.HexColor("#0D1F3C")
-                        C_G = rl_colors.HexColor("#1A7F6E")
-                        C_R = rl_colors.HexColor("#C0392B")
-                        C_A = rl_colors.HexColor("#CA6F1E")
-                        C_L = rl_colors.HexColor("#F3F6FA")
+                        # Palette de charte, identique au bulletin :
+                        # rouge #FF0000, verts #00AD00 et #00B050,
+                        # fond gris clair #ECEDEE.
+                        C_R = rl_colors.HexColor("#FF0000")
+                        C_G = rl_colors.HexColor("#00AD00")
+                        C_A = rl_colors.HexColor("#00B050")
+                        C_L = rl_colors.HexColor("#ECEDEE")
                         C_W = rl_colors.white
-                        C_M = rl_colors.HexColor("#A9DFBF")
+                        C_N = C_G
+                        C_M = C_W
 
                         st_ti = ParagraphStyle("T",fontName="Helvetica-Bold",fontSize=16,
                             textColor=C_W,alignment=TA_CENTER,spaceAfter=4)
@@ -8006,8 +8013,14 @@ elif "Rapport PDF" in page:
                             chaque colonne. Un semestre sans production n'est pas imprime.
                             """
                             _out = []
-                            for _d0, _d1, _lbl_s in [(0, 6, "Premier semestre"),
-                                                     (6, 12, "Second semestre")]:
+                            # Decoupe trimestrielle : trois colonnes de
+                            # montants laissent pres de 3,5 cm par valeur,
+                            # largeur suffisante pour un montant a neuf
+                            # chiffres sans chevauchement.
+                            for _d0, _d1, _lbl_s in [(0, 3,  "Premier trimestre"),
+                                                     (3, 6,  "Deuxième trimestre"),
+                                                     (6, 9,  "Troisième trimestre"),
+                                                     (9, 12, "Quatrième trimestre")]:
                                 _m_s   = mois[_d0:_d1]
                                 _tot_s = sum(sum(v[_d0:_d1]) for v in valeurs)
                                 if _tot_s == 0:
@@ -8451,12 +8464,25 @@ elif "Rapport PDF" in page:
                                     _p4["_MOI"] = _p4["_DT"].dt.month
                                     _ans4 = sorted(_p4["_AN"].unique().tolist())
                                     if _ans4:
-                                        _aN4 = int(SEL_YEAR) if (SEL_YEAR and int(SEL_YEAR) in _ans4) else int(_ans4[-1])
-                                        _av4 = [a for a in _ans4 if a < _aN4]
-                                        _aP4 = int(_av4[-1]) if _av4 else None
-                                        _dN4 = _p4[_p4["_AN"] == _aN4]
+                                        # L'exercice choisi fait autorite. S'il
+                                        # n'existe pas dans les ecritures
+                                        # partenaires, la section n'est pas
+                                        # produite : on ne substitue jamais un
+                                        # autre exercice a celui demande.
+                                        if SEL_YEAR:
+                                            _aN4 = (int(SEL_YEAR)
+                                                    if int(SEL_YEAR) in _ans4 else None)
+                                        else:
+                                            _aN4 = int(_ans4[-1])
+                                        if _aN4 is not None:
+                                            _av4 = [a for a in _ans4 if a < _aN4]
+                                            _aP4 = int(_av4[-1]) if _av4 else None
+                                            _dN4 = _p4[_p4["_AN"] == _aN4]
 
-                                story.append(PageBreak())
+                                # Saut conditionnel : la page n'est tournee
+                                # que s'il reste moins de 8 cm utiles, ce qui
+                                # evite les demi-pages blanches.
+                                story.append(CondPageBreak(8*cm))
                                 story.append(_sec("4.  PARTENAIRES FINANCIERS"))
                                 story.append(Spacer(1,0.2*cm))
 
@@ -8528,32 +8554,39 @@ elif "Rapport PDF" in page:
                                             if not _dp4.empty:
                                                 _sP4 = (_dp4.groupby("_MOI")["CHIFAFFA"].sum()
                                                             .reindex(range(1,13), fill_value=0).tolist())
-                                        story.append(Spacer(1,0.18*cm))
+                                        # Le graphique et son commentaire ne
+                                        # doivent jamais etre separes par un
+                                        # saut de page.
+                                        _bloc4 = [Spacer(1,0.18*cm)]
                                         if _sP4 and sum(_sP4) > 0:
-                                            story.append(_mpl_barv(
+                                            _bloc4.append(_mpl_barv(
                                                 _M4, [_sP4, _sN4], [str(_aP4), str(_aN4)],
                                                 f"{str(_nm4)[:38]} · {_aN4} face à {_aP4}", haut=3.6))
                                             _t1 = float(sum(_sN4)); _t0 = float(sum(_sP4))
                                             _v4 = ((_t1-_t0)/_t0*100) if _t0 else 0
                                             _nh4 = sum(1 for a,b in zip(_sN4,_sP4) if a > b)
-                                            story.append(Paragraph(
+                                            _bloc4.append(Paragraph(
                                                 f"<b>{str(_nm4)[:40]}.</b> Production de "
                                                 f"<b>{fmt_full(_t1)}</b> en {_aN4} contre "
                                                 f"<b>{fmt_full(_t0)}</b> en {_aP4}, soit "
                                                 f"<b>{_v4:+.1f} %</b>. {_nh4} mois sur 12 dépassent "
                                                 f"le niveau de l'exercice précédent.", st_bd))
                                         else:
-                                            story.append(_mpl_barv(
+                                            _bloc4.append(_mpl_barv(
                                                 _M4, [_sN4], [str(_aN4)],
                                                 f"{str(_nm4)[:38]} · production mensuelle {_aN4}",
                                                 haut=3.4))
                                             _mx4 = max(range(12), key=lambda k: _sN4[k])
-                                            story.append(Paragraph(
+                                            _bloc4.append(Paragraph(
                                                 f"<b>{str(_nm4)[:40]}.</b> Production de "
                                                 f"<b>{fmt_full(sum(_sN4))}</b> sur {_aN4}, soit "
                                                 f"<b>{sum(_sN4)/max(_ttF4,1)*100:.1f} %</b> de la "
                                                 f"famille. Le pic se situe en <b>{_M4[_mx4]}</b> "
                                                 f"({fmt_full(_sN4[_mx4])}).", st_bd))
+                                        # Le graphique et sa lecture forment un
+                                        # bloc insecable : jamais de coupure
+                                        # entre l'image et son commentaire.
+                                        story.append(KeepTogether(_bloc4))
 
                                     _n14 = _tF4.index[0]
                                     _p14 = _tF4["Tot"].iloc[0] / max(_ttF4,1) * 100
