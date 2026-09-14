@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -8120,9 +8119,34 @@ elif "Rapport PDF" in page:
                         story.append(Spacer(1,0.35*cm))
 
                         # ── Synthese executive : les chiffres cles en un coup d'oeil ──
+                        # ── Portefeuille : cumul depuis l'origine, puis periode ──
+                        # Le cumul retient toutes les polices ayant pris effet
+                        # jusqu'a l'exercice choisi : c'est le stock constitue
+                        # a cette date. La production nouvelle est mesuree a
+                        # part, sur les seules polices de la periode.
+                        _c_eff_r = next((c for c in ["DATEEFFE","DATE_EFFET","DATESOUS"]
+                                         if pf is not None and c in pf.columns), None)
+                        _an_eff_r = as_year(pf[_c_eff_r]) if _c_eff_r else None
+                        if SEL_YEAR and _an_eff_r is not None:
+                            _pf_cum = pf[(_an_eff_r <= int(SEL_YEAR)).fillna(False)]
+                            _lbl_cum_r = f"depuis l'origine jusqu'en {SEL_YEAR}"
+                        else:
+                            _pf_cum = pf if pf is not None else None
+                            _lbl_cum_r = "toutes périodes confondues"
+
+                        def _nb_etat(_d, _mot):
+                            if _d is None or _d.empty or "ETAT_POLICE" not in _d.columns:
+                                return 0
+                            _e = _d["ETAT_POLICE"].fillna("").astype(str).str.strip().str.upper()
+                            return int(_e.str.contains(_mot, regex=True, na=False).sum())
+
+                        _sx_cum   = len(_pf_cum) if _pf_cum is not None else 0
+                        _sx_c_act = _nb_etat(_pf_cum, "^ACTIF")
+                        _sx_c_res = _nb_etat(_pf_cum, "RESILI|RÉSILI")
+                        _sx_c_ech = _nb_etat(_pf_cum, "ECHU|ÉCHU")
+
                         _sx_nb  = len(_pf_r) if _pf_r is not None else 0
-                        _sx_act = (int((_pf_r["ETAT_POLICE"].str.strip()=="ACTIF").sum())
-                                   if (_pf_r is not None and "ETAT_POLICE" in _pf_r.columns) else 0)
+                        _sx_act = _nb_etat(_pf_r, "^ACTIF")
                         _sx_ca  = (float(_ca_r["CHIFAFFA"].fillna(0).sum())
                                    if (_ca_r is not None and "CHIFAFFA" in _ca_r.columns) else 0)
                         _sx_nq  = len(_ca_r) if _ca_r is not None else 0
@@ -8133,8 +8157,12 @@ elif "Rapport PDF" in page:
 
                         story.append(Paragraph("SYNTHÈSE", st_h1))
                         _sx_rows = [
-                            ["Polices du périmètre", nb_full(_sx_nb),
-                             "Polices actives", nb_full(_sx_act)],
+                            [f"Portefeuille {_lbl_cum_r}", nb_full(_sx_cum),
+                             "dont actives", nb_full(_sx_c_act)],
+                            ["dont résiliées", nb_full(_sx_c_res),
+                             "dont échues", nb_full(_sx_c_ech)],
+                            [f"Production {period_lbl}", nb_full(_sx_nb),
+                             "dont actives", nb_full(_sx_act)],
                             ["Chiffre d'affaires", fmt_full(_sx_ca),
                              "Quittances émises", nb_full(_sx_nq)],
                             ["Sinistres réglés", fmt_full(_sx_sin),
@@ -8323,82 +8351,58 @@ elif "Rapport PDF" in page:
                             story.append(Spacer(1,0.3*cm))
                             story.append(_sec("3.  RÉSEAU COMMERCIAL"))
                             story.append(Spacer(1,0.2*cm))
-                            # Identification des apporteurs : meme regle que
-                            # l'onglet Commerciaux. Le detail par agent est
-                            # conserve (CODEAPPO), le nom de l'agence provient
-                            # de CODEINTE, seule cle qui se recoupe entre les
-                            # deux bases. Grouper sur NOM_INTERMEDIAIRE seul
-                            # produirait un unique groupe sur les exercices ou
-                            # cette colonne porte une valeur constante.
-                            _cd_r = next((c for c in ["CODEAPPO","CODE_APPO"]
+                            # Identification des apporteurs.
+                            # Le code figure dans la base CA (CODEAPPO) ; le
+                            # nom se trouve dans le Portefeuille, sur la ligne
+                            # portant le meme code. Les codes du Portefeuille
+                            # sont exportes avec un separateur de milliers que
+                            # code_propre() retire avant la jointure.
+                            _cd_r = next((c for c in ["CODEAPPO","CODE_APPO","CODEAPP"]
                                           if c in _ca_r.columns), None)
                             _in_r = next((c for c in ["CODEINTE","CODE_INTER"]
                                           if c in _ca_r.columns), None)
                             _agk  = None
 
                             if _cd_r or _in_r:
-                                # Referentiel agence : CODEINTE -> nom
-                                _rag = {}
-                                if pf is not None:
-                                    _ip = next((c for c in ["CODEINTE_P","CODEINTE"]
-                                                if c in pf.columns), None)
-                                    _np = next((c for c in ["NOM_APP","NOM_APPORT",
-                                                            "NOM_INTERMEDIAIRE"]
-                                                if c in pf.columns), None)
-                                    if _ip and _np:
-                                        _tt = pf[[_ip,_np]].dropna()
-                                        _tt = _tt[_tt[_np].astype(str).str.strip() != ""]
-                                        for _c, _n in zip(code_propre(_tt[_ip]),
-                                                          _tt[_np].astype(str).str.strip()):
-                                            if _c: _rag.setdefault(_c, _n)
-                                _ic = next((c for c in ["CODEINTE","CODE_INTER"]
-                                            if c in ca.columns), None)
-                                _nc = next((c for c in ["NOM_INTERMEDIAIRE"]
-                                            if c in ca.columns), None)
-                                if _ic and _nc:
-                                    _tt2 = ca[[_ic,_nc]].dropna()
-                                    _tt2 = _tt2[_tt2[_nc].astype(str).str.strip() != ""]
-                                    for _c, _n in zip(code_propre(_tt2[_ic]),
-                                                      _tt2[_nc].astype(str).str.strip()):
-                                        if _c: _rag.setdefault(_c, _n)
-
-                                # Referentiel agent : CODEAPPO -> nom, si disponible
-                                _ragt = {}
-                                if _cd_r:
-                                    for _cn in ["RAISOCIN","RAISOC","RAISON_SOCIALE",
-                                                "NOM_APPORT","NOM_APPO","NOM_AGENT"]:
-                                        if _cn in ca.columns:
-                                            _t3 = ca[[_cd_r,_cn]].dropna()
-                                            _t3 = _t3[_t3[_cn].astype(str).str.strip() != ""]
-                                            for _c, _n in zip(code_propre(_t3[_cd_r]),
-                                                              _t3[_cn].astype(str).str.strip()):
-                                                if _c: _ragt.setdefault(_c, _n)
-
+                                _cp_r = next((c for c in ["CODEAPPO","CODE_APPO","CODEAPP"]
+                                              if pf is not None and c in pf.columns), None)
+                                _ref_ag_r = construire_referentiel([
+                                    (pf, _cp_r, ["NOM_APP","NOM_APPORT","NOM_APPO"]),
+                                    (ca, _cd_r, ["RAISOCIN","RAISOC","RAISON_SOCIALE",
+                                                 "NOM_APPORT","NOM_APPO"]),
+                                ])
+                                _ref_ag_r = {_k: _v for _k, _v in _ref_ag_r.items()
+                                             if not est_reseau_interne(_v)}
+                                _ip_r = next((c for c in ["CODEINTE_P","CODEINTE","CODE_INTER"]
+                                              if pf is not None and c in pf.columns), None)
+                                _ref_in_r = construire_referentiel([
+                                    (ca, _in_r, ["NOM_INTERMEDIAIRE"]),
+                                    (pf, _ip_r, ["NOM_APP","NOM_INTERMEDIAIRE"]),
+                                ])
                                 _ca_r = _ca_r.copy()
                                 _ca_r["_AG"] = (code_propre(_ca_r[_cd_r]) if _cd_r else "")
-                                _ca_r["_IN"] = (code_propre(_ca_r[_in_r]) if _in_r else "")
-                                _ca_r["_NA"] = _ca_r["_AG"].map(_ragt)
-                                _ca_r["_NI"] = _ca_r["_IN"].map(_rag)
+                                _ca_r["_NA"] = (chercher_nom(_ca_r[_cd_r], _ref_ag_r)
+                                                if _cd_r else pd.NA)
+                                _ca_r["_NI"] = (chercher_nom(_ca_r[_in_r], _ref_in_r)
+                                                if _in_r else pd.NA)
 
                                 def _lib_r(r):
+                                    """Nom de l'apporteur, agence a defaut."""
                                     _cd = str(r["_AG"]).strip()
-                                    if _cd == "":
-                                        _ag = r.get("_NI")
-                                        return (f"{_ag} · sans code agent"
-                                                if pd.notna(_ag) and str(_ag).strip()
-                                                else "Apporteur non identifié")
                                     _na = r.get("_NA")
-                                    if pd.notna(_na) and str(_na).strip():
-                                        return f"{str(_na).strip()} ({_cd})"
+                                    _na = str(_na).strip() if pd.notna(_na) else ""
                                     _ag = r.get("_NI")
-                                    if pd.notna(_ag) and str(_ag).strip():
-                                        return f"{str(_ag).strip()} · agent {_cd}"
-                                    return f"Agent {_cd}"
+                                    _ag = str(_ag).strip() if pd.notna(_ag) else ""
+                                    if _na:
+                                        return f"{_na} ({_cd})" if _cd else _na
+                                    if _ag:
+                                        return (f"{_ag} · agent {_cd}" if _cd
+                                                else f"{_ag} · sans code agent")
+                                    return f"Apporteur {_cd}" if _cd else "Non identifié"
 
                                 _ca_r["_NOM_R"] = _ca_r.apply(_lib_r, axis=1)
                                 _agk = "_NOM_R"
 
-                            # Repli : colonne nom directement exploitable
                             if _agk is None:
                                 _agk = next((c for c in ["NOM_APPORT","NOM_APPO",
                                                          "NOM_INTERMEDIAIRE","NOM_APP"]
@@ -8413,20 +8417,30 @@ elif "Rapport PDF" in page:
                                 _gtot = float(_g["CA"].sum())
                                 _g = _g.sort_values("CA",ascending=False).head(10)
                                 _g["Part"] = (_g["CA"]/max(_gtot,1)*100).round(1)
-                                comD = [["Commercial / Apporteur","CA (FCFA)","Nb quittances","Commission","Part %"]]
-                                for _,r in _g.iterrows():
-                                    comD.append([str(r[_agk])[:28],
-                                        fmt_full(r["CA"],""),
-                                        f"{int(r['NbQ']):,}".replace(",", " "),
-                                        fmt_full(r["Comm"],""), f"{r['Part']:.1f}%"])
-                                story.append(_tbl_style(comD,[7*cm,3.5*cm,2.2*cm,2.5*cm,1.8*cm]))
-                                story.append(Spacer(1,0.15*cm))
-                                _cum = (_g["CA"].cumsum()/max(_gtot,1)*100).tolist()
-                                story.append(_mpl_pareto(
+                                comD = [["Apporteur", "Nb affaires",
+                                         "Chiffre d'affaires", "Commission", "Part"]]
+                                for _, r in _g.iterrows():
+                                    comD.append([str(r[_agk])[:38],
+                                                 nb_full(int(r["NbQ"])),
+                                                 fmt_full(r["CA"], ""),
+                                                 fmt_full(r["Comm"], ""),
+                                                 f"{r['Part']:.1f} %"])
+                                comD.append(["TOTAL (dix premiers)",
+                                             nb_full(int(_g["NbQ"].sum())),
+                                             fmt_full(float(_g["CA"].sum()), ""),
+                                             fmt_full(float(_g["Comm"].sum()), ""),
+                                             f"{float(_g['Part'].sum()):.1f} %"])
+                                story.append(_tbl_style(
+                                    comD, [6.2*cm, 2.4*cm, 3.6*cm, 3.0*cm, 1.8*cm]))
+                                story.append(Spacer(1,0.2*cm))
+                                # Barres horizontales : montants annotes en
+                                # bout de barre, plus lisibles qu'un Pareto
+                                # sur des libelles longs.
+                                story.append(_mpl_barh(
                                     _g[_agk].astype(str).tolist(),
-                                    _g["CA"].tolist(), _cum,
-                                    f"Pareto du chiffre d'affaires · "
-                                    f"Top 10 apporteurs · {period_lbl}"))
+                                    _g["CA"].tolist(),
+                                    f"Chiffre d'affaires par apporteur · "
+                                    f"dix premiers · {period_lbl}", haut=4.4))
                                 _t1n = str(_g.iloc[0][_agk])[:30]
                                 _t1p = float(_g.iloc[0]["Part"])
                                 _t5p = float(_g.head(5)["Part"].sum())
