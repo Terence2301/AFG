@@ -1205,6 +1205,131 @@ def modifier_bia(bia_id, numero_bia, modifs: dict, par: str, role: str) -> tuple
                 else "Aucune valeur n'a changé.")
 
 
+def generer_bia_pdf(ligne) -> bytes:
+    """Produit le bulletin d'un contrat enregistre, en deux exemplaires.
+
+    Reprend la mise en page du bulletin de saisie : palette de charte,
+    deux exemplaires separes par une ligne de decoupe, le tout sur une
+    seule page A4.
+    """
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.units import cm
+        from reportlab.lib import colors as _rc
+        from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
+                                        Table, TableStyle, HRFlowable,
+                                        Image as _RLI)
+        from reportlab.lib.styles import ParagraphStyle
+        from reportlab.lib.enums import TA_CENTER
+        import io as _io, base64 as _b64
+
+        C_R = _rc.HexColor("#FF0000")
+        C_G = _rc.HexColor("#00AD00")
+        C_L = _rc.HexColor("#ECEDEE")
+        C_W = _rc.white
+
+        _ti = ParagraphStyle("T", fontName="Helvetica-Bold", fontSize=11,
+                             textColor=C_W, alignment=TA_CENTER)
+        _su = ParagraphStyle("S", fontName="Helvetica", fontSize=8,
+                             textColor=C_W, alignment=TA_CENTER)
+        _bd = ParagraphStyle("B", fontName="Helvetica", fontSize=7.5,
+                             textColor=_rc.black, leading=10)
+        _sm = ParagraphStyle("M", fontName="Helvetica", fontSize=6.5,
+                             textColor=_rc.HexColor("#666666"), alignment=TA_CENTER)
+
+        def _v(cle, defaut="—"):
+            _x = ligne.get(cle)
+            if _x is None or (isinstance(_x, float) and pd.isna(_x)):
+                return defaut
+            _s = str(_x).strip()
+            return _s if _s else defaut
+
+        def _m(cle):
+            try:    return f"{float(ligne.get(cle) or 0):,.0f} FCFA".replace(","," ")
+            except Exception: return "—"
+
+        _num  = _v("numero_bia", "sans numéro")
+        _prod = _v("produit")
+        _appo = _v("apporteur", _v("courtier", ""))
+
+        def _exemplaire(etiquette):
+            _it = []
+            _h = Table([[Paragraph("BULLETIN INDIVIDUEL D'ADHÉSION", _ti)],
+                        [Paragraph(_prod, _su)],
+                        [Paragraph(f"N° {_num}  ·  Exemplaire : {etiquette}", _su)]],
+                       colWidths=[17.2*cm])
+            _h.setStyle(TableStyle([
+                ("BACKGROUND",(0,0),(-1,-1),C_G),
+                ("ALIGN",(0,0),(-1,-1),"CENTER"),
+                ("TOPPADDING",(0,0),(-1,-1),5),
+                ("BOTTOMPADDING",(0,0),(-1,-1),5)]))
+            _it.append(_h); _it.append(Spacer(1,0.16*cm))
+
+            _rows = [
+                ["N° BIA", _num, "Statut", _v("statut")],
+                ["Souscripteur",
+                 f"{_v('nom_souscripteur','')} {_v('prenom_souscripteur','')}".strip() or "—",
+                 "Téléphone", _v("telephone_souscripteur")],
+                ["Produit", _prod, "Périodicité", _v("periodicite")],
+                ["Cotisation", _m("cotisation"), "Capital garanti", _m("capital_garanti")],
+                ["Date d'effet", _v("date_effet"), "Date de terme", _v("date_echeance")],
+                ["Mode de règlement", _v("mode_reglement"),
+                 "Référence", _v("reference_reglement")],
+            ]
+            if _appo:
+                _rows.append(["Apporteur", _appo, "Saisi par", _v("saisi_par")])
+            _t = Table(_rows, colWidths=[3.8*cm, 4.8*cm, 3.8*cm, 4.8*cm])
+            _t.setStyle(TableStyle([
+                ("FONTNAME",(0,0),(0,-1),"Helvetica-Bold"),
+                ("FONTNAME",(2,0),(2,-1),"Helvetica-Bold"),
+                ("FONTSIZE",(0,0),(-1,-1),7.5),
+                ("ROWBACKGROUNDS",(0,0),(-1,-1),[C_L, C_W]),
+                ("GRID",(0,0),(-1,-1),0.3,_rc.HexColor("#CFD4DA")),
+                ("TOPPADDING",(0,0),(-1,-1),3.5),
+                ("BOTTOMPADDING",(0,0),(-1,-1),3.5),
+                ("LEFTPADDING",(0,0),(-1,-1),6)]))
+            _it.append(_t); _it.append(Spacer(1,0.16*cm))
+            _it.append(Paragraph(
+                "Je soussigné(e) certifie l'exactitude des informations "
+                "ci-dessus et reconnais avoir reçu les conditions générales "
+                "du contrat.", _bd))
+            _it.append(Spacer(1,0.2*cm))
+
+            _sg = Table([["Signature du souscripteur", "Cachet et signature"],
+                         ["", ""]],
+                        colWidths=[8.6*cm, 8.6*cm], rowHeights=[None, 1.25*cm])
+            _sg.setStyle(TableStyle([
+                ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
+                ("FONTSIZE",(0,0),(-1,-1),7),
+                ("TEXTCOLOR",(0,0),(-1,0),C_G),
+                ("ALIGN",(0,0),(-1,-1),"CENTER"),
+                ("VALIGN",(0,1),(-1,1),"MIDDLE"),
+                ("BOX",(0,1),(0,1),0.5,C_G),
+                ("BOX",(1,1),(1,1),0.5,C_G),
+                ("TOPPADDING",(0,0),(-1,-1),2),
+                ("BOTTOMPADDING",(0,0),(-1,-1),2)]))
+            _it.append(_sg); _it.append(Spacer(1,0.08*cm))
+            _it.append(Paragraph(
+                f"{_prod} · AFG Assurances Bénin Vie", _sm))
+            return _it
+
+        _buf = _io.BytesIO()
+        _doc = SimpleDocTemplate(_buf, pagesize=A4,
+                                 leftMargin=1.4*cm, rightMargin=1.4*cm,
+                                 topMargin=0.9*cm, bottomMargin=0.9*cm)
+        _story = _exemplaire("CLIENT")
+        _story.append(Spacer(1,0.16*cm))
+        _story.append(HRFlowable(width="100%", thickness=0.7,
+                                 color=C_R, dash=[3,3]))
+        _story.append(Paragraph("Découper ici", _sm))
+        _story.append(Spacer(1,0.16*cm))
+        _story.extend(_exemplaire("AFG ASSURANCES"))
+        _doc.build(_story)
+        return _buf.getvalue()
+    except Exception:
+        return b""
+
+
 def historique_bia(bia_id=None) -> pd.DataFrame:
     """Retourne le journal des modifications, filtre sur un contrat si fourni."""
     try:
@@ -7421,6 +7546,46 @@ elif "Base BIA" in page:
                             else:
                                 st.warning(_msg)
 
+                    # ── Impression du bulletin ────────────────────────────
+                    # Un contrat ne s'imprime qu'une fois validé : tant qu'il
+                    # reste en brouillon ou en cours, la pièce n'engage pas
+                    # la compagnie et ne doit pas circuler.
+                    st.markdown("")
+                    _statut_c = str(_ligne.get("statut","")).strip()
+                    if _statut_c.lower() == "validé":
+                        _ic1, _ic2 = st.columns([3,1])
+                        _ic1.markdown(
+                            f"<div style='font-size:12px;color:{GREEN};"
+                            f"padding-top:8px'>Contrat validé — le bulletin "
+                            f"peut être imprimé.</div>",
+                            unsafe_allow_html=True)
+                        if _ic2.button("Imprimer le BIA", type="primary",
+                                       use_container_width=True,
+                                       key="bia_imprimer_corr"):
+                            _pdf_c = generer_bia_pdf(_ligne)
+                            if _pdf_c:
+                                st.session_state["_bia_pdf_corr"] = _pdf_c
+                                st.session_state["_bia_pdf_corr_nom"] = (
+                                    f"BIA_{_ligne.get('numero_bia','contrat')}.pdf")
+                            else:
+                                st.error("La génération du bulletin a échoué.")
+
+                        if st.session_state.get("_bia_pdf_corr"):
+                            _pc = st.session_state["_bia_pdf_corr"]
+                            st.success(f"Bulletin prêt — {len(_pc)//1024} Ko · "
+                                       f"deux exemplaires sur une page")
+                            st.download_button(
+                                "Télécharger le BIA en PDF", data=_pc,
+                                file_name=st.session_state.get(
+                                    "_bia_pdf_corr_nom","bulletin.pdf"),
+                                mime="application/pdf",
+                                use_container_width=True, type="primary",
+                                key="dl_bia_corr")
+                    else:
+                        st.info(f"Statut actuel : **{_statut_c or 'non renseigné'}**. "
+                                f"Le bulletin ne peut être imprimé qu'une fois "
+                                f"le contrat passé au statut **Validé**.")
+
                     # Journal du contrat
                     _hist = historique_bia(_id_bia)
                     if not _hist.empty:
@@ -7816,6 +7981,40 @@ elif "Rapport PDF" in page:
                             ax.axis("equal")
                             return _mpl_img(fig)
 
+                        def _mpl_barh_pct(labels, values, total, titre, haut=3.6):
+                            """Barres horizontales annotees en effectif et part.
+
+                            Chaque barre porte son effectif et son pourcentage,
+                            y compris les plus courtes : aucune valeur n'est
+                            masquee faute de place, contrairement a une carte
+                            proportionnelle.
+                            """
+                            _n = max(len(labels), 1)
+                            fig, ax = _plt.subplots(figsize=(10, max(haut, .5*_n + 1.1)))
+                            _y = list(range(len(labels)))
+                            ax.barh(_y, values, height=.6,
+                                    color=[_MPL[i % len(_MPL)] for i in range(len(labels))],
+                                    edgecolor="white", linewidth=.8)
+                            ax.set_yticks(_y)
+                            ax.set_yticklabels([str(l)[:30] for l in labels], fontsize=9.5)
+                            ax.invert_yaxis()
+                            _mx = max(values) if values and max(values) else 1
+                            for _i, _v in enumerate(values):
+                                ax.text(_v + _mx*.015, _i,
+                                        f"{_espace(_v)}   ({_v/total*100:.1f} %)",
+                                        va="center", fontsize=9, color="#2C3E50",
+                                        fontweight="bold")
+                            ax.set_xlim(0, _mx*1.32)
+                            ax.xaxis.set_major_formatter(_FF(_espace))
+                            ax.tick_params(axis="x", labelsize=8, colors="#667777")
+                            ax.set_title(titre, fontsize=11, fontweight="bold",
+                                         color="#00AD00", loc="left", pad=11)
+                            ax.grid(axis="x", color="#ECEDEE", linewidth=.8)
+                            ax.set_axisbelow(True)
+                            for _s in ("top","right","left"): ax.spines[_s].set_visible(False)
+                            ax.spines["bottom"].set_color("#CFD4DA")
+                            return _mpl_img(fig)
+
                         def _mpl_treemap(labels, values, titre, haut=4.6):
                             """Carte proportionnelle par pavage récursif."""
                             # Une carte a une seule case n'apporte rien : barres a la place.
@@ -8037,25 +8236,39 @@ elif "Rapport PDF" in page:
                                           + [fmt_full(_tot_s, "")])
                                 _lg_col = (17.0*cm - largeur_lib - 2.3*cm) / len(_m_s)
                                 _out.append(Paragraph(_lbl_s, st_h2))
-                                _out.append(_tbl_style(_t,
-                                            [largeur_lib] + [_lg_col]*len(_m_s) + [2.3*cm]))
+                                _out.append(_tbl_style(
+                                    _t,
+                                    [largeur_lib] + [_lg_col]*len(_m_s) + [2.3*cm],
+                                    centrer=True, taille=8))
                                 _out.append(Spacer(1, 0.2*cm))
                             return _out
 
-                        def _tbl_style(data, col_widths, header_bg=None):
+                        def _tbl_style(data, col_widths, header_bg=None,
+                                       centrer=False, taille=8.5):
+                            """Tableau du rapport.
+
+                            `centrer` centre les valeurs plutot que de les
+                            aligner a droite : utile pour les tableaux
+                            mensuels, ou la colonne est large et le montant
+                            court, ce qui creerait un vide a gauche.
+                            """
                             t = Table(data, colWidths=col_widths)
                             _bg = header_bg or C_N
+                            _al = "CENTER" if centrer else "RIGHT"
                             t.setStyle(TableStyle([
                                 ("BACKGROUND",(0,0),(-1,0),_bg),
                                 ("TEXTCOLOR",(0,0),(-1,0),C_W),
                                 ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
-                                ("FONTSIZE",(0,0),(-1,-1),8.5),
+                                ("FONTSIZE",(0,0),(-1,-1),taille),
                                 ("ROWBACKGROUNDS",(0,1),(-1,-1),[C_L, C_W]),
-                                ("ALIGN",(1,0),(-1,-1),"RIGHT"),
-                                ("GRID",(0,0),(-1,-1),0.3,rl_colors.HexColor("#DDE3EE")),
+                                ("ALIGN",(1,0),(-1,-1),_al),
+                                ("ALIGN",(1,0),(-1,0),"CENTER"),
+                                ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+                                ("GRID",(0,0),(-1,-1),0.3,rl_colors.HexColor("#CFD4DA")),
                                 ("TOPPADDING",(0,0),(-1,-1),4),
                                 ("BOTTOMPADDING",(0,0),(-1,-1),4),
-                                ("LEFTPADDING",(0,0),(-1,-1),7),
+                                ("LEFTPADDING",(0,0),(-1,-1),6),
+                                ("RIGHTPADDING",(0,0),(-1,-1),6),
                             ]))
                             return t
 
@@ -8168,13 +8381,19 @@ elif "Rapport PDF" in page:
                             ["Sinistres réglés", fmt_full(_sx_sin),
                              "Ratio S/P", f"{_sx_sp:.1f} %"],
                         ]
-                        _sx_t = Table(_sx_rows, colWidths=[4.6*cm,3.9*cm,4.6*cm,3.9*cm])
+                        # Libelles a gauche, valeurs a droite : les montants
+                        # longs ne debordent plus sur la colonne voisine.
+                        _sx_t = Table(_sx_rows,
+                                      colWidths=[5.4*cm, 3.1*cm, 5.4*cm, 3.1*cm])
                         _sx_t.setStyle(TableStyle([
                             ("FONTNAME",(0,0),(0,-1),"Helvetica"),
                             ("FONTNAME",(2,0),(2,-1),"Helvetica"),
                             ("FONTNAME",(1,0),(1,-1),"Helvetica-Bold"),
                             ("FONTNAME",(3,0),(3,-1),"Helvetica-Bold"),
-                            ("FONTSIZE",(0,0),(-1,-1),9),
+                            ("FONTSIZE",(0,0),(-1,-1),8),
+                            ("ALIGN",(1,0),(1,-1),"RIGHT"),
+                            ("ALIGN",(3,0),(3,-1),"RIGHT"),
+                            ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
                             ("TEXTCOLOR",(1,0),(1,-1),C_G),
                             ("TEXTCOLOR",(3,0),(3,-1),C_G),
                             ("ROWBACKGROUNDS",(0,0),(-1,-1),[C_L,C_W]),
@@ -8222,8 +8441,16 @@ elif "Rapport PDF" in page:
                                 # Une seule representation des etats : le poids
                                 # relatif. Le camembert faisait double emploi.
                                 story.append(Spacer(1,0.18*cm))
-                                story.append(_mpl_treemap(
-                                    [p[0] for p in _pair], [p[1] for p in _pair],
+                                # Barres horizontales plutot qu'une carte :
+                                # sur une carte proportionnelle, les etats
+                                # minoritaires occupent une surface trop
+                                # petite pour porter leur libelle et leur
+                                # pourcentage. En barres, chaque etat est
+                                # annote quelle que soit sa part.
+                                _tot_e = float(sum(p[1] for p in _pair)) or 1.0
+                                story.append(_mpl_barh_pct(
+                                    [p[0] for p in _pair],
+                                    [p[1] for p in _pair], _tot_e,
                                     f"Poids relatif de chaque état · {period_lbl}"))
 
                             # La ventilation par produit figure en section 2,
@@ -8463,8 +8690,11 @@ elif "Rapport PDF" in page:
                                 _rs_p4 = next((c for c in ["RAISOCIN","RAISOC","RAISON_SOCIALE"]
                                                if c in ca.columns), None)
                                 _dN4, _aN4, _aP4, _p4 = None, None, None, None
-                                _M4 = ["Jan","Fév","Mar","Avr","Mai","Juin",
-                                       "Juil","Août","Sep","Oct","Nov","Déc"]
+                                # Mois en toutes lettres : la decoupe
+                                # trimestrielle laisse la place necessaire.
+                                _M4 = ["Janvier","Février","Mars","Avril","Mai",
+                                       "Juin","Juillet","Août","Septembre",
+                                       "Octobre","Novembre","Décembre"]
 
                                 if _cd_p4 and _rs_p4:
                                     _p4 = ca[[_cd_p4, _rs_p4, "CHIFAFFA"]].copy()
