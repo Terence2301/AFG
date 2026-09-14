@@ -2423,6 +2423,11 @@ with st.sidebar:
     # Alias numérique pour les pages analytiques
     SEL_YEAR_SB = None if _sel_yr == "Toutes les années" else int(_sel_yr)
     st.session_state["sel_year_num"] = SEL_YEAR_SB
+    # SEL_YEAR est calcule plus haut, avant que ce selecteur ne soit rendu :
+    # il porte alors la valeur du run precedent. On le rafraichit ici pour
+    # que toutes les pages, y compris le rapport, voient l'exercice
+    # reellement choisi.
+    SEL_YEAR = SEL_YEAR_SB
 
     st.markdown("<hr>", unsafe_allow_html=True)
 
