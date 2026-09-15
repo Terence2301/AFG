@@ -2205,14 +2205,17 @@ VISIBLE_DEFAULT = ["📝  Saisie BIA", "🗂️  Base BIA"]
 #         Dès qu'AU MOINS une base est chargée  toutes les pages se débloquent.
 #         Ce calcul est fait à chaque rendu (pas besoin de bouton).
 _any_data     = (st.session_state.pf_ok or st.session_state.ca_ok or st.session_state.sin_ok)
-# L'annee selectionnee est lue depuis la cle du widget : Streamlit restaure
-# l'etat des widgets AVANT d'executer le script, donc la valeur est a jour
-# des le debut du run (contrairement a une cle ecrite plus bas dans la sidebar).
+# L'exercice de rattachement decoule de la periode d'analyse, unique filtre
+# de l'application. Streamlit restaure l'etat des widgets avant d'executer
+# le script : la date est donc a jour des le debut du run.
 def _sel_year_now():
-    _v = st.session_state.get("yr_sel", st.session_state.get("filtre_annee"))
-    if _v in (None, "", "Toutes les années"): return None
-    try:    return int(str(_v).strip())
-    except: return None
+    _d = st.session_state.get("sel_date")
+    if isinstance(_d, date):
+        return int(_d.year)
+    try:
+        return int(str(_d)[:4])
+    except Exception:
+        return None
 SEL_YEAR = _sel_year_now()
 _can_analysis = can_see_analytics(user)   # PDG ou ACTUAIRE uniquement
 _is_courtier  = is_courtier(user)         # Courtiers  Saisie BIA uniquement
@@ -2375,60 +2378,28 @@ with st.sidebar:
     MODE = {"Semaine":"semaine","Mois":"mois","Trimestre":"trim",
             "Semestre":"sem","Année":"annee","Jour":"jour"}[mode_lbl]
 
-    # Le filtre annuel, place plus bas, pilote la periode : quand un
-    # exercice est retenu, la date d'analyse s'y aligne et le choix
-    # manuel est neutralise. Un seul perimetre gouverne alors toutes
-    # les pages, ce qui evite les lectures contradictoires.
-    # Lecture directe de la cle du widget : « filtre_annee » n'est ecrit
-    # qu'apres le rendu du selecteur et porterait la valeur du run
-    # precedent, ce qui decalerait la periode d'un exercice.
-    _an_pilote = st.session_state.get("yr_sel",
-                    st.session_state.get("filtre_annee", "Toutes les années"))
-    _an_pilote = (int(_an_pilote) if str(_an_pilote).isdigit() else None)
+    # La periode d'analyse est le filtre unique. L'exercice de rattachement
+    # en decoule : il sert aux lectures annuelles et aux comparaisons N/N-1,
+    # sans qu'aucun second selecteur ne puisse le contredire.
+    sel_date = st.date_input(
+        "", value=st.session_state.get("sel_date", date(2025, 6, 30)),
+        label_visibility="collapsed", key="sel_date",
+        help="Choisissez une date dans la période à analyser. "
+             "Le mode ci-dessus définit l'amplitude retenue.")
 
-    if _an_pilote:
-        # Date calee sur l'exercice : fin d'annee, ou 30 juin si le mode
-        # retenu decoupe l'annee en fractions.
-        _d_def = (date(_an_pilote, 12, 31) if MODE == "annee"
-                  else date(_an_pilote, 6, 30))
-        _cur_d = st.session_state.get("sel_date", _d_def)
-        if not isinstance(_cur_d, date) or _cur_d.year != _an_pilote:
-            _cur_d = _d_def
-        # Champ verrouille : l'exercice choisi plus bas gouverne seul la
-        # periode. Laisser le champ modifiable autoriserait deux perimetres
-        # contradictoires dans une meme lecture.
-        sel_date = _cur_d
-        st.date_input(
-            "", value=_cur_d,
-            min_value=date(_an_pilote, 1, 1),
-            max_value=date(_an_pilote, 12, 31),
-            label_visibility="collapsed", key="sel_date_lock",
-            disabled=True,
-            help=f"Période fixée par le filtre annuel {_an_pilote}. "
-                 f"Choisissez « Toutes les années » pour la modifier.")
-        st.markdown(
-            f"<div style='font-size:9.5px;color:rgba(255,255,255,.55);"
-            f"margin:-6px 4px 6px'>Période alignée sur l'exercice "
-            f"<b>{_an_pilote}</b></div>", unsafe_allow_html=True)
-    else:
-        sel_date = st.date_input(
-            "", value=date(2024, 6, 30),
-            label_visibility="collapsed", key="sel_date",
-            help="Sélectionnez une date dans la période souhaitée")
-
-    if MODE=="jour":
+    if MODE == "jour":
         period_lbl = ds(sel_date)
-    elif MODE=="semaine":
+    elif MODE == "semaine":
         # Semaine ISO : lundi au dimanche contenant sel_date
         _lun = sel_date - timedelta(days=sel_date.weekday())
         _dim = _lun + timedelta(days=6)
         _iso = sel_date.isocalendar()
         period_lbl = f"Sem. {_iso[1]} · {ds(_lun)}–{ds(_dim)}"
-    elif MODE=="mois":
+    elif MODE == "mois":
         period_lbl = f"{MOIS_LONG[sel_date.month-1]} {sel_date.year}"
-    elif MODE=="trim":
+    elif MODE == "trim":
         period_lbl = f"T{(sel_date.month-1)//3+1} {sel_date.year}"
-    elif MODE=="sem":
+    elif MODE == "sem":
         period_lbl = f"S{'1' if sel_date.month<=6 else '2'} {sel_date.year}"
     else:
         period_lbl = str(sel_date.year)
@@ -2436,48 +2407,20 @@ with st.sidebar:
     st.markdown(f"<div style='background:#C0392B;color:white;text-align:center;"
                 f"border-radius:7px;padding:5px;margin:5px 4px;font-weight:800;"
                 f"font-size:12px'>{period_lbl}</div>", unsafe_allow_html=True)
-    if _an_pilote:
-        st.markdown(
-            f"<div style='font-size:9px;color:rgba(255,255,255,.55);"
-            f"text-align:center;margin:-2px 4px 4px'>"
-            f"Période bornée à l'exercice {_an_pilote}</div>",
-            unsafe_allow_html=True)
 
-    # ── Filtre par année ────────────────────────────────────────────────────
-    # Utiliser st.session_state pour éviter le NameError (ca/pf/sin définis plus tard)
-    _annees_all = []
-    _ca_ss  = st.session_state.ca
-    _pf_ss  = st.session_state.pf
-    _sin_ss = st.session_state.sin
-    if _ca_ss is not None and "ANNEE" in _ca_ss.columns:
-        _annees_all = sorted([int(a) for a in _ca_ss["ANNEE"].dropna().unique()
-                              if str(a).isdigit()], reverse=True)
-    elif _sin_ss is not None and "ANNEE_SIN" in _sin_ss.columns:
-        _annees_all = sorted([int(a) for a in _sin_ss["ANNEE_SIN"].dropna().unique()
-                              if pd.notna(a)], reverse=True)
-    elif _pf_ss is not None and "ANNEESOUS" in _pf_ss.columns:
-        _annees_all = sorted([int(a) for a in _pf_ss["ANNEESOUS"].dropna().unique()
-                              if str(a).isdigit()], reverse=True)
-    _yr_opts = ["Toutes les années"] + [str(a) for a in _annees_all]
-    _cur_yr  = st.session_state.get("filtre_annee", "Toutes les années")
-    if _cur_yr not in _yr_opts: _cur_yr = "Toutes les années"
-    _sel_yr  = st.selectbox("📅 Année", _yr_opts,
-                             index=_yr_opts.index(_cur_yr), key="yr_sel")
-    # Un changement d'exercice recale la date d'analyse : sans cela, la
-    # date du run precedent resterait hors des bornes du nouvel exercice.
-    if st.session_state.get("filtre_annee") != _sel_yr:
-        st.session_state.pop("sel_date", None)
-        st.session_state["filtre_annee"] = _sel_yr
-        st.rerun()
-    st.session_state["filtre_annee"] = _sel_yr
-    # Alias numérique pour les pages analytiques
-    SEL_YEAR_SB = None if _sel_yr == "Toutes les années" else int(_sel_yr)
-    st.session_state["sel_year_num"] = SEL_YEAR_SB
-    # SEL_YEAR est calcule plus haut, avant que ce selecteur ne soit rendu :
-    # il porte alors la valeur du run precedent. On le rafraichit ici pour
-    # que toutes les pages, y compris le rapport, voient l'exercice
-    # reellement choisi.
-    SEL_YEAR = SEL_YEAR_SB
+    # Exercice de rattachement, deduit de la periode. Il gouverne les
+    # analyses annuelles (portefeuille cumule, partenaires, rapport) et
+    # sert de base aux comparaisons avec l'exercice precedent.
+    SEL_YEAR = int(sel_date.year)
+    st.session_state["sel_year_num"] = SEL_YEAR
+    st.session_state["filtre_annee"] = str(SEL_YEAR)
+    st.markdown(
+        f"<div style='font-size:9px;color:rgba(255,255,255,.55);"
+        f"text-align:center;margin:-2px 4px 6px'>"
+        f"Exercice de rattachement : <b>{SEL_YEAR}</b> · "
+        f"comparaisons face à {SEL_YEAR - 1}</div>",
+        unsafe_allow_html=True)
+
 
     st.markdown("<hr>", unsafe_allow_html=True)
 
@@ -2915,11 +2858,15 @@ page = st.session_state.current_page
 
 # Fonctions filtre période
 def pf_f():
-    """Portefeuille filtre. Le filtre ANNEE prime sur la periode."""
+    """Portefeuille filtre sur la periode d'analyse.
+
+    En mode annuel, l'exercice entier est retenu ; dans les autres modes,
+    la fenetre correspond au decoupage choisi (mois, trimestre, semestre).
+    """
     if pf is None: return pd.DataFrame()
-    _yr = st.session_state.get("filtre_annee", "Toutes les années")
-    if _yr != "Toutes les années":
-        return pf[year_mask(pf, ["ANNEESOUS", "ANNEE", "DATESOUS", "DATEEFFE"], _yr)]
+    if MODE == "annee":
+        return pf[year_mask(pf, ["DATEEFFE", "DATESOUS", "ANNEESOUS", "ANNEE"],
+                            sel_date.year)]
     return filter_df(pf, "DATESOUS", sel_date, MODE)
 def as_year(s):
     """Annee entiere depuis n'importe quel format :
@@ -2942,6 +2889,83 @@ def as_year(s):
     ex = s.astype(str).str.extract(r"(19\d{2}|20\d{2})", expand=False)
     return pd.to_numeric(ex, errors="coerce").astype("Int64")
 
+def bornes_periode(d, mode):
+    """Retourne (debut, fin) de la periode contenant la date `d`.
+
+    Le decoupage suit le mode retenu : jour, semaine ISO, mois,
+    trimestre, semestre ou annee civile.
+    """
+    if mode == "jour":
+        return d, d
+    if mode == "semaine":
+        _l = d - timedelta(days=d.weekday())
+        return _l, _l + timedelta(days=6)
+    if mode == "mois":
+        _f = date(d.year, d.month, 1)
+        _n = (date(d.year + 1, 1, 1) if d.month == 12
+              else date(d.year, d.month + 1, 1))
+        return _f, _n - timedelta(days=1)
+    if mode == "trim":
+        _t  = (d.month - 1) // 3
+        _m0 = _t * 3 + 1
+        _f  = date(d.year, _m0, 1)
+        _n  = (date(d.year + 1, 1, 1) if _m0 + 3 > 12
+               else date(d.year, _m0 + 3, 1))
+        return _f, _n - timedelta(days=1)
+    if mode == "sem":
+        if d.month <= 6:
+            return date(d.year, 1, 1), date(d.year, 6, 30)
+        return date(d.year, 7, 1), date(d.year, 12, 31)
+    return date(d.year, 1, 1), date(d.year, 12, 31)
+
+
+def periode_precedente(d, mode):
+    """Retourne (debut, fin) de la MEME periode l'exercice precedent.
+
+    Comparer un trimestre a l'annee entiere precedente n'a pas de sens
+    actuariel : la saisonnalite fausserait toute lecture. Cette fonction
+    garantit l'isoperimetre, T4 face a T4, mars face a mars.
+    """
+    try:
+        _dp = d.replace(year=d.year - 1)
+    except ValueError:            # 29 fevrier d'une annee bissextile
+        _dp = d.replace(year=d.year - 1, day=28)
+    return bornes_periode(_dp, mode)
+
+
+def masque_periode(df, col, d, mode):
+    """Masque des lignes dont `col` tombe dans la periode de `d`."""
+    if df is None or col not in df.columns:
+        return pd.Series(False, index=(df.index if df is not None else []))
+    _s = pd.to_datetime(df[col], errors="coerce")
+    _a, _b = bornes_periode(d, mode)
+    return (_s >= pd.Timestamp(_a)) & (_s <= pd.Timestamp(_b))
+
+
+def masque_periode_precedente(df, col, d, mode):
+    """Masque isoperimetre sur l'exercice precedent."""
+    if df is None or col not in df.columns:
+        return pd.Series(False, index=(df.index if df is not None else []))
+    _s = pd.to_datetime(df[col], errors="coerce")
+    _a, _b = periode_precedente(d, mode)
+    return (_s >= pd.Timestamp(_a)) & (_s <= pd.Timestamp(_b))
+
+
+def libelle_periode(d, mode):
+    """Libelle court de la periode : « T4 2025 », « mars 2025 »…"""
+    if mode == "jour":
+        return d.strftime("%d/%m/%Y")
+    if mode == "semaine":
+        return f"Sem. {d.isocalendar()[1]} {d.year}"
+    if mode == "mois":
+        return f"{MOIS_LONG[d.month-1]} {d.year}"
+    if mode == "trim":
+        return f"T{(d.month-1)//3+1} {d.year}"
+    if mode == "sem":
+        return f"S{'1' if d.month <= 6 else '2'} {d.year}"
+    return str(d.year)
+
+
 def year_mask(df, cols, yr, strict=True):
     """Masque des lignes dont l'annee vaut `yr`.
 
@@ -2960,24 +2984,27 @@ def year_mask(df, cols, yr, strict=True):
     return pd.Series(False, index=df.index)
 
 def ca_f():
-    """CA filtre. Le filtre ANNEE prime sur la periode."""
+    """Chiffre d'affaires filtre sur la periode d'analyse."""
     if ca is None: return pd.DataFrame()
-    _yr = st.session_state.get("filtre_annee", "Toutes les années")
-    if _yr != "Toutes les années":
-        return ca[year_mask(ca, ["ANNEE", "DATECOMP", "DATEEFFE", "DATESOUS"], _yr)]
+    if MODE == "annee":
+        return ca[year_mask(ca, ["DATECOMP", "ANNEE", "DATEEFFE", "DATESOUS"],
+                            sel_date.year)]
     return filter_df(ca, "DATECOMP", sel_date, MODE)
 
 def sin_f():
-    """Sinistres filtres. Le filtre ANNEE prime sur la periode."""
+    """Prestations filtrees sur la periode d'analyse.
+
+    En mode annuel, la date de comptabilisation fait foi : elle rattache
+    la prestation a son exercice comptable.
+    """
     if sin is None: return pd.DataFrame()
-    _yr = st.session_state.get("filtre_annee", "Toutes les années")
-    if _yr != "Toutes les années":
+    if MODE == "annee":
         _dc = next((c for c in sin.columns
                     if "datecomp" in c.lower().replace(" ", "")
                     or "comptab"  in c.lower()), None)
-        _cols = [c for c in ["ANNEE_SIN", "ANNEE", "Exercice Sinistre",
-                             _dc, "Date Survenance"] if c]
-        return sin[year_mask(sin, _cols, _yr)]
+        _cols = [c for c in [_dc, "ANNEE_SIN", "ANNEE",
+                             "Exercice Sinistre", "Date Survenance"] if c]
+        return sin[year_mask(sin, _cols, sel_date.year)]
     return filter_sin_exo(sin, sel_date, MODE)
 
 # ─────────────────────────────────────────────
@@ -3166,8 +3193,8 @@ elif "Analyse CA" in page:
             section(f"📊 Analyse CA — {period_lbl}","CHIFAFFA · COMMISSIONS · PARETO")
 
             # ── Controle de coherence de la lecture de la base par exercice ───────
-            _yr_sel = st.session_state.get("filtre_annee", "Toutes les années")
-            if _yr_sel != "Toutes les années":
+            _yr_sel = str(SEL_YEAR) if SEL_YEAR else "Toutes les années"
+            if MODE == "annee" and SEL_YEAR:
                 _n_tot = len(ca); _n_sel = len(df)
                 _ca_s  = float(df["CHIFAFFA"].fillna(0).sum()) if ("CHIFAFFA" in df.columns and not df.empty) else 0
                 _yr_av = []
@@ -4778,6 +4805,31 @@ elif "Partenaires" in page:
         _prec   = [a for a in _ans_dispo if a < _an_ref]
         _an_pre = int(_prec[-1]) if _prec else None
 
+        # ── Perimetre de comparaison ─────────────────────────────────────────
+        # Hors mode annuel, la comparaison porte sur la MEME fraction de
+        # l'exercice precedent : un quatrieme trimestre se compare a un
+        # quatrieme trimestre, jamais a l'annee entiere. Sans cela, la
+        # saisonnalite fausserait toute lecture.
+        _b_deb, _b_fin = bornes_periode(sel_date, MODE)
+        _p_deb, _p_fin = periode_precedente(sel_date, MODE)
+        _iso_lbl   = libelle_periode(sel_date, MODE)
+        _iso_lbl_p = libelle_periode(
+            sel_date.replace(year=sel_date.year - 1)
+            if sel_date.month != 2 or sel_date.day != 29
+            else sel_date.replace(year=sel_date.year - 1, day=28), MODE)
+
+        if MODE == "annee":
+            _msk_N = _pb["_AN"] == _an_ref
+            _msk_P = (_pb["_AN"] == _an_pre) if _an_pre else False
+        else:
+            _msk_N = ((_pb["_DT"] >= pd.Timestamp(_b_deb))
+                      & (_pb["_DT"] <= pd.Timestamp(_b_fin)))
+            _msk_P = ((_pb["_DT"] >= pd.Timestamp(_p_deb))
+                      & (_pb["_DT"] <= pd.Timestamp(_p_fin)))
+
+        st.caption(f"Comparaison isopérimètre : **{_iso_lbl}** face à "
+                   f"**{_iso_lbl_p}**.")
+
         def _tableau_mensuel(_d, _cle):
             """Croise partenaires en lignes et mois en colonnes."""
             if _d.empty:
@@ -4799,7 +4851,7 @@ elif "Partenaires" in page:
         _grp_present = [g for g in _grp_ordre if g in _pb["_GROUPE"].unique()]
 
         # ── Synthèse d'ouverture ─────────────────────────────────────────────
-        _dN = _pb[_pb["_AN"] == _an_ref]
+        _dN = _pb[_msk_N]
         _syn = (_dN.groupby("_GROUPE")[_cak_p].agg(["sum","count"])
                    .reindex(_grp_present).fillna(0))
         _tot_N = float(_syn["sum"].sum())
@@ -4816,7 +4868,7 @@ elif "Partenaires" in page:
         st.markdown("")
         _t_grp, _t_ban, _t_imf, _t_acc, _t_cmp, _t_brut = st.tabs([
             "Synthèse par groupe", "Banques", "IMF", "Acceptations",
-            f"Comparaison {_an_ref} / {_an_pre or '—'}", "Données"])
+            f"Comparaison {_iso_lbl} / {_iso_lbl_p}", "Données"])
 
         # ══════════════════════════════════════════════════════════════════════
         #  Fabrique commune : evolution mensuelle d'une famille de partenaires
@@ -4898,8 +4950,7 @@ elif "Partenaires" in page:
 
                 # Comparaison N / N-1 pour ce partenaire
                 if _an_pre:
-                    _dP_u = _pb[(_pb["_GROUPE"] == _nom_grp)
-                                & (_pb["_AN"] == _an_pre)]
+                    _dP_u = _pb[(_pb["_GROUPE"] == _nom_grp) & _msk_P]
                     if _sel_p == "Tous (cumul)":
                         _sp_p = (_dP_u.groupby("_MOI")[_cak_p].sum()
                                       .reindex(range(1,13), fill_value=0).tolist())
@@ -4956,7 +5007,8 @@ elif "Partenaires" in page:
 
             # Comparaison a l'exercice precedent
             if _an_pre:
-                _dfp = _pb[(_pb["_GROUPE"] == _nom_grp) & (_pb["_AN"] == _an_pre)]
+                # Isoperimetre : meme fraction de l'exercice precedent
+                _dfp = _pb[(_pb["_GROUPE"] == _nom_grp) & _msk_P]
                 _sN  = _df_g.groupby("_NOM")[_cak_p].sum()
                 _sP  = _dfp.groupby("_NOM")[_cak_p].sum()
                 _cmp = pd.DataFrame({str(_an_pre): _sP, str(_an_ref): _sN}).fillna(0)
@@ -4972,7 +5024,7 @@ elif "Partenaires" in page:
                     _fig_c = go.Figure()
                     _lbl_c = _cmp.index.astype(str).str[:26]
                     _fig_c.add_bar(x=_lbl_c, y=_cmp[str(_an_pre)],
-                                   name=str(_an_pre), marker_color=NAVY, opacity=.55)
+                                   name=_iso_lbl_p, marker_color=NAVY, opacity=.55)
                     _fig_c.add_bar(x=_lbl_c, y=_cmp[str(_an_ref)],
                                    name=str(_an_ref), marker_color=GREEN)
                     _fig_c.update_layout(barmode="group",
@@ -5093,7 +5145,7 @@ elif "Partenaires" in page:
                 bloc_vide("Un seul exercice disponible : "
                           "aucune comparaison possible.", "📊")
             else:
-                _dP = _pb[_pb["_AN"] == _an_pre]
+                _dP = _pb[_msk_P]
                 _gN = _dN.groupby("_GROUPE")[_cak_p].sum().reindex(_grp_present).fillna(0)
                 _gP = _dP.groupby("_GROUPE")[_cak_p].sum().reindex(_grp_present).fillna(0)
                 _cg = pd.DataFrame({str(_an_pre): _gP, str(_an_ref): _gN})
@@ -8814,6 +8866,17 @@ elif "Rapport PDF" in page:
                                     _p4["_AN"]  = _p4["_DT"].dt.year
                                     _p4["_MOI"] = _p4["_DT"].dt.month
                                     _ans4 = sorted(_p4["_AN"].unique().tolist())
+                                    # Bornes isoperimetre : hors mode annuel,
+                                    # la comparaison porte sur la meme
+                                    # fraction de l'exercice precedent.
+                                    _bd4, _bf4 = bornes_periode(sel_date, MODE)
+                                    _pd4, _pf4 = periode_precedente(sel_date, MODE)
+                                    _lbl4   = libelle_periode(sel_date, MODE)
+                                    _lbl4_p = libelle_periode(
+                                        sel_date.replace(year=sel_date.year - 1)
+                                        if not (sel_date.month == 2 and sel_date.day == 29)
+                                        else sel_date.replace(year=sel_date.year - 1, day=28),
+                                        MODE)
                                     if _ans4:
                                         # L'exercice choisi fait autorite. S'il
                                         # n'existe pas dans les ecritures
@@ -8828,7 +8891,11 @@ elif "Rapport PDF" in page:
                                         if _aN4 is not None:
                                             _av4 = [a for a in _ans4 if a < _aN4]
                                             _aP4 = int(_av4[-1]) if _av4 else None
-                                            _dN4 = _p4[_p4["_AN"] == _aN4]
+                                            if MODE == "annee":
+                                                _dN4 = _p4[_p4["_AN"] == _aN4]
+                                            else:
+                                                _dN4 = _p4[(_p4["_DT"] >= pd.Timestamp(_bd4))
+                                                           & (_p4["_DT"] <= pd.Timestamp(_bf4))]
 
                                 # Saut conditionnel : la page n'est tournee
                                 # que s'il reste moins de 8 cm utiles, ce qui
@@ -8901,7 +8968,13 @@ elif "Rapport PDF" in page:
                                         _sN4 = _tF4.loc[_nm4, range(1,13)].tolist()
                                         _sP4 = None
                                         if _aP4:
-                                            _dp4 = _p4[(_p4["_AN"] == _aP4) & (_p4["_NM"] == _nm4)]
+                                            if MODE == "annee":
+                                                _dp4 = _p4[(_p4["_AN"] == _aP4)
+                                                           & (_p4["_NM"] == _nm4)]
+                                            else:
+                                                _dp4 = _p4[(_p4["_DT"] >= pd.Timestamp(_pd4))
+                                                           & (_p4["_DT"] <= pd.Timestamp(_pf4))
+                                                           & (_p4["_NM"] == _nm4)]
                                             if not _dp4.empty:
                                                 _sP4 = (_dp4.groupby("_MOI")["CHIFAFFA"].sum()
                                                             .reindex(range(1,13), fill_value=0).tolist())
@@ -8943,7 +9016,13 @@ elif "Rapport PDF" in page:
                                     _p14 = _tF4["Tot"].iloc[0] / max(_ttF4,1) * 100
                                     _cmt4 = ""
                                     if _aP4:
-                                        _dFP4 = _p4[(_p4["_AN"] == _aP4) & (_p4["_GR"] == _fam4)]
+                                        if MODE == "annee":
+                                            _dFP4 = _p4[(_p4["_AN"] == _aP4)
+                                                        & (_p4["_GR"] == _fam4)]
+                                        else:
+                                            _dFP4 = _p4[(_p4["_DT"] >= pd.Timestamp(_pd4))
+                                                        & (_p4["_DT"] <= pd.Timestamp(_pf4))
+                                                        & (_p4["_GR"] == _fam4)]
                                         _tP4  = float(_dFP4["CHIFAFFA"].sum())
                                         _vF4  = ((_ttF4-_tP4)/_tP4*100) if _tP4 else 0
                                         _sens4 = "progresse" if _vF4 >= 0 else "recule"
