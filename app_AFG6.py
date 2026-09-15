@@ -5082,12 +5082,21 @@ elif "Partenaires" in page:
             st.dataframe(_formater(_tg).rename(columns={"_GROUPE": "Groupe"}),
                          use_container_width=True, hide_index=True)
 
+            # Vert, rouge et bleu marine : trois teintes bien distinctes,
+            # y compris a l'impression en niveaux de gris.
+            _COUL_FAM = {"Banques locales": "#00AD00",
+                         "IMF":             "#FF0000",
+                         "Acceptations":    "#002060"}
+            _cf = lambda _g: _COUL_FAM.get(_g, "#7A7A7A")
+
             _c1, _c2 = st.columns([1.4, 1])
             with _c1:
                 _fg = go.Figure()
                 for _g in _grp_present:
                     _fg.add_scatter(x=_MOIS_AB, y=_tg.loc[_g, _MOIS_AB].tolist(),
                                     mode="lines+markers", name=_g,
+                                    line=dict(color=_cf(_g), width=2.4),
+                                    marker=dict(size=7, color=_cf(_g)),
                                     hovertemplate="%{fullData.name}<br>"
                                                   "%{x} : %{y:,.0f} FCFA<extra></extra>")
                 _fg.update_layout(yaxis=dict(title="CA (FCFA)"),
@@ -5097,7 +5106,8 @@ elif "Partenaires" in page:
             with _c2:
                 _fp = go.Figure(go.Pie(
                     labels=_grp_present, values=_tg["Total"].tolist(), hole=.44,
-                    textinfo="percent", textfont=dict(size=11),
+                    marker=dict(colors=[_cf(_g) for _g in _grp_present]),
+                    textinfo="percent", textfont=dict(size=11, color="white"),
                     hovertemplate="%{label}<br>%{value:,.0f} FCFA<br>"
                                   "%{percent}<extra></extra>"))
                 _fp.update_layout(legend=dict(font=dict(size=10)))
@@ -5107,7 +5117,8 @@ elif "Partenaires" in page:
             # Barres empilees mensuelles
             _fs = go.Figure()
             for _g in _grp_present:
-                _fs.add_bar(x=_MOIS_AB, y=_tg.loc[_g, _MOIS_AB].tolist(), name=_g)
+                _fs.add_bar(x=_MOIS_AB, y=_tg.loc[_g, _MOIS_AB].tolist(),
+                            name=_g, marker_color=_cf(_g))
             _fs.update_layout(barmode="stack", yaxis=dict(title="CA (FCFA)"),
                               legend=dict(orientation="h", y=-0.2))
             fig_style(_fs, 340, f"Composition mensuelle de la production · {_an_ref}")
@@ -5166,15 +5177,15 @@ elif "Partenaires" in page:
                     icon="📈" if _v2 >= 0 else "📉")
 
                 _fc = go.Figure()
-                _fc.add_bar(x=_grp_present, y=_gP.tolist(), name=str(_an_pre),
-                            marker_color=NAVY, opacity=.55,
+                _fc.add_bar(x=_grp_present, y=_gP.tolist(), name=_iso_lbl_p,
+                            marker_color="#002060", opacity=.6,
                             text=[fmt_full(v,"") for v in _gP], textposition="outside")
-                _fc.add_bar(x=_grp_present, y=_gN.tolist(), name=str(_an_ref),
-                            marker_color=GREEN,
+                _fc.add_bar(x=_grp_present, y=_gN.tolist(), name=_iso_lbl,
+                            marker_color="#00AD00",
                             text=[fmt_full(v,"") for v in _gN], textposition="outside")
                 _fc.update_layout(barmode="group", yaxis=dict(title="CA (FCFA)"),
                                   legend=dict(orientation="h", y=-0.18))
-                fig_style(_fc, 380, f"Les trois groupes · {_an_ref} face à {_an_pre}")
+                fig_style(_fc, 380, f"Les trois familles · {_iso_lbl} face à {_iso_lbl_p}")
                 st.plotly_chart(_fc, use_container_width=True, key="fig_cmp_grp")
 
                 _cgd = _cg.copy()
@@ -7961,8 +7972,13 @@ elif "Rapport PDF" in page:
 
                         # Trois couleurs de charte, declinees pour distinguer
                         # jusqu'a huit series sans sortir de la palette.
-                        _MPL = ["#00AD00","#FF0000","#00B050","#7A7A7A",
-                                "#005C00","#B30000","#009A45","#B9BABB"]
+                        # Trois couleurs distinctes en tete de palette :
+                        # vert, rouge et bleu marine. Les graphiques a trois
+                        # series — les trois familles de partenaires — sont
+                        # ainsi lisibles sans ambiguite, y compris a
+                        # l'impression en niveaux de gris.
+                        _MPL = ["#00AD00","#FF0000","#002060","#00B050",
+                                "#7A7A7A","#005C00","#B30000","#3A5A8C"]
 
                         def _espace(v, _p=None):
                             """Sépare les milliers par une espace insécable fine."""
