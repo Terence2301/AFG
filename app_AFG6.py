@@ -1075,6 +1075,30 @@ CREATE TABLE IF NOT EXISTS bia_audit (
 _DDL_AUDIT_PG = _DDL_AUDIT.replace(
     "INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
 
+# ── Comptes commerciaux ───────────────────────────────────────────────────────
+# Un compte par personne physique, identifie par son code apporteur
+# principal. Les codes secondaires, rattaches dans une colonne dediee,
+# permettent a un commercial disposant de plusieurs portefeuilles de voir
+# l'ensemble de ses contrats sous un identifiant unique.
+_DDL_COMMERCIAUX = """
+CREATE TABLE IF NOT EXISTS commerciaux (
+    code_principal  TEXT PRIMARY KEY,
+    nom             TEXT NOT NULL,
+    mdp_hash        TEXT NOT NULL,
+    codes_lies      TEXT,
+    agence          TEXT,
+    telephone       TEXT,
+    email           TEXT,
+    actif           INTEGER DEFAULT 1,
+    mdp_a_changer   INTEGER DEFAULT 1,
+    tentatives      INTEGER DEFAULT 0,
+    bloque_jusqua   TEXT,
+    derniere_connex TEXT,
+    cree_le         TEXT,
+    cree_par        TEXT
+)
+"""
+
 _DDL_COURTIERS = """
 CREATE TABLE IF NOT EXISTS courtiers (
     identifiant   TEXT PRIMARY KEY,
@@ -1100,6 +1124,7 @@ def init_db():
         cur.execute(_DDL_BASES_META if pg else _DDL_BASES_META_SQ)
         cur.execute(_DDL_DATA       if pg else _DDL_DATA_SQ)
         cur.execute(_DDL_COURTIERS)
+        cur.execute(_DDL_COMMERCIAUX)
         cur.execute(_DDL_AUDIT_PG if pg else _DDL_AUDIT)
         conn.commit(); cur.close(); conn.close()
     except Exception as e:
@@ -1347,15 +1372,343 @@ def historique_bia(bia_id=None) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def _hash_mdp(mdp: str) -> str:
-    """Empreinte SHA-256 d'un mot de passe."""
-    return hashlib.sha256(str(mdp).encode("utf-8")).hexdigest()
+# ══════════════════════════════════════════════════════════════════════════════
+#  SECURITE DES MOTS DE PASSE
+#  Un SHA-256 nu se casse par table arc-en-ciel : sur 10 000 comptes, un
+#  fichier derobe livrerait les mots de passe faibles en quelques minutes.
+#  On emploie PBKDF2-HMAC-SHA256 avec un sel aleatoire propre a chaque
+#  compte et 120 000 iterations, ce qui rend l'attaque par force brute
+#  economiquement inexploitable.
+#  Format stocke : pbkdf2$<iterations>$<sel_hex>$<empreinte_hex>
+# ══════════════════════════════════════════════════════════════════════════════
+_PBKDF2_ITER = 120_000
+
+def _hash_mdp(mdp: str, sel: bytes = None) -> str:
+    """Empreinte robuste d'un mot de passe, sel aleatoire inclus."""
+    import os as _os
+    _s = sel if sel is not None else _os.urandom(16)
+    _d = hashlib.pbkdf2_hmac("sha256", str(mdp).encode("utf-8"),
+                             _s, _PBKDF2_ITER)
+    return f"pbkdf2${_PBKDF2_ITER}${_s.hex()}${_d.hex()}"
+
+
+def _verifier_mdp(mdp: str, empreinte: str) -> bool:
+    """Compare un mot de passe a son empreinte stockee.
+
+    Accepte l'ancien format SHA-256 nu pour ne pas invalider les comptes
+    crees avant ce renforcement : ils seront convertis silencieusement
+    a la prochaine connexion reussie.
+    """
+    import hmac as _hmac
+    _e = str(empreinte or "")
+    if _e.startswith("pbkdf2$"):
+        try:
+            _, _it, _sel, _dig = _e.split("$", 3)
+            _calc = hashlib.pbkdf2_hmac("sha256", str(mdp).encode("utf-8"),
+                                        bytes.fromhex(_sel), int(_it))
+            return _hmac.compare_digest(_calc.hex(), _dig)
+        except Exception:
+            return False
+    # Ancien format : comparaison a temps constant malgre tout
+    return _hmac.compare_digest(
+        hashlib.sha256(str(mdp).encode("utf-8")).hexdigest(), _e)
+
+
+def _besoin_rehash(empreinte: str) -> bool:
+    """Vrai si l'empreinte suit l'ancien format et merite d'etre refaite."""
+    return not str(empreinte or "").startswith("pbkdf2$")
+
+
+def mdp_robuste(mdp: str) -> tuple:
+    """Controle la solidite d'un mot de passe choisi par l'utilisateur.
+
+    Retourne (conforme, message). La regle retenue est celle d'usage en
+    assurance : au moins huit caracteres, une majuscule, une minuscule,
+    un chiffre. Les mots de passe evidents sont refuses.
+    """
+    _m = str(mdp or "")
+    if len(_m) < 8:
+        return False, "Le mot de passe doit compter au moins huit caractères."
+    if not any(c.isupper() for c in _m):
+        return False, "Il doit contenir au moins une majuscule."
+    if not any(c.islower() for c in _m):
+        return False, "Il doit contenir au moins une minuscule."
+    if not any(c.isdigit() for c in _m):
+        return False, "Il doit contenir au moins un chiffre."
+    _faibles = {"password", "motdepasse", "12345678", "azerty123",
+                "afg2025", "afg2026", "commercial", "assurance"}
+    if _m.lower() in _faibles or _m.lower().replace(" ", "") in _faibles:
+        return False, "Ce mot de passe est trop courant. Choisissez-en un autre."
+    return True, "Mot de passe conforme."
 
 
 def prefixe_depuis_nom(raison_sociale: str) -> str:
     """Trois premières lettres de la raison sociale, en majuscules."""
     _c = "".join(ch for ch in str(raison_sociale).upper() if ch.isalpha())
     return (_c[:3] if len(_c) >= 3 else _c.ljust(3, "X")) or "XXX"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  GESTION DES COMPTES COMMERCIAUX
+# ══════════════════════════════════════════════════════════════════════════════
+_DUREE_BLOCAGE_MIN = 15      # minutes de blocage apres echecs repetes
+_MAX_TENTATIVES    = 5
+
+
+def mdp_initial(nom: str, code: str) -> str:
+    """Mot de passe provisoire, communicable et unique par commercial.
+
+    Forme : trois premieres lettres du nom en capitale initiale, code
+    apporteur, diese. Exemple : « Sin2538# ». Il doit etre change a la
+    premiere connexion.
+    """
+    _l = "".join(ch for ch in str(nom) if ch.isalpha())[:3]
+    _l = (_l.capitalize() if _l else "Afg")
+    return f"{_l}{str(code).strip()}#"
+
+
+def _codes_lies_liste(val) -> list:
+    """Convertit la colonne codes_lies en liste exploitable."""
+    if not val:
+        return []
+    return [c.strip() for c in str(val).split(",") if c.strip()]
+
+
+def lire_commercial(code: str):
+    """Retourne le compte correspondant au code, principal ou secondaire."""
+    _c = code_propre(pd.Series([code])).iloc[0]
+    if not _c:
+        return None
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        _p = "%s" if _is_pg(conn) else "?"
+        _cols = ["code_principal","nom","mdp_hash","codes_lies","agence",
+                 "telephone","email","actif","mdp_a_changer","tentatives",
+                 "bloque_jusqua","derniere_connex"]
+        cur.execute(f"SELECT {', '.join(_cols)} FROM commerciaux "
+                    f"WHERE code_principal = {_p}", (_c,))
+        _r = cur.fetchone()
+        if not _r:
+            # Recherche parmi les codes secondaires
+            cur.execute(f"SELECT {', '.join(_cols)} FROM commerciaux")
+            for _row in cur.fetchall():
+                if _c in _codes_lies_liste(_row[3]):
+                    _r = _row; break
+        cur.close(); conn.close()
+        return dict(zip(_cols, _r)) if _r else None
+    except Exception:
+        return None
+
+
+def authentifier_commercial(code: str, mdp: str):
+    """Authentifie un commercial et applique la politique de blocage.
+
+    Retourne (compte, message). Le compte vaut None en cas d'echec ;
+    le message precise la cause sans reveler si le code existe, afin de
+    ne pas permettre l'enumeration des identifiants.
+    """
+    _c = lire_commercial(code)
+    _refus = (None, "Identifiant ou mot de passe incorrect.")
+    if not _c:
+        return _refus
+    if not _c.get("actif"):
+        return None, "Ce compte est désactivé. Contactez la Direction."
+
+    # Blocage temporaire apres echecs repetes
+    _bj = _c.get("bloque_jusqua")
+    if _bj:
+        try:
+            if datetime.now() < datetime.strptime(str(_bj)[:16], "%Y-%m-%d %H:%M"):
+                return None, (f"Compte temporairement bloqué après plusieurs "
+                              f"tentatives. Réessayez après {str(_bj)[11:16]}.")
+        except Exception:
+            pass
+
+    if not _verifier_mdp(mdp, _c["mdp_hash"]):
+        _n = int(_c.get("tentatives") or 0) + 1
+        _blo = None
+        if _n >= _MAX_TENTATIVES:
+            _blo = (datetime.now()
+                    + timedelta(minutes=_DUREE_BLOCAGE_MIN)).strftime("%Y-%m-%d %H:%M")
+        try:
+            conn = get_conn(); cur = conn.cursor()
+            _p = "%s" if _is_pg(conn) else "?"
+            cur.execute(f"UPDATE commerciaux SET tentatives={_p}, "
+                        f"bloque_jusqua={_p} WHERE code_principal={_p}",
+                        (0 if _blo else _n, _blo, _c["code_principal"]))
+            conn.commit(); cur.close(); conn.close()
+        except Exception:
+            pass
+        if _blo:
+            return None, (f"Cinq tentatives infructueuses : compte bloqué "
+                          f"{_DUREE_BLOCAGE_MIN} minutes.")
+        return None, (f"Identifiant ou mot de passe incorrect "
+                      f"({_MAX_TENTATIVES - _n} essai(s) restant(s)).")
+
+    # Succes : compteurs remis a zero, empreinte modernisee si besoin
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        _p = "%s" if _is_pg(conn) else "?"
+        _nouv = (_hash_mdp(mdp) if _besoin_rehash(_c["mdp_hash"])
+                 else _c["mdp_hash"])
+        cur.execute(f"UPDATE commerciaux SET tentatives=0, bloque_jusqua=NULL, "
+                    f"derniere_connex={_p}, mdp_hash={_p} "
+                    f"WHERE code_principal={_p}",
+                    (datetime.now().strftime("%Y-%m-%d %H:%M"),
+                     _nouv, _c["code_principal"]))
+        conn.commit(); cur.close(); conn.close()
+    except Exception:
+        pass
+    return _c, "Connexion réussie."
+
+
+def changer_mdp_commercial(code: str, nouveau: str) -> tuple:
+    """Enregistre un nouveau mot de passe et leve l'obligation de changement."""
+    _ok, _msg = mdp_robuste(nouveau)
+    if not _ok:
+        return False, _msg
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        _p = "%s" if _is_pg(conn) else "?"
+        cur.execute(f"UPDATE commerciaux SET mdp_hash={_p}, mdp_a_changer=0, "
+                    f"tentatives=0, bloque_jusqua=NULL WHERE code_principal={_p}",
+                    (_hash_mdp(nouveau), str(code).strip()))
+        conn.commit(); cur.close(); conn.close()
+        return True, "Mot de passe modifié."
+    except Exception as e:
+        return False, f"Modification impossible : {e}"
+
+
+def analyser_commerciaux(pf_df, ca_df) -> dict:
+    """Prepare la creation des comptes depuis le referentiel Portefeuille.
+
+    Trois categories en ressortent :
+      · a_creer    : un nom, un ou plusieurs codes, rattachement sur le
+                     code le plus productif ;
+      · sans_nom   : codes presents dans le CA mais sans titulaire connu,
+                     aucun compte n'est cree ;
+      · a_verifier : memes nom et prenom sur des agences differentes,
+                     rapprochement suspendu jusqu'a controle humain.
+    """
+    _vide = {"a_creer": pd.DataFrame(), "sans_nom": pd.DataFrame(),
+             "a_verifier": pd.DataFrame()}
+    if pf_df is None or ca_df is None:
+        return _vide
+
+    _cp = next((c for c in ["CODEAPPO","CODE_APPO","CODEAPP"]
+                if c in pf_df.columns), None)
+    _np = next((c for c in ["NOM_APP","NOM_APPORT","NOM_APPO"]
+                if c in pf_df.columns), None)
+    _ci = next((c for c in ["CODEINTE_P","CODEINTE"] if c in pf_df.columns), None)
+    _cc = next((c for c in ["CODEAPPO","CODE_APPO"] if c in ca_df.columns), None)
+    if not (_cp and _np and _cc):
+        return _vide
+
+    # Référentiel code → nom, agence
+    _ref = pf_df[[_cp, _np] + ([_ci] if _ci else [])].copy()
+    _ref["_CD"] = code_propre(_ref[_cp])
+    _ref["_NM"] = _ref[_np].fillna("").astype(str).str.strip().str.upper()
+    _ref["_AG"] = (code_propre(_ref[_ci]) if _ci else "")
+    _ref = _ref[(_ref["_CD"] != "") & (_ref["_NM"] != "")]
+    _ref = _ref[~_ref["_NM"].apply(est_reseau_interne)]
+    _ref = _ref.drop_duplicates("_CD")
+
+    # Production par code, sur toute la base CA
+    _cak = "CHIFAFFA" if "CHIFAFFA" in ca_df.columns else None
+    _prod = ca_df[[_cc] + ([_cak] if _cak else [])].copy()
+    _prod["_CD"] = code_propre(_prod[_cc])
+    _prod = _prod[_prod["_CD"] != ""]
+    _agg = (_prod.groupby("_CD")
+                 .agg(CA=(_cak, "sum") if _cak else (_cc, "count"),
+                      Quittances=(_cc, "count"))
+                 .reset_index())
+
+    _j = _agg.merge(_ref[["_CD","_NM","_AG"]], on="_CD", how="left")
+
+    # 1. Codes sans titulaire : aucun compte
+    _sans = _j[_j["_NM"].isna() | (_j["_NM"].fillna("") == "")].copy()
+    _sans = _sans.sort_values("CA", ascending=False)
+    _sans = _sans.rename(columns={"_CD": "Code apporteur"})[
+        ["Code apporteur", "CA", "Quittances"]]
+
+    # 2. Codes nommés : rattachement par personne
+    _ok = _j[_j["_NM"].fillna("") != ""].copy()
+    if _ok.empty:
+        return {"a_creer": pd.DataFrame(), "sans_nom": _sans,
+                "a_verifier": pd.DataFrame()}
+
+    _grp = (_ok.sort_values("CA", ascending=False)
+               .groupby("_NM")
+               .agg(code_principal=("_CD", "first"),
+                    codes=("_CD", lambda s: list(s)),
+                    agences=("_AG", lambda s: sorted(set(x for x in s if x))),
+                    CA=("CA", "sum"),
+                    Quittances=("Quittances", "sum"))
+               .reset_index())
+
+    # 3. Homonymes sur agences distinctes : controle humain
+    _amb = _grp[_grp["agences"].apply(len) > 1].copy()
+    _net = _grp[_grp["agences"].apply(len) <= 1].copy()
+
+    def _mise_en_forme(_d):
+        if _d.empty:
+            return pd.DataFrame(columns=["Nom","Code principal","Codes liés",
+                                         "Agence","CA","Quittances"])
+        _o = pd.DataFrame({
+            "Nom":            _d["_NM"],
+            "Code principal": _d["code_principal"],
+            "Codes liés":     _d["codes"].apply(
+                                  lambda l: ", ".join(c for c in l[1:])),
+            "Agence":         _d["agences"].apply(lambda a: ", ".join(a)),
+            "CA":             _d["CA"],
+            "Quittances":     _d["Quittances"]})
+        return _o.sort_values("CA", ascending=False).reset_index(drop=True)
+
+    return {"a_creer": _mise_en_forme(_net),
+            "sans_nom": _sans.reset_index(drop=True),
+            "a_verifier": _mise_en_forme(_amb)}
+
+
+def creer_comptes_commerciaux(df_creer, cree_par: str = "") -> tuple:
+    """Cree les comptes en masse et retourne (nombre, table des identifiants).
+
+    Un compte deja present n'est pas ecrase : son mot de passe reste
+    celui que le commercial a choisi.
+    """
+    if df_creer is None or df_creer.empty:
+        return 0, pd.DataFrame()
+    _lignes, _n = [], 0
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        _p = "%s" if _is_pg(conn) else "?"
+        _now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        for _, _r in df_creer.iterrows():
+            _cd  = str(_r["Code principal"]).strip()
+            _nom = str(_r["Nom"]).strip()
+            if not _cd or not _nom:
+                continue
+            cur.execute(f"SELECT 1 FROM commerciaux WHERE code_principal={_p}",
+                        (_cd,))
+            if cur.fetchone():
+                continue                       # compte deja cree
+            _mp = mdp_initial(_nom, _cd)
+            cur.execute(
+                f"INSERT INTO commerciaux (code_principal, nom, mdp_hash, "
+                f"codes_lies, agence, telephone, email, actif, mdp_a_changer, "
+                f"tentatives, cree_le, cree_par) "
+                f"VALUES ({_p},{_p},{_p},{_p},{_p},{_p},{_p},1,1,0,{_p},{_p})",
+                (_cd, _nom, _hash_mdp(_mp),
+                 str(_r.get("Codes liés","") or ""),
+                 str(_r.get("Agence","") or ""), "", "", _now, cree_par))
+            _lignes.append({"Nom": _nom, "Identifiant": _cd,
+                            "Mot de passe provisoire": _mp,
+                            "Codes liés": _r.get("Codes liés",""),
+                            "Agence": _r.get("Agence","")})
+            _n += 1
+        conn.commit(); cur.close(); conn.close()
+    except Exception as e:
+        return _n, pd.DataFrame(_lignes)
+    return _n, pd.DataFrame(_lignes)
 
 
 def lister_courtiers(actifs_seuls: bool = False) -> list:
@@ -1704,7 +2057,22 @@ def get_bases_meta() -> dict:
 
 # ── Rôles admin (seuls ces rôles peuvent charger/supprimer les bases) ─────────
 # Rôles autorisés à charger/gérer les bases de données
-ADMIN_ROLES     = {"PDG", "ADMIN"}      # gestion des comptes courtiers
+ADMIN_ROLES     = {"PDG", "ADMIN"}      # gestion des comptes
+# Profils habilites a voir l'ensemble des contrats. Tout autre profil
+# ne consulte que ses propres saisies : c'est le cloisonnement retenu.
+VUE_GLOBALE     = {"PDG", "DG", "ADMIN", "ACTUAIRE"}
+
+
+def voit_tout(user_dict: dict) -> bool:
+    """Vrai si l'utilisateur accede a l'ensemble des contrats."""
+    return str(user_dict.get("role", "")).upper() in VUE_GLOBALE
+
+
+def codes_utilisateur(user_dict: dict) -> list:
+    """Codes apporteur rattaches a l'utilisateur, principal et secondaires."""
+    _c = [str(user_dict.get("code", "")).strip()]
+    _c += [str(x).strip() for x in (user_dict.get("codes_lies") or [])]
+    return [x for x in _c if x]
 UPLOAD_ROLES    = {"PDG", "ACTUAIRE"}   # peuvent charger PF, CA, Prestations
 # Rôles autorisés à voir les onglets analytiques
 ANALYTICS_ROLES = {"PDG", "ACTUAIRE"}   # voient le dashboard complet
@@ -2082,7 +2450,24 @@ if not st.session_state.auth:
             code  = st.text_input("🔑 Mot de passe", type="password")
             if st.button("🔐 Accéder au système", use_container_width=True, type="primary"):
                 up = ident.strip().upper()
-                # 1. Comptes courtiers enregistrés en base
+                # 1. Comptes commerciaux : un compte par personne,
+                #    identifie par son code apporteur.
+                _cmc, _msg_cmc = authentifier_commercial(up, code)
+                if _cmc:
+                    st.session_state.auth = True
+                    st.session_state.user = {
+                        "nom":            _cmc["nom"],
+                        "role":           "COMMERCIAL",
+                        "code":           _cmc["code_principal"],
+                        "codes_lies":     _codes_lies_liste(_cmc.get("codes_lies")),
+                        "agence":         _cmc.get("agence", ""),
+                        "mdp_a_changer":  bool(_cmc.get("mdp_a_changer")),
+                    }
+                    st.rerun()
+                if _msg_cmc and "incorrect" not in _msg_cmc.lower():
+                    st.error(_msg_cmc)
+
+                # 2. Comptes courtiers enregistrés en base
                 _crt = authentifier_courtier(up, code)
                 if _crt:
                     st.session_state.auth = True
@@ -2108,6 +2493,58 @@ if not st.session_state.auth:
 
 user  = st.session_state.user
 today = date.today()
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  CHANGEMENT OBLIGATOIRE DU MOT DE PASSE
+#  Un mot de passe provisoire, calcule a partir du nom et du code, est
+#  devinable par un tiers. Tant qu'il n'a pas ete remplace, l'acces aux
+#  donnees est suspendu : c'est la seule garantie que le compte appartient
+#  bien a son titulaire.
+# ══════════════════════════════════════════════════════════════════════════════
+if user.get("mdp_a_changer"):
+    _, _cmdp, _ = st.columns([1, 1.4, 1])
+    with _cmdp:
+        st.markdown(
+            f"<div style='text-align:center;padding:1.6rem 0 1rem'>"
+            f"<div style='font-size:20px;font-weight:800;color:{NAVY}'>"
+            f"Première connexion</div>"
+            f"<div style='font-size:13px;color:#667;margin-top:6px'>"
+            f"Bienvenue <b>{user.get('nom','')}</b>. Choisissez votre mot de "
+            f"passe personnel avant d'accéder à vos contrats.</div></div>",
+            unsafe_allow_html=True)
+
+        st.info("Votre mot de passe doit compter au moins huit caractères, "
+                "dont une majuscule, une minuscule et un chiffre. "
+                "Ne le communiquez à personne : toutes vos saisies seront "
+                "enregistrées sous votre nom.")
+
+        _m1 = st.text_input("Nouveau mot de passe", type="password", key="nmdp1")
+        _m2 = st.text_input("Confirmation", type="password", key="nmdp2")
+
+        if _m1:
+            _ok_f, _msg_f = mdp_robuste(_m1)
+            st.markdown(
+                f"<div style='font-size:12px;color:{GREEN if _ok_f else RED}'>"
+                f"{_msg_f}</div>", unsafe_allow_html=True)
+
+        if st.button("Valider mon mot de passe", type="primary",
+                     use_container_width=True, key="btn_nmdp"):
+            if _m1 != _m2:
+                st.error("Les deux saisies ne correspondent pas.")
+            else:
+                _ok_c, _msg_c = changer_mdp_commercial(user.get("code", ""), _m1)
+                if _ok_c:
+                    st.session_state.user["mdp_a_changer"] = False
+                    st.success("Mot de passe enregistré. Accès ouvert.")
+                    st.rerun()
+                else:
+                    st.error(_msg_c)
+
+        if st.button("Se déconnecter", use_container_width=True, key="btn_deco_mdp"):
+            st.session_state.auth = False
+            st.session_state.user = {}
+            st.rerun()
+    st.stop()
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  CHARGEMENT AUTOMATIQUE DES BASES DEPUIS LA BASE CENTRALISÉE
@@ -2197,11 +2634,13 @@ ALL_PAGES = [
     "🔮  Prévisions & Tendances",
     # Outils de gestion
     "🤝  Comptes courtiers",
+    "👤  Comptes commerciaux",
     "📝  Saisie BIA",
     "🗂️  Base BIA",
     "📄  Rapport PDF",
 ]
 # Seule page visible sans aucune base chargée
+# Pages ouvertes aux profils non analytiques : courtiers et commerciaux.
 VISIBLE_DEFAULT = ["📝  Saisie BIA", "🗂️  Base BIA"]
 
 # ── Calcul des pages disponibles selon les bases chargées ─────────────────────
@@ -2231,9 +2670,13 @@ _is_courtier  = is_courtier(user)         # Courtiers  Saisie BIA uniquement
 pages_visible = ALL_PAGES if (_any_data and _can_analysis and not _is_courtier) else VISIBLE_DEFAULT
 # La gestion des comptes courtiers reste reservee au PDG et a l'administrateur
 if user.get("role","").upper() not in ADMIN_ROLES:
-    pages_visible = [p for p in pages_visible if "Comptes courtiers" not in p]
-elif "🤝  Comptes courtiers" not in pages_visible:
-    pages_visible = pages_visible + ["🤝  Comptes courtiers"]
+    pages_visible = [p for p in pages_visible
+                     if "Comptes courtiers" not in p
+                     and "Comptes commerciaux" not in p]
+else:
+    for _pa in ["🤝  Comptes courtiers", "👤  Comptes commerciaux"]:
+        if _pa not in pages_visible:
+            pages_visible = pages_visible + [_pa]
 
 # Sécurité : si la page courante a disparu (ex. données effacées), revenir à BIA
 if st.session_state.current_page not in pages_visible:
@@ -5981,6 +6424,269 @@ elif "Prévisions" in page:
     except Exception as _e_page:
         _erreur_onglet(_e_page, "Prévisions")
 
+elif "Comptes commerciaux" in page:
+    try:
+        section("Comptes commerciaux",
+                "GÉNÉRATION DEPUIS LE PORTEFEUILLE · SÉCURITÉ · TRAÇABILITÉ")
+
+        if not is_admin(user):
+            alert("Cette page est réservée à la Direction générale "
+                  "et à l'administrateur.", "warn")
+            st.stop()
+
+        _existants = pd.DataFrame()
+        try:
+            _cx = get_conn()
+            _existants = pd.read_sql(
+                "SELECT code_principal, nom, codes_lies, agence, actif, "
+                "mdp_a_changer, derniere_connex, cree_le "
+                "FROM commerciaux ORDER BY nom", _cx)
+            _cx.close()
+        except Exception:
+            pass
+
+        _k1, _k2, _k3, _k4 = st.columns(4)
+        kpi(_k1, "Comptes créés", nb_full(len(_existants)),
+            "Commerciaux enregistrés", "blue", icon="👤")
+        _act = int(_existants["actif"].sum()) if not _existants.empty else 0
+        kpi(_k2, "Comptes actifs", nb_full(_act),
+            "Peuvent se connecter", "teal", icon="✅")
+        _chg = (int(_existants["mdp_a_changer"].sum())
+                if not _existants.empty else 0)
+        kpi(_k3, "Mot de passe provisoire", nb_full(_chg),
+            "Pas encore personnalisé",
+            "amber" if _chg else "", icon="🔑")
+        _con = (int(_existants["derniere_connex"].notna().sum())
+                if not _existants.empty else 0)
+        kpi(_k4, "Déjà connectés", nb_full(_con),
+            f"{_con/max(len(_existants),1)*100:.0f} % des comptes",
+            "", icon="📶")
+
+        _t_gen, _t_liste, _t_un = st.tabs(
+            ["Génération en masse", "Comptes existants", "Compte individuel"])
+
+        # ── Génération ───────────────────────────────────────────────────────
+        with _t_gen:
+            if pf is None or ca is None:
+                bloc_vide("Chargez le Portefeuille et la base CA pour "
+                          "générer les comptes.", "👤")
+            else:
+                st.caption("Les comptes sont construits à partir du "
+                           "référentiel Portefeuille : un compte par personne, "
+                           "identifié par son code apporteur le plus productif. "
+                           "Les codes secondaires lui sont rattachés.")
+
+                if st.button("Analyser le référentiel", type="primary",
+                             use_container_width=True, key="btn_analyse_cmc"):
+                    with st.spinner("Analyse en cours…"):
+                        st.session_state["_analyse_cmc"] = analyser_commerciaux(pf, ca)
+
+                _an = st.session_state.get("_analyse_cmc")
+                if _an:
+                    _ac = _an["a_creer"]; _sn = _an["sans_nom"]; _av = _an["a_verifier"]
+
+                    _r1, _r2, _r3 = st.columns(3)
+                    kpi(_r1, "Comptes à créer", nb_full(len(_ac)),
+                        "Rattachement certain", "teal", icon="✅")
+                    kpi(_r2, "À vérifier", nb_full(len(_av)),
+                        "Homonymes, agences distinctes",
+                        "amber" if len(_av) else "", icon="⚠")
+                    kpi(_r3, "Codes sans titulaire", nb_full(len(_sn)),
+                        "Aucun compte créé",
+                        "red" if len(_sn) else "", icon="✖")
+
+                    if not _ac.empty:
+                        st.markdown("**Comptes prêts à être créés**")
+                        _acd = _ac.copy()
+                        _acd["CA"] = _acd["CA"].apply(lambda v: fmt_full(v, ""))
+                        _acd["Quittances"] = _acd["Quittances"].apply(nb_full)
+                        st.dataframe(_acd.head(200), use_container_width=True,
+                                     hide_index=True, height=300)
+                        if len(_ac) > 200:
+                            st.caption(f"Aperçu des 200 premiers sur "
+                                       f"{nb_full(len(_ac))}.")
+
+                        if st.button(f"Créer {nb_full(len(_ac))} compte(s)",
+                                     type="primary", use_container_width=True,
+                                     key="btn_creer_cmc"):
+                            with st.spinner("Création des comptes…"):
+                                _n, _ident = creer_comptes_commerciaux(
+                                    _ac, user.get("nom", ""))
+                            if _n:
+                                st.session_state["_ident_cmc"] = _ident
+                                st.success(f"{nb_full(_n)} compte(s) créé(s).")
+                            else:
+                                st.info("Aucun compte nouveau : ils existent déjà.")
+
+                    _idf = st.session_state.get("_ident_cmc")
+                    if _idf is not None and not _idf.empty:
+                        st.markdown("---")
+                        st.markdown("**Fichier des identifiants**")
+                        st.warning("Ce fichier contient des mots de passe "
+                                   "provisoires. Diffusez-le par un canal "
+                                   "maîtrisé et demandez à chacun de changer "
+                                   "son mot de passe dès la première connexion.")
+                        st.dataframe(_idf.head(50), use_container_width=True,
+                                     hide_index=True)
+                        _d1, _d2 = st.columns(2)
+                        _d1.download_button(
+                            "Télécharger les identifiants (CSV)",
+                            dl_csv(_idf), "identifiants_commerciaux.csv",
+                            "text/csv", use_container_width=True,
+                            type="primary", key="dl_ident_cmc")
+                        _d2.download_button(
+                            "Télécharger (Excel)", dl_xlsx(_idf),
+                            "identifiants_commerciaux.xlsx",
+                            "application/vnd.openxmlformats-officedocument."
+                            "spreadsheetml.sheet",
+                            use_container_width=True, key="dl_ident_cmc_xl")
+
+                    if not _av.empty:
+                        with st.expander(f"Homonymes à vérifier ({nb_full(len(_av))})"):
+                            st.caption("Ces personnes portent le même nom mais "
+                                       "dépendent d'agences différentes. Le "
+                                       "rapprochement automatique est suspendu : "
+                                       "vérifiez s'il s'agit d'une même personne "
+                                       "mutée ou de deux commerciaux distincts.")
+                            _avd = _av.copy()
+                            _avd["CA"] = _avd["CA"].apply(lambda v: fmt_full(v, ""))
+                            st.dataframe(_avd, use_container_width=True,
+                                         hide_index=True)
+                            st.download_button("Export des homonymes",
+                                dl_csv(_av), "commerciaux_a_verifier.csv",
+                                "text/csv", use_container_width=True,
+                                key="dl_av_cmc")
+
+                    if not _sn.empty:
+                        with st.expander(f"Codes sans titulaire ({nb_full(len(_sn))})"):
+                            st.caption("Ces codes produisent du chiffre "
+                                       "d'affaires mais n'ont pas de nom dans "
+                                       "le Portefeuille. Aucun compte n'est "
+                                       "créé : un identifiant sans titulaire "
+                                       "identifiable serait un accès anonyme. "
+                                       "Renseignez le nom dans Megasoft, puis "
+                                       "relancez l'analyse.")
+                            _snd = _sn.copy()
+                            _snd["CA"] = _snd["CA"].apply(lambda v: fmt_full(v, ""))
+                            _snd["Quittances"] = _snd["Quittances"].apply(nb_full)
+                            st.dataframe(_snd, use_container_width=True,
+                                         hide_index=True)
+                            st.download_button("Export des codes orphelins",
+                                dl_csv(_sn), "codes_sans_titulaire.csv",
+                                "text/csv", use_container_width=True,
+                                key="dl_sn_cmc")
+
+        # ── Comptes existants ────────────────────────────────────────────────
+        with _t_liste:
+            if _existants.empty:
+                bloc_vide("Aucun compte commercial enregistré.", "👤")
+            else:
+                _rech = st.text_input("Rechercher", placeholder="Nom ou code…",
+                                      key="rech_cmc")
+                _vue = _existants.copy()
+                if _rech:
+                    _q = _rech.lower()
+                    _vue = _vue[_vue["nom"].str.lower().str.contains(_q, na=False)
+                                | _vue["code_principal"].astype(str)
+                                      .str.contains(_q, na=False)]
+                _vd = pd.DataFrame({
+                    "Code":         _vue["code_principal"],
+                    "Nom":          _vue["nom"],
+                    "Codes liés":   _vue["codes_lies"].fillna("—"),
+                    "Agence":       _vue["agence"].fillna("—"),
+                    "Actif":        _vue["actif"].map({1: "Oui", 0: "Non"}),
+                    "Mot de passe": _vue["mdp_a_changer"].map(
+                                        {1: "Provisoire", 0: "Personnalisé"}),
+                    "Dernière connexion": _vue["derniere_connex"].fillna("Jamais")})
+                st.markdown(f"**{nb_full(len(_vd))} compte(s)**")
+                st.dataframe(_vd, use_container_width=True, hide_index=True,
+                             height=420)
+                st.download_button("Export de la liste", dl_csv(_vd),
+                    "comptes_commerciaux.csv", "text/csv",
+                    use_container_width=True, key="dl_liste_cmc")
+
+        # ── Compte individuel ────────────────────────────────────────────────
+        with _t_un:
+            if _existants.empty:
+                bloc_vide("Aucun compte à gérer.", "👤")
+            else:
+                _opts_c = {f"{r['nom']} ({r['code_principal']})": r["code_principal"]
+                           for _, r in _existants.iterrows()}
+                _sel_c = st.selectbox("Commercial", list(_opts_c.keys()),
+                                      key="sel_cmc")
+                _cod_c = _opts_c[_sel_c]
+                _fic = lire_commercial(_cod_c)
+
+                if _fic:
+                    _i1, _i2 = st.columns(2)
+                    _i1.markdown(
+                        f"<div style='font-size:12px;color:#556'>"
+                        f"Code principal : <b>{_fic['code_principal']}</b><br>"
+                        f"Codes liés : <b>{_fic.get('codes_lies') or '—'}</b><br>"
+                        f"Agence : <b>{_fic.get('agence') or '—'}</b></div>",
+                        unsafe_allow_html=True)
+                    _i2.markdown(
+                        f"<div style='font-size:12px;color:#556'>"
+                        f"Statut : <b>{'Actif' if _fic.get('actif') else 'Désactivé'}</b><br>"
+                        f"Mot de passe : <b>"
+                        f"{'provisoire' if _fic.get('mdp_a_changer') else 'personnalisé'}</b><br>"
+                        f"Dernière connexion : <b>"
+                        f"{_fic.get('derniere_connex') or 'jamais'}</b></div>",
+                        unsafe_allow_html=True)
+
+                    st.markdown("")
+                    _n_lies = st.text_input(
+                        "Codes liés (séparés par des virgules)",
+                        value=str(_fic.get("codes_lies") or ""), key="cmc_lies",
+                        help="Codes apporteur secondaires rattachés à cette "
+                             "personne. Elle verra les contrats de tous ces codes.")
+                    _n_ag = st.text_input("Agence",
+                                          value=str(_fic.get("agence") or ""),
+                                          key="cmc_agence")
+                    _n_actif = st.checkbox(
+                        "Compte actif", value=bool(_fic.get("actif")),
+                        key="cmc_actif",
+                        help="Un compte désactivé ne peut plus se connecter. "
+                             "Ses contrats restent consultables par la Direction.")
+
+                    _b1, _b2 = st.columns(2)
+                    if _b1.button("Enregistrer", type="primary",
+                                  use_container_width=True, key="btn_maj_cmc"):
+                        try:
+                            _cx2 = get_conn(); _cu2 = _cx2.cursor()
+                            _pp = "%s" if _is_pg(_cx2) else "?"
+                            _cu2.execute(
+                                f"UPDATE commerciaux SET codes_lies={_pp}, "
+                                f"agence={_pp}, actif={_pp} "
+                                f"WHERE code_principal={_pp}",
+                                (_n_lies.strip(), _n_ag.strip(),
+                                 1 if _n_actif else 0, _cod_c))
+                            _cx2.commit(); _cu2.close(); _cx2.close()
+                            st.success("Compte mis à jour."); st.rerun()
+                        except Exception as _e2:
+                            st.error(f"Mise à jour impossible : {_e2}")
+
+                    if _b2.button("Réinitialiser le mot de passe",
+                                  use_container_width=True, key="btn_reset_cmc"):
+                        _mp_new = mdp_initial(_fic["nom"], _cod_c)
+                        try:
+                            _cx3 = get_conn(); _cu3 = _cx3.cursor()
+                            _pp3 = "%s" if _is_pg(_cx3) else "?"
+                            _cu3.execute(
+                                f"UPDATE commerciaux SET mdp_hash={_pp3}, "
+                                f"mdp_a_changer=1, tentatives=0, "
+                                f"bloque_jusqua=NULL WHERE code_principal={_pp3}",
+                                (_hash_mdp(_mp_new), _cod_c))
+                            _cx3.commit(); _cu3.close(); _cx3.close()
+                            st.success(f"Mot de passe réinitialisé : "
+                                       f"**{_mp_new}**. Il devra être changé "
+                                       f"à la prochaine connexion.")
+                        except Exception as _e3:
+                            st.error(f"Réinitialisation impossible : {_e3}")
+
+    except Exception as _e_page:
+        _erreur_onglet(_e_page, "Comptes commerciaux")
+
 elif "Comptes courtiers" in page:
     try:
         section("Comptes courtiers",
@@ -7534,11 +8240,26 @@ elif "Saisie BIA" in page:
 elif "Base BIA" in page:
     try:
         df_bia = bia_all()
-        # Un courtier ne consulte que les contrats qu'il a lui-meme saisis.
-        if is_courtier(user) and not df_bia.empty and "saisi_par" in df_bia.columns:
-            _rs_u = str(user.get("raison_sociale") or user.get("nom","")).strip().upper()
-            df_bia = df_bia[df_bia["saisi_par"].fillna("").astype(str)
-                              .str.strip().str.upper() == _rs_u]
+        # ── Cloisonnement des donnees ────────────────────────────────────────
+        # Chacun ne consulte que ses propres saisies ; la Direction et
+        # l'actuariat conservent la vue d'ensemble pour le controle.
+        if not voit_tout(user) and not df_bia.empty:
+            _mine = pd.Series(False, index=df_bia.index)
+            # Rattachement par code apporteur, principal et secondaires
+            _codes_u = codes_utilisateur(user)
+            if _codes_u:
+                for _c_col in ["code_apporteur", "codeappo", "code_appo"]:
+                    if _c_col in df_bia.columns:
+                        _mine |= code_propre(df_bia[_c_col]).isin(_codes_u)
+            # Rattachement par nom du saisisseur
+            _nom_u = str(user.get("raison_sociale")
+                         or user.get("nom", "")).strip().upper()
+            if _nom_u and "saisi_par" in df_bia.columns:
+                _mine |= (df_bia["saisi_par"].fillna("").astype(str)
+                            .str.strip().str.upper() == _nom_u)
+            df_bia = df_bia[_mine]
+            st.caption(f"Périmètre : vos saisies uniquement "
+                       f"({nb_full(len(df_bia))} contrat(s)).")
         section("🗂️ Base BIA — Registre des contrats","CONSULTATION · EXPORT · GESTION")
 
         if df_bia.empty:
@@ -7636,8 +8357,9 @@ elif "Base BIA" in page:
         # ══════════════════════════════════════════════════════════════════════
         # Le courtier corrige ses propres saisies ; la Direction et
         # l'actuariat disposent en plus des champs financiers.
-        _peut_gerer = (user.get("role","").upper() in {"PDG","DG","ADMIN","ACTUAIRE"}
-                       or is_courtier(user))
+        # Chacun corrige ses propres saisies ; seule la Direction supprime.
+        _peut_gerer = (voit_tout(user) or is_courtier(user)
+                       or str(user.get("role","")).upper() == "COMMERCIAL")
         if _peut_gerer and not df_show.empty:
             st.markdown("---")
             section("Gestion des contrats", "STATUT · SUPPRESSION", espace=False)
@@ -7661,7 +8383,7 @@ elif "Base BIA" in page:
             _ligne = df_show[df_show["id"] == _id_bia]
             _ligne = _ligne.iloc[0] if not _ligne.empty else None
             _modifiables = champs_modifiables(user)
-            _est_habilite = user.get("role","").upper() in ROLES_SENSIBLES
+            _est_habilite = str(user.get("role","")).upper() in ROLES_SENSIBLES
 
             with st.expander("Corriger des champs", expanded=False):
                 if _ligne is None:
