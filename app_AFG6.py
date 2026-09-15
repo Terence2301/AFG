@@ -8978,35 +8978,56 @@ elif "Rapport PDF" in page:
                                             if not _dp4.empty:
                                                 _sP4 = (_dp4.groupby("_MOI")["CHIFAFFA"].sum()
                                                             .reindex(range(1,13), fill_value=0).tolist())
-                                        # Le graphique et son commentaire ne
-                                        # doivent jamais etre separes par un
-                                        # saut de page.
-                                        _bloc4 = [Spacer(1,0.18*cm)]
+                                        # ── 1. Evolution mensuelle du partenaire ──
+                                        # Presentee seule d'abord : elle donne
+                                        # la saisonnalite propre du partenaire,
+                                        # lecture que la superposition avec
+                                        # l'exercice precedent brouillerait.
+                                        _t1 = float(sum(_sN4))
+                                        _mx4 = (max(range(12), key=lambda k: _sN4[k])
+                                                if _t1 > 0 else 0)
+                                        _act4 = sum(1 for v in _sN4 if v > 0)
+                                        _moy4 = _t1 / max(_act4, 1)
+
+                                        _bloc4 = [Spacer(1,0.2*cm)]
+                                        _bloc4.append(_mpl_barv(
+                                            _M4, [_sN4], [str(_aN4)],
+                                            f"{str(_nm4)[:38]} · évolution mensuelle {_aN4}",
+                                            haut=3.4))
+                                        _bloc4.append(Paragraph(
+                                            f"<b>{str(_nm4)[:40]}.</b> Production de "
+                                            f"<b>{fmt_full(_t1)}</b> sur {_aN4}, soit "
+                                            f"<b>{_t1/max(_ttF4,1)*100:.1f} %</b> de la famille. "
+                                            f"Activité répartie sur <b>{_act4} mois</b>, "
+                                            f"pour une moyenne mensuelle de "
+                                            f"<b>{fmt_full(_moy4)}</b>. Le pic se situe en "
+                                            f"<b>{_M4[_mx4]}</b> ({fmt_full(_sN4[_mx4])}).",
+                                            st_bd))
+
+                                        # ── 2. Comparaison a l'exercice precedent ──
                                         if _sP4 and sum(_sP4) > 0:
+                                            _bloc4.append(Spacer(1,0.16*cm))
                                             _bloc4.append(_mpl_barv(
                                                 _M4, [_sP4, _sN4], [str(_aP4), str(_aN4)],
-                                                f"{str(_nm4)[:38]} · {_aN4} face à {_aP4}", haut=3.6))
-                                            _t1 = float(sum(_sN4)); _t0 = float(sum(_sP4))
-                                            _v4 = ((_t1-_t0)/_t0*100) if _t0 else 0
+                                                f"{str(_nm4)[:38]} · {_aN4} face à {_aP4}",
+                                                haut=3.6))
+                                            _t0  = float(sum(_sP4))
+                                            _v4  = ((_t1-_t0)/_t0*100) if _t0 else 0
                                             _nh4 = sum(1 for a,b in zip(_sN4,_sP4) if a > b)
+                                            _sens = "progression" if _v4 >= 0 else "retrait"
                                             _bloc4.append(Paragraph(
-                                                f"<b>{str(_nm4)[:40]}.</b> Production de "
-                                                f"<b>{fmt_full(_t1)}</b> en {_aN4} contre "
-                                                f"<b>{fmt_full(_t0)}</b> en {_aP4}, soit "
-                                                f"<b>{_v4:+.1f} %</b>. {_nh4} mois sur 12 dépassent "
-                                                f"le niveau de l'exercice précédent.", st_bd))
-                                        else:
-                                            _bloc4.append(_mpl_barv(
-                                                _M4, [_sN4], [str(_aN4)],
-                                                f"{str(_nm4)[:38]} · production mensuelle {_aN4}",
-                                                haut=3.4))
-                                            _mx4 = max(range(12), key=lambda k: _sN4[k])
+                                                f"<b>Comparaison.</b> {fmt_full(_t0)} en "
+                                                f"{_aP4} contre <b>{fmt_full(_t1)}</b> en "
+                                                f"{_aN4}, soit une {_sens} de "
+                                                f"<b>{abs(_v4):.1f} %</b>. "
+                                                f"<b>{_nh4} mois sur 12</b> dépassent le "
+                                                f"niveau de l'exercice précédent.", st_bd))
+                                        elif _aP4:
                                             _bloc4.append(Paragraph(
-                                                f"<b>{str(_nm4)[:40]}.</b> Production de "
-                                                f"<b>{fmt_full(sum(_sN4))}</b> sur {_aN4}, soit "
-                                                f"<b>{sum(_sN4)/max(_ttF4,1)*100:.1f} %</b> de la "
-                                                f"famille. Le pic se situe en <b>{_M4[_mx4]}</b> "
-                                                f"({fmt_full(_sN4[_mx4])}).", st_bd))
+                                                f"<i>Aucune production enregistrée en "
+                                                f"{_aP4} : ce partenaire est entré en "
+                                                f"relation sur l'exercice {_aN4}.</i>",
+                                                st_bd))
                                         # Le graphique et sa lecture forment un
                                         # bloc insecable : jamais de coupure
                                         # entre l'image et son commentaire.
