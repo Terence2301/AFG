@@ -2375,10 +2375,46 @@ with st.sidebar:
     MODE = {"Semaine":"semaine","Mois":"mois","Trimestre":"trim",
             "Semestre":"sem","Année":"annee","Jour":"jour"}[mode_lbl]
 
-    default_date = date(2024, 6, 30)
-    sel_date = st.date_input("", value=default_date,
-        label_visibility="collapsed", key="sel_date",
-        help="Sélectionnez une date dans la période souhaitée")
+    # Le filtre annuel, place plus bas, pilote la periode : quand un
+    # exercice est retenu, la date d'analyse s'y aligne et le choix
+    # manuel est neutralise. Un seul perimetre gouverne alors toutes
+    # les pages, ce qui evite les lectures contradictoires.
+    # Lecture directe de la cle du widget : « filtre_annee » n'est ecrit
+    # qu'apres le rendu du selecteur et porterait la valeur du run
+    # precedent, ce qui decalerait la periode d'un exercice.
+    _an_pilote = st.session_state.get("yr_sel",
+                    st.session_state.get("filtre_annee", "Toutes les années"))
+    _an_pilote = (int(_an_pilote) if str(_an_pilote).isdigit() else None)
+
+    if _an_pilote:
+        # Date calee sur l'exercice : fin d'annee, ou 30 juin si le mode
+        # retenu decoupe l'annee en fractions.
+        _d_def = (date(_an_pilote, 12, 31) if MODE == "annee"
+                  else date(_an_pilote, 6, 30))
+        _cur_d = st.session_state.get("sel_date", _d_def)
+        if not isinstance(_cur_d, date) or _cur_d.year != _an_pilote:
+            _cur_d = _d_def
+        # Champ verrouille : l'exercice choisi plus bas gouverne seul la
+        # periode. Laisser le champ modifiable autoriserait deux perimetres
+        # contradictoires dans une meme lecture.
+        sel_date = _cur_d
+        st.date_input(
+            "", value=_cur_d,
+            min_value=date(_an_pilote, 1, 1),
+            max_value=date(_an_pilote, 12, 31),
+            label_visibility="collapsed", key="sel_date_lock",
+            disabled=True,
+            help=f"Période fixée par le filtre annuel {_an_pilote}. "
+                 f"Choisissez « Toutes les années » pour la modifier.")
+        st.markdown(
+            f"<div style='font-size:9.5px;color:rgba(255,255,255,.55);"
+            f"margin:-6px 4px 6px'>Période alignée sur l'exercice "
+            f"<b>{_an_pilote}</b></div>", unsafe_allow_html=True)
+    else:
+        sel_date = st.date_input(
+            "", value=date(2024, 6, 30),
+            label_visibility="collapsed", key="sel_date",
+            help="Sélectionnez une date dans la période souhaitée")
 
     if MODE=="jour":
         period_lbl = ds(sel_date)
@@ -2397,7 +2433,15 @@ with st.sidebar:
     else:
         period_lbl = str(sel_date.year)
 
-    st.markdown(f"<div style='background:#C0392B;color:white;text-align:center;border-radius:7px;padding:5px;margin:5px 4px;font-weight:800;font-size:12px'>{period_lbl}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div style='background:#C0392B;color:white;text-align:center;"
+                f"border-radius:7px;padding:5px;margin:5px 4px;font-weight:800;"
+                f"font-size:12px'>{period_lbl}</div>", unsafe_allow_html=True)
+    if _an_pilote:
+        st.markdown(
+            f"<div style='font-size:9px;color:rgba(255,255,255,.55);"
+            f"text-align:center;margin:-2px 4px 4px'>"
+            f"Période bornée à l'exercice {_an_pilote}</div>",
+            unsafe_allow_html=True)
 
     # ── Filtre par année ────────────────────────────────────────────────────
     # Utiliser st.session_state pour éviter le NameError (ca/pf/sin définis plus tard)
@@ -2419,6 +2463,12 @@ with st.sidebar:
     if _cur_yr not in _yr_opts: _cur_yr = "Toutes les années"
     _sel_yr  = st.selectbox("📅 Année", _yr_opts,
                              index=_yr_opts.index(_cur_yr), key="yr_sel")
+    # Un changement d'exercice recale la date d'analyse : sans cela, la
+    # date du run precedent resterait hors des bornes du nouvel exercice.
+    if st.session_state.get("filtre_annee") != _sel_yr:
+        st.session_state.pop("sel_date", None)
+        st.session_state["filtre_annee"] = _sel_yr
+        st.rerun()
     st.session_state["filtre_annee"] = _sel_yr
     # Alias numérique pour les pages analytiques
     SEL_YEAR_SB = None if _sel_yr == "Toutes les années" else int(_sel_yr)
@@ -3319,18 +3369,46 @@ elif "Analyse CA" in page:
                     if "DATECOMP" in df.columns:
                         c1,c2 = st.columns(2)
                         with c1:
-                            evo = all_ca.groupby(all_ca["DATECOMP"].dt.to_period("M").astype(str))["CHIFAFFA"].sum().reset_index()
-                            evo.columns = ["Période","CA"]; evo["Cumul"] = evo["CA"].cumsum()
-                            fig = make_subplots(specs=[[{"secondary_y":True}]])
-                            fig.add_bar(x=evo["Période"],y=evo["CA"],name="CA mensuel",marker_color=GREEN,opacity=.88)
-                            fig.add_scatter(x=evo["Période"],y=evo["Cumul"],name="Cumul",line=dict(color=BLUE,width=2.5),secondary_y=True)
-                            fig_style(fig,380,"📅 CA mensuel + cumul — tous exercices")
-                            st.plotly_chart(fig,use_container_width=True)
-                            a,_ = st.columns(2)
-                            a.download_button("📥 CSV",dl_csv(evo),"ca_mensuel.csv","text/csv",use_container_width=True,key="dl_evo_m")
+                            # Le filtre annuel gouverne ce graphique : sans
+                            # restriction, les mois de plusieurs exercices se
+                            # melangeaient sous un titre laissant croire a un
+                            # seul exercice.
+                            _base_evo = all_ca
+                            if SEL_YEAR:
+                                _base_evo = all_ca[
+                                    all_ca["DATECOMP"].dt.year == int(SEL_YEAR)]
+                            _lbl_evo = (f"exercice {SEL_YEAR}" if SEL_YEAR
+                                        else "tous exercices")
+                            if _base_evo.empty:
+                                bloc_vide(f"Aucune quittance sur {_lbl_evo}.", "📅")
+                                evo = pd.DataFrame(columns=["Période","CA","Cumul"])
+                            else:
+                                evo = (_base_evo.groupby(
+                                           _base_evo["DATECOMP"].dt.to_period("M")
+                                                    .astype(str))["CHIFAFFA"]
+                                       .sum().reset_index())
+                                evo.columns = ["Période","CA"]
+                                evo["Cumul"] = evo["CA"].cumsum()
+                                fig = make_subplots(specs=[[{"secondary_y":True}]])
+                                fig.add_bar(x=evo["Période"], y=evo["CA"],
+                                            name="CA mensuel", marker_color=GREEN,
+                                            opacity=.88)
+                                fig.add_scatter(x=evo["Période"], y=evo["Cumul"],
+                                                name="Cumul",
+                                                line=dict(color=BLUE, width=2.5),
+                                                secondary_y=True)
+                                fig_style(fig, 380,
+                                          f"📅 CA mensuel et cumul · {_lbl_evo}")
+                                st.plotly_chart(fig, use_container_width=True)
+                                a,_ = st.columns(2)
+                                a.download_button("📥 CSV", dl_csv(evo),
+                                    "ca_mensuel.csv", "text/csv",
+                                    use_container_width=True, key="dl_evo_m")
                         with c2:
                             # Saisonnalité
-                            saison = all_ca.groupby("MOIS")["CHIFAFFA"].mean().reset_index() if "MOIS" in all_ca.columns else pd.DataFrame()
+                            saison = (_base_evo.groupby("MOIS")["CHIFAFFA"].mean()
+                                                .reset_index()
+                                      if "MOIS" in _base_evo.columns else pd.DataFrame())
                             if not saison.empty:
                                 saison.columns=["Mois","CA moyen"]
                                 saison["Label"]=saison["Mois"].apply(lambda m:MOIS_FR[int(m)-1] if pd.notna(m) else "")
@@ -8545,38 +8623,62 @@ elif "Rapport PDF" in page:
                                     f"{'traduisant une concentration marquée à surveiller' if _c3 >= 70 else 'ce qui reflète une répartition équilibrée'}."
                                     .replace(",", " "), st_bd))
 
-                            # Evolution mensuelle du CA sur le perimetre
+                            # ── Evolution mensuelle du chiffre d'affaires ──
+                            # Les douze mois de l'exercice retenu, nommes en
+                            # toutes lettres. Un mois sans production affiche
+                            # zero plutot que d'etre omis : la lecture du
+                            # rythme d'activite en depend.
                             _cdt = next((c for c in ["DATECOMP","DATEEFFE"]
                                          if c in _ca_r.columns), None)
                             if _cdt:
                                 _ev = _ca_r[[_cdt,"CHIFAFFA"]].copy()
                                 _ev["_M"] = pd.to_datetime(_ev[_cdt], errors="coerce")
                                 _ev = _ev.dropna(subset=["_M"])
-                                if not _ev.empty:
-                                    _ev["_ML"] = _ev["_M"].dt.strftime("%Y-%m")
-                                    _evg = (_ev.groupby("_ML")["CHIFAFFA"].sum()
-                                              .reset_index().sort_values("_ML"))
-                                    if len(_evg) >= 2:
-                                        _evg = _evg.tail(12)
+                                # L'exercice de la section suit le filtre annuel
+                                _an_ev = (int(SEL_YEAR) if SEL_YEAR
+                                          else (int(_ev["_M"].dt.year.max())
+                                                if not _ev.empty else None))
+                                if _an_ev is not None:
+                                    _ev = _ev[_ev["_M"].dt.year == _an_ev]
+                                if not _ev.empty and _an_ev is not None:
+                                    _MOIS_FR = ["Janvier","Février","Mars","Avril",
+                                                "Mai","Juin","Juillet","Août",
+                                                "Septembre","Octobre","Novembre",
+                                                "Décembre"]
+                                    _sr = (_ev.groupby(_ev["_M"].dt.month)["CHIFAFFA"]
+                                              .sum().reindex(range(1,13), fill_value=0))
+                                    if float(_sr.sum()) > 0:
                                         story.append(Spacer(1,0.2*cm))
                                         story.append(_mpl_barv(
-                                            _evg["_ML"].tolist(),
-                                            [_evg["CHIFAFFA"].tolist()],
+                                            _MOIS_FR, [_sr.tolist()],
                                             ["Chiffre d'affaires"],
-                                            f"Évolution mensuelle du chiffre d'affaires · {period_lbl}"))
-                                        _mx = _evg.loc[_evg["CHIFAFFA"].idxmax()]
-                                        _mn = _evg.loc[_evg["CHIFAFFA"].idxmin()]
-                                        _moy = float(_evg["CHIFAFFA"].mean())
+                                            f"Évolution mensuelle du chiffre "
+                                            f"d'affaires · exercice {_an_ev}"))
+                                        _act = _sr[_sr > 0]
+                                        _imx = int(_act.idxmax())
+                                        _imn = int(_act.idxmin())
+                                        _moy = float(_act.mean()) if len(_act) else 0.0
+                                        _rap = (_act.max()/max(_act.min(),1)
+                                                if len(_act) else 0)
                                         story.append(Spacer(1,0.12*cm))
                                         story.append(Paragraph(
-                                            f"<b>Lecture.</b> Sur les {len(_evg)} mois observés, "
-                                            f"la production mensuelle moyenne ressort à "
-                                            f"<b>{fmt_full(_moy)}</b>. Le mois le plus actif est "
-                                            f"<b>{_mx['_ML']}</b> ({fmt_full(_mx['CHIFAFFA'])}), "
-                                            f"le plus faible <b>{_mn['_ML']}</b> "
-                                            f"({fmt_full(_mn['CHIFAFFA'])}), soit un rapport de "
-                                            f"<b>{_mx['CHIFAFFA']/max(_mn['CHIFAFFA'],1):.1f}</b> "
-                                            f"entre les deux extrêmes.", st_bd))
+                                            f"<b>Lecture.</b> Sur les "
+                                            f"<b>{len(_act)} mois</b> ayant enregistré "
+                                            f"de la production en {_an_ev}, la moyenne "
+                                            f"mensuelle ressort à <b>{fmt_full(_moy)}</b>. "
+                                            f"Le mois le plus actif est "
+                                            f"<b>{_MOIS_FR[_imx-1]}</b> "
+                                            f"({fmt_full(_sr[_imx])}), le plus faible "
+                                            f"<b>{_MOIS_FR[_imn-1]}</b> "
+                                            f"({fmt_full(_sr[_imn])}), soit un rapport de "
+                                            f"<b>{_rap:.1f}</b> entre les deux extrêmes. "
+                                            + ("L'écart traduit une activité très "
+                                               "irrégulière, à lisser par une animation "
+                                               "commerciale continue."
+                                               if _rap >= 5 else
+                                               "La production reste relativement "
+                                               "régulière d'un mois à l'autre."),
+                                            st_bd))
 
                         # 3. Commerciaux
                         if s_com and _ca_r is not None:
