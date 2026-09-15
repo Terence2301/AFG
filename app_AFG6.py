@@ -1967,8 +1967,12 @@ def load_sin(f) -> pd.DataFrame:
 
     df = df.dropna(how="all").reset_index(drop=True)
 
+    # « Date Création » sert de reference au filtre de periode : elle
+    # doit imperativement etre convertie, sans quoi la comparaison de
+    # dates echoue silencieusement et renvoie un resultat vide.
     for c in ["Date Survenance","Date Déclaration","Date validation",
-              "Date Emission","Date Comptabilisation"]:
+              "Date Emission","Date Comptabilisation","Date Création",
+              "Date Creation","DATE_CREATION"]:
         if c in df.columns:
             df[c] = pd.to_datetime(df[c], errors="coerce")
     for c in ["Réglement Total","Réglement Principal",
@@ -2680,8 +2684,12 @@ def _bytes_to_df_sin(raw: bytes, fname: str) -> pd.DataFrame:
             try: os.unlink(path)
             except: pass
     df = df.dropna(how="all").reset_index(drop=True)
+    # « Date Création » sert de reference au filtre de periode : elle
+    # doit imperativement etre convertie, sans quoi la comparaison de
+    # dates echoue silencieusement et renvoie un resultat vide.
     for c in ["Date Survenance","Date Déclaration","Date validation",
-              "Date Emission","Date Comptabilisation"]:
+              "Date Emission","Date Comptabilisation","Date Création",
+              "Date Creation","DATE_CREATION"]:
         if c in df.columns: df[c] = pd.to_datetime(df[c], errors="coerce")
     for c in ["Réglement Total","Réglement Principal",
               "SAP au 31/12/2025","Réglement Honoraires"]:
@@ -2991,21 +2999,47 @@ def ca_f():
                             sel_date.year)]
     return filter_df(ca, "DATECOMP", sel_date, MODE)
 
+def col_date_sin(df):
+    """Colonne de date servant de reference au filtrage des prestations.
+
+    « Date Création » fait foi : elle horodate l'enregistrement du
+    dossier dans le systeme, independamment des dates de survenance ou
+    de comptabilisation qui peuvent etre absentes ou tardives.
+    """
+    if df is None:
+        return None
+    for _c in ["Date Création", "Date Creation", "DATE_CREATION",
+               "Date creation", "DATECREA"]:
+        if _c in df.columns:
+            return _c
+    # Repli : reperage souple, insensible aux accents et aux espaces
+    for _c in df.columns:
+        _n = str(_c).lower().replace(" ", "").replace("é", "e")
+        if "datecreation" in _n:
+            return _c
+    # Dernier recours : comptabilisation, puis survenance
+    for _c in ["Date Comptabilisation", "DATECOMP", "Date Survenance"]:
+        if _c in df.columns:
+            return _c
+    return None
+
+
 def sin_f():
     """Prestations filtrees sur la periode d'analyse.
 
-    En mode annuel, la date de comptabilisation fait foi : elle rattache
-    la prestation a son exercice comptable.
+    La colonne « Date Création » fait foi : elle horodate l'entree du
+    dossier dans le systeme. Si l'exercice demande n'y figure pas,
+    aucune ligne ne remonte et les indicateurs restent a zero.
     """
     if sin is None: return pd.DataFrame()
+    _cd = col_date_sin(sin)
+    if _cd is None:
+        return filter_sin_exo(sin, sel_date, MODE)
+    _s = pd.to_datetime(sin[_cd], errors="coerce")
     if MODE == "annee":
-        _dc = next((c for c in sin.columns
-                    if "datecomp" in c.lower().replace(" ", "")
-                    or "comptab"  in c.lower()), None)
-        _cols = [c for c in [_dc, "ANNEE_SIN", "ANNEE",
-                             "Exercice Sinistre", "Date Survenance"] if c]
-        return sin[year_mask(sin, _cols, sel_date.year)]
-    return filter_sin_exo(sin, sel_date, MODE)
+        return sin[(_s.dt.year == int(sel_date.year)).fillna(False)]
+    _a, _b = bornes_periode(sel_date, MODE)
+    return sin[((_s >= pd.Timestamp(_a)) & (_s <= pd.Timestamp(_b))).fillna(False)]
 
 # ─────────────────────────────────────────────
 #  TOPBAR
@@ -5391,16 +5425,14 @@ elif "Sinistres" in page:
         df_s = sin  # base complete (reference)
         # ── Perimetre : exercice sinistre puis periode ───────────────────────────
         if SEL_YEAR:
-            # La date de comptabilisation rattache la prestation a son
-            # exercice comptable et fait seule autorite. Si la base ne
-            # contient aucune ecriture sur l'exercice demande, aucune
-            # ligne ne remonte et les indicateurs restent a zero.
-            _c_dc_s = next((c for c in ["DATECOMP","Date Comptabilisation",
-                                        "DATE_COMPTA","Date comptabilisation"]
-                            if c in sin.columns), None)
+            # « Date Création » fait seule autorite : elle horodate
+            # l'entree du dossier dans le systeme. Si la base ne contient
+            # aucun enregistrement sur l'exercice demande, aucune ligne
+            # ne remonte et les indicateurs restent a zero.
+            _c_dc_s = col_date_sin(sin)
             if _c_dc_s:
-                df_sf = sin[(as_year(sin[_c_dc_s]) == int(SEL_YEAR))
-                            .fillna(False)].copy()
+                _sd = pd.to_datetime(sin[_c_dc_s], errors="coerce")
+                df_sf = sin[(_sd.dt.year == int(SEL_YEAR)).fillna(False)].copy()
             else:
                 df_sf = sin[year_mask(sin,
                     ["ANNEE_SIN","Exercice Sinistre","Date Survenance"],
