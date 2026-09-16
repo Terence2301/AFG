@@ -1571,6 +1571,46 @@ def reinitialiser_mdp(code, nom, demande_par, motif, execute_par) -> tuple:
                        f"{_VALIDITE_PROVISOIRE_H} heures.")
 
 
+def purger_comptes_commerciaux(execute_par: str = "") -> tuple:
+    """Supprime tous les comptes commerciaux et leur journal d'acces.
+
+    Ne touche ni aux contrats BIA, ni aux comptes courtiers, ni aux
+    comptes de direction : seuls les identifiants de connexion des
+    commerciaux sont effaces. Les contrats deja saisis restent
+    rattaches a leur code apporteur et demeurent consultables.
+
+    Operation reservee a la mise en place, lorsqu'aucun commercial n'a
+    encore personnalise son mot de passe.
+    """
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM commerciaux")
+        _n = int(cur.fetchone()[0] or 0)
+        cur.execute("DELETE FROM commerciaux")
+        cur.execute("DELETE FROM reset_journal")
+        conn.commit(); cur.close(); conn.close()
+        return True, f"{_n} compte(s) supprimé(s). Les contrats sont intacts."
+    except Exception as e:
+        return False, f"Purge impossible : {e}"
+
+
+def compter_comptes_actifs() -> dict:
+    """Denombre les comptes selon l'etat de leur mot de passe."""
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM commerciaux")
+        _tot = int(cur.fetchone()[0] or 0)
+        cur.execute("SELECT COUNT(*) FROM commerciaux WHERE mdp_a_changer = 0")
+        _perso = int(cur.fetchone()[0] or 0)
+        cur.execute("SELECT COUNT(*) FROM commerciaux "
+                    "WHERE derniere_connex IS NOT NULL")
+        _connec = int(cur.fetchone()[0] or 0)
+        cur.close(); conn.close()
+        return {"total": _tot, "personnalises": _perso, "connectes": _connec}
+    except Exception:
+        return {"total": 0, "personnalises": 0, "connectes": 0}
+
+
 def journal_reset(code=None) -> pd.DataFrame:
     """Retourne le journal des reinitialisations, filtre sur un compte."""
     try:
@@ -6661,6 +6701,65 @@ elif "Comptes commerciaux" in page:
                              use_container_width=True, key="btn_analyse_cmc"):
                     with st.spinner("Analyse en cours…"):
                         st.session_state["_analyse_cmc"] = analyser_commerciaux(pf, ca)
+
+                # ── Remise a zero des comptes ────────────────────────────────
+                # Un compte deja present n'est jamais ecrase par la generation :
+                # si des comptes ont ete crees avec un ancien format de mot de
+                # passe, la relance ne produit aucune ligne. La purge permet de
+                # repartir sur une base saine pendant la mise en place.
+                _etat_c = compter_comptes_actifs()
+                if _etat_c["total"]:
+                    with st.expander("Repartir de zéro"):
+                        st.markdown(
+                            f"- Comptes enregistrés : **{nb_full(_etat_c['total'])}**\n"
+                            f"- Mots de passe personnalisés : "
+                            f"**{nb_full(_etat_c['personnalises'])}**\n"
+                            f"- Commerciaux déjà connectés : "
+                            f"**{nb_full(_etat_c['connectes'])}**")
+                        st.caption(
+                            "La génération n'écrase jamais un compte existant. "
+                            "Pour régénérer tous les identifiants — par exemple "
+                            "après un changement de format de mot de passe — "
+                            "supprimez d'abord les comptes. Les contrats BIA, "
+                            "les comptes courtiers et les accès de direction "
+                            "ne sont pas touchés.")
+
+                        if _etat_c["personnalises"]:
+                            st.warning(
+                                f"{nb_full(_etat_c['personnalises'])} commercial "
+                                f"(aux) a déjà choisi son mot de passe personnel. "
+                                f"La purge le lui retirera : il devra recevoir un "
+                                f"nouvel identifiant provisoire.")
+
+                        if st.button("Supprimer tous les comptes commerciaux",
+                                     use_container_width=True,
+                                     key="btn_purge_cmc"):
+                            st.session_state["_purge_cmc"] = True
+
+                        if st.session_state.get("_purge_cmc"):
+                            st.error(
+                                f"Confirmer la suppression de "
+                                f"**{nb_full(_etat_c['total'])}** compte(s) ? "
+                                f"Cette opération est irréversible.")
+                            _pg1, _pg2 = st.columns(2)
+                            if _pg1.button("Confirmer la suppression",
+                                           type="primary",
+                                           use_container_width=True,
+                                           key="btn_conf_purge_cmc"):
+                                _ok_p, _msg_p = purger_comptes_commerciaux(
+                                    user.get("nom", ""))
+                                st.session_state.pop("_purge_cmc", None)
+                                st.session_state.pop("_analyse_cmc", None)
+                                st.session_state.pop("_ident_cmc", None)
+                                if _ok_p:
+                                    st.success(_msg_p)
+                                else:
+                                    st.error(_msg_p)
+                                st.rerun()
+                            if _pg2.button("Annuler", use_container_width=True,
+                                           key="btn_ann_purge_cmc"):
+                                st.session_state.pop("_purge_cmc", None)
+                                st.rerun()
 
                 _an = st.session_state.get("_analyse_cmc")
                 if _an:
