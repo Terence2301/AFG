@@ -59,7 +59,7 @@ section[data-testid="stSidebar"] .stFileUploader label {
 </style>
 """, unsafe_allow_html=True)
 
-import pandas as pd, numpy as np, io, os, tempfile, warnings, hashlib, sqlite3
+import pandas as pd, numpy as np, io, os, tempfile, warnings, hashlib, hmac, sqlite3
 from datetime import datetime, date, timedelta
 import plotly.graph_objects as go
 import plotly.express as px
@@ -718,14 +718,18 @@ AGENCES = ["","Siège Social — Cotonou","Agence Cotonou Centre","Agence Cotono
 #  quiconque accede au depot.
 # ══════════════════════════════════════════════════════════════════════════════
 def _pwd(key: str) -> str:
-    """Empreinte du mot de passe lu dans les Secrets.
+    """Mot de passe du compte, lu dans les Secrets de la plateforme.
+
+    La valeur est conservee telle quelle, en memoire seulement : le
+    hachage se fait a la comparaison, au moment de la connexion. Ce
+    choix evite d'appeler ici une fonction de hachage definie plus bas
+    dans le fichier, ce qui viderait silencieusement tous les comptes.
 
     Retourne une chaine vide si le secret est absent : le compte est
-    alors inutilisable, aucune comparaison ne peut aboutir.
+    alors ferme, aucune comparaison ne peut aboutir.
     """
     try:
-        _raw = str(st.secrets["auth"][key]).strip()
-        return _hash_mdp(_raw) if _raw else ""
+        return str(st.secrets["auth"][key]).strip()
     except Exception:
         return ""
 
@@ -2600,7 +2604,30 @@ if not st.session_state.auth:
                 st.error(
                     "Aucun compte de direction n'est configuré. "
                     "Renseignez la section [auth] dans les Secrets de la "
-                    "plateforme avant d'utiliser l'application.")
+                    "plateforme, puis redémarrez l'application "
+                    "(Manage app → Reboot).")
+                with st.expander("Diagnostic de configuration"):
+                    # Seuls les noms de cles sont affiches, jamais les valeurs.
+                    try:
+                        _sec_ok = "auth" in st.secrets
+                    except Exception:
+                        _sec_ok = False
+                    st.markdown(
+                        f"- Section `[auth]` détectée : "
+                        f"**{'oui' if _sec_ok else 'non'}**")
+                    if _sec_ok:
+                        try:
+                            _cles = sorted(list(st.secrets["auth"].keys()))
+                            st.markdown(f"- Clés présentes : "
+                                        f"`{', '.join(_cles) or 'aucune'}`")
+                        except Exception as _e_s:
+                            st.markdown(f"- Lecture impossible : `{_e_s}`")
+                    _attendues = ["pdg_pwd","dg_pwd","admin_pwd",
+                                  "manager_pwd","actuaire_pwd","courtier_pwd"]
+                    st.markdown(f"- Clés attendues : `{', '.join(_attendues)}`")
+                    st.caption("Les valeurs ne sont jamais affichées. "
+                               "Vérifiez l'orthographe des clés et la présence "
+                               "de l'en-tête [auth] sur sa propre ligne.")
 
             if st.button("🔐 Accéder au système", use_container_width=True, type="primary"):
                 up = ident.strip().upper()
@@ -2637,7 +2664,7 @@ if not st.session_state.auth:
                     }
                     st.rerun()
                 # 2. Comptes internes AFG
-                elif up in USERS and _verifier_mdp(code, USERS[up]):
+                elif up in USERS and hmac.compare_digest(str(code), USERS[up]):
                     st.session_state.auth = True
                     st.session_state.user = {"nom": ident.strip(), "role": up.split()[0]}
                     st.rerun()
