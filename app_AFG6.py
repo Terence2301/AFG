@@ -709,22 +709,37 @@ AGENCES = ["","Siège Social — Cotonou","Agence Cotonou Centre","Agence Cotono
 # ── Mots de passe chargés depuis st.secrets ─────────────────────────────────
 # Définis dans Streamlit Cloud  Settings  Secrets  [auth]
 # Le code ne contient JAMAIS de mot de passe en clair.
-def _pwd(key: str, fallback: str) -> str:
+# ══════════════════════════════════════════════════════════════════════════════
+#  COMPTES DE DIRECTION
+#  Les mots de passe ne figurent NULLE PART dans ce fichier : ils sont lus
+#  dans les Secrets de la plateforme, hors du depot de code. Un compte dont
+#  le secret n'est pas configure reste ferme — aucune valeur de repli n'est
+#  prevue, car un code de secours inscrit dans le source serait lisible par
+#  quiconque accede au depot.
+# ══════════════════════════════════════════════════════════════════════════════
+def _pwd(key: str) -> str:
+    """Empreinte du mot de passe lu dans les Secrets.
+
+    Retourne une chaine vide si le secret est absent : le compte est
+    alors inutilisable, aucune comparaison ne peut aboutir.
+    """
     try:
-        raw = st.secrets["auth"][key]
-        return hashlib.sha256(raw.encode()).hexdigest()
+        _raw = str(st.secrets["auth"][key]).strip()
+        return _hash_mdp(_raw) if _raw else ""
     except Exception:
-        return hashlib.sha256(fallback.encode()).hexdigest()
+        return ""
+
 
 USERS = {
-    "PDG AFG":       _pwd("pdg_pwd",      "1001"),
-    "DG AFG":        _pwd("dg_pwd",       "1002"),
-    "ADMIN AFG":     _pwd("admin_pwd",    "1003"),
-    "MANAGER AFG":   _pwd("admin_pwd",    "1004"),
-    "ACTUAIRE AFG":  _pwd("actuaire_pwd", "1005"),
-    "DEMO VISITEUR": _pwd("demo_pwd",     "0000"),
-    "COURTIER AFG":  _pwd("courtier_pwd", "2001"),
+    "PDG AFG":       _pwd("pdg_pwd"),
+    "DG AFG":        _pwd("dg_pwd"),
+    "ADMIN AFG":     _pwd("admin_pwd"),
+    "MANAGER AFG":   _pwd("manager_pwd"),
+    "ACTUAIRE AFG":  _pwd("actuaire_pwd"),
+    "COURTIER AFG":  _pwd("courtier_pwd"),
 }
+# Comptes reellement ouverts : ceux dont le secret est renseigne.
+USERS = {_k: _v for _k, _v in USERS.items() if _v}
 
 # ─────────────────────────────────────────────
 #  CSS EXPERT
@@ -2581,6 +2596,12 @@ if not st.session_state.auth:
 
             ident = st.text_input("👤 Identifiant", placeholder="Ex : PDG AFG")
             code  = st.text_input("🔑 Mot de passe", type="password")
+            if not USERS:
+                st.error(
+                    "Aucun compte de direction n'est configuré. "
+                    "Renseignez la section [auth] dans les Secrets de la "
+                    "plateforme avant d'utiliser l'application.")
+
             if st.button("🔐 Accéder au système", use_container_width=True, type="primary"):
                 up = ident.strip().upper()
                 # 1. Comptes commerciaux : un compte par personne,
@@ -2616,7 +2637,7 @@ if not st.session_state.auth:
                     }
                     st.rerun()
                 # 2. Comptes internes AFG
-                elif up in USERS and USERS[up] == hashlib.sha256(code.encode()).hexdigest():
+                elif up in USERS and _verifier_mdp(code, USERS[up]):
                     st.session_state.auth = True
                     st.session_state.user = {"nom": ident.strip(), "role": up.split()[0]}
                     st.rerun()
