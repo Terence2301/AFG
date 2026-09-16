@@ -1080,6 +1080,25 @@ _DDL_AUDIT_PG = _DDL_AUDIT.replace(
 # principal. Les codes secondaires, rattaches dans une colonne dediee,
 # permettent a un commercial disposant de plusieurs portefeuilles de voir
 # l'ensemble de ses contrats sous un identifiant unique.
+# Journal des reinitialisations de mot de passe. En assurance, toute
+# remise a zero d'un acces doit pouvoir etre justifiee : qui a demande,
+# qui a execute, quand, et au nom de quel motif.
+_DDL_RESET = """
+CREATE TABLE IF NOT EXISTS reset_journal (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    code_compte   TEXT NOT NULL,
+    nom_compte    TEXT,
+    demande_par   TEXT,
+    motif         TEXT,
+    execute_par   TEXT,
+    execute_le    TEXT,
+    expire_le     TEXT,
+    utilise       INTEGER DEFAULT 0
+)
+"""
+_DDL_RESET_PG = _DDL_RESET.replace(
+    "INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
+
 _DDL_COMMERCIAUX = """
 CREATE TABLE IF NOT EXISTS commerciaux (
     code_principal  TEXT PRIMARY KEY,
@@ -1091,6 +1110,7 @@ CREATE TABLE IF NOT EXISTS commerciaux (
     email           TEXT,
     actif           INTEGER DEFAULT 1,
     mdp_a_changer   INTEGER DEFAULT 1,
+    mdp_expire_le   TEXT,
     tentatives      INTEGER DEFAULT 0,
     bloque_jusqua   TEXT,
     derniere_connex TEXT,
@@ -1125,6 +1145,7 @@ def init_db():
         cur.execute(_DDL_DATA       if pg else _DDL_DATA_SQ)
         cur.execute(_DDL_COURTIERS)
         cur.execute(_DDL_COMMERCIAUX)
+        cur.execute(_DDL_RESET_PG if pg else _DDL_RESET)
         cur.execute(_DDL_AUDIT_PG if pg else _DDL_AUDIT)
         conn.commit(); cur.close(); conn.close()
     except Exception as e:
@@ -1455,6 +1476,100 @@ _DUREE_BLOCAGE_MIN = 15      # minutes de blocage apres echecs repetes
 _MAX_TENTATIVES    = 5
 
 
+_VALIDITE_PROVISOIRE_H = 48      # duree de vie d'un mot de passe provisoire
+
+
+def mdp_aleatoire(longueur: int = 10) -> str:
+    """Mot de passe provisoire imprevisible.
+
+    Tire au sort dans un alphabet debarrasse des caracteres ambigus
+    (O/0, l/1/I) pour eviter les erreurs de lecture et de dictee. La
+    forme « Kx7m-Qp2v » se communique oralement sans ambiguite tout en
+    restant impossible a deviner, contrairement a une regle calculee
+    sur le nom et le code.
+    """
+    import secrets as _sc
+    _maj = "ABCDEFGHJKMNPQRSTUVWXYZ"
+    _min = "abcdefghijkmnpqrstuvwxyz"
+    _chf = "23456789"
+    _tous = _maj + _min + _chf
+    # Au moins une majuscule, une minuscule et un chiffre
+    _base = [_sc.choice(_maj), _sc.choice(_min), _sc.choice(_chf)]
+    _base += [_sc.choice(_tous) for _ in range(max(longueur - 3, 3))]
+    _sc.SystemRandom().shuffle(_base)
+    _m = "".join(_base)
+    _mi = len(_m) // 2
+    return f"{_m[:_mi]}-{_m[_mi:]}"
+
+
+def journaliser_reset(code, nom, demande_par, motif, execute_par,
+                      expire_le) -> None:
+    """Consigne une reinitialisation dans le journal des acces."""
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        _p = "%s" if _is_pg(conn) else "?"
+        cur.execute(
+            f"INSERT INTO reset_journal (code_compte, nom_compte, demande_par, "
+            f"motif, execute_par, execute_le, expire_le, utilise) "
+            f"VALUES ({_p},{_p},{_p},{_p},{_p},{_p},{_p},0)",
+            (str(code), str(nom), str(demande_par), str(motif),
+             str(execute_par), datetime.now().strftime("%Y-%m-%d %H:%M"),
+             str(expire_le)))
+        conn.commit(); cur.close(); conn.close()
+    except Exception:
+        pass
+
+
+def reinitialiser_mdp(code, nom, demande_par, motif, execute_par) -> tuple:
+    """Genere un mot de passe provisoire a validite limitee.
+
+    Retourne (succes, mot_de_passe, message). Le mot de passe expire
+    apres 48 heures : au-dela, il faut une nouvelle demande, ce qui
+    evite qu'un identifiant communique et oublie reste exploitable.
+    """
+    if not str(demande_par).strip():
+        return False, "", "Indiquez qui formule la demande."
+    if not str(motif).strip():
+        return False, "", "Le motif de la réinitialisation est obligatoire."
+
+    _mp = mdp_aleatoire()
+    _exp = (datetime.now()
+            + timedelta(hours=_VALIDITE_PROVISOIRE_H)).strftime("%Y-%m-%d %H:%M")
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        _p = "%s" if _is_pg(conn) else "?"
+        cur.execute(
+            f"UPDATE commerciaux SET mdp_hash={_p}, mdp_a_changer=1, "
+            f"mdp_expire_le={_p}, tentatives=0, bloque_jusqua=NULL "
+            f"WHERE code_principal={_p}",
+            (_hash_mdp(_mp), _exp, str(code).strip()))
+        conn.commit(); cur.close(); conn.close()
+    except Exception as e:
+        return False, "", f"Réinitialisation impossible : {e}"
+
+    journaliser_reset(code, nom, demande_par, motif, execute_par, _exp)
+    return True, _mp, (f"Mot de passe provisoire généré, valable "
+                       f"{_VALIDITE_PROVISOIRE_H} heures.")
+
+
+def journal_reset(code=None) -> pd.DataFrame:
+    """Retourne le journal des reinitialisations, filtre sur un compte."""
+    try:
+        conn = get_conn()
+        if code:
+            _p = "%s" if _is_pg(conn) else "?"
+            _df = pd.read_sql(
+                f"SELECT * FROM reset_journal WHERE code_compte={_p} "
+                f"ORDER BY id DESC", conn, params=[str(code)])
+        else:
+            _df = pd.read_sql(
+                "SELECT * FROM reset_journal ORDER BY id DESC", conn)
+        conn.close()
+        return _df
+    except Exception:
+        return pd.DataFrame()
+
+
 def mdp_initial(nom: str, code: str) -> str:
     """Mot de passe provisoire, communicable et unique par commercial.
 
@@ -1484,7 +1599,7 @@ def lire_commercial(code: str):
         _p = "%s" if _is_pg(conn) else "?"
         _cols = ["code_principal","nom","mdp_hash","codes_lies","agence",
                  "telephone","email","actif","mdp_a_changer","tentatives",
-                 "bloque_jusqua","derniere_connex"]
+                 "bloque_jusqua","derniere_connex","mdp_expire_le"]
         cur.execute(f"SELECT {', '.join(_cols)} FROM commerciaux "
                     f"WHERE code_principal = {_p}", (_c,))
         _r = cur.fetchone()
@@ -1521,6 +1636,19 @@ def authentifier_commercial(code: str, mdp: str):
             if datetime.now() < datetime.strptime(str(_bj)[:16], "%Y-%m-%d %H:%M"):
                 return None, (f"Compte temporairement bloqué après plusieurs "
                               f"tentatives. Réessayez après {str(_bj)[11:16]}.")
+        except Exception:
+            pass
+
+    # Un mot de passe provisoire perime n'ouvre plus l'acces : passe le
+    # delai, une nouvelle demande formelle est necessaire. Cela evite
+    # qu'un identifiant communique puis oublie reste exploitable.
+    if _c.get("mdp_a_changer") and _c.get("mdp_expire_le"):
+        try:
+            if datetime.now() > datetime.strptime(
+                    str(_c["mdp_expire_le"])[:16], "%Y-%m-%d %H:%M"):
+                return None, ("Votre mot de passe provisoire a expiré. "
+                              "Demandez une nouvelle réinitialisation "
+                              "à votre chef d'agence.")
         except Exception:
             pass
 
@@ -1571,8 +1699,13 @@ def changer_mdp_commercial(code: str, nouveau: str) -> tuple:
         conn = get_conn(); cur = conn.cursor()
         _p = "%s" if _is_pg(conn) else "?"
         cur.execute(f"UPDATE commerciaux SET mdp_hash={_p}, mdp_a_changer=0, "
-                    f"tentatives=0, bloque_jusqua=NULL WHERE code_principal={_p}",
+                    f"mdp_expire_le=NULL, tentatives=0, bloque_jusqua=NULL "
+                    f"WHERE code_principal={_p}",
                     (_hash_mdp(nouveau), str(code).strip()))
+        # Le provisoire est consomme : on le marque dans le journal.
+        cur.execute(f"UPDATE reset_journal SET utilise=1 "
+                    f"WHERE code_compte={_p} AND utilise=0",
+                    (str(code).strip(),))
         conn.commit(); cur.close(); conn.close()
         return True, "Mot de passe modifié."
     except Exception as e:
@@ -1691,7 +1824,7 @@ def creer_comptes_commerciaux(df_creer, cree_par: str = "") -> tuple:
                         (_cd,))
             if cur.fetchone():
                 continue                       # compte deja cree
-            _mp = mdp_initial(_nom, _cd)
+            _mp = mdp_aleatoire()
             cur.execute(
                 f"INSERT INTO commerciaux (code_principal, nom, mdp_hash, "
                 f"codes_lies, agence, telephone, email, actif, mdp_a_changer, "
@@ -6668,21 +6801,89 @@ elif "Comptes commerciaux" in page:
 
                     if _b2.button("Réinitialiser le mot de passe",
                                   use_container_width=True, key="btn_reset_cmc"):
-                        _mp_new = mdp_initial(_fic["nom"], _cod_c)
-                        try:
-                            _cx3 = get_conn(); _cu3 = _cx3.cursor()
-                            _pp3 = "%s" if _is_pg(_cx3) else "?"
-                            _cu3.execute(
-                                f"UPDATE commerciaux SET mdp_hash={_pp3}, "
-                                f"mdp_a_changer=1, tentatives=0, "
-                                f"bloque_jusqua=NULL WHERE code_principal={_pp3}",
-                                (_hash_mdp(_mp_new), _cod_c))
-                            _cx3.commit(); _cu3.close(); _cx3.close()
-                            st.success(f"Mot de passe réinitialisé : "
-                                       f"**{_mp_new}**. Il devra être changé "
-                                       f"à la prochaine connexion.")
-                        except Exception as _e3:
-                            st.error(f"Réinitialisation impossible : {_e3}")
+                        st.session_state["_reset_cible"] = _cod_c
+
+                    # ── Réinitialisation encadrée ─────────────────────────
+                    # Le mot de passe provisoire est tiré au sort, valable
+                    # 48 heures, et l'opération est tracée : qui a demandé,
+                    # pour quel motif, qui a exécuté.
+                    if st.session_state.get("_reset_cible") == _cod_c:
+                        st.markdown("---")
+                        st.markdown(f"**Réinitialisation — {_fic['nom']}**")
+                        st.warning(
+                            "Ne réinitialisez jamais sur simple appel "
+                            "téléphonique. Exigez une demande écrite du chef "
+                            "d'agence ou une confirmation hiérarchique : un "
+                            "tiers qui obtiendrait ce mot de passe accéderait "
+                            "au portefeuille du commercial.")
+
+                        _dem = st.text_input(
+                            "Demande formulée par", key="reset_dem",
+                            placeholder="Nom du chef d'agence ou du responsable",
+                            help="Personne qui atteste de l'identité du "
+                                 "commercial. Consignée dans le journal.")
+                        _mot = st.selectbox(
+                            "Motif", ["Mot de passe oublié",
+                                      "Compte bloqué après tentatives",
+                                      "Mot de passe provisoire expiré",
+                                      "Suspicion de compromission",
+                                      "Autre motif"],
+                            key="reset_motif")
+                        _mot_l = ""
+                        if _mot == "Autre motif":
+                            _mot_l = st.text_input("Préciser", key="reset_motif_l")
+
+                        _v1, _v2 = st.columns(2)
+                        if _v1.button("Confirmer la réinitialisation",
+                                      type="primary", use_container_width=True,
+                                      key="btn_conf_reset"):
+                            _ok_r, _mp_r, _msg_r = reinitialiser_mdp(
+                                _cod_c, _fic["nom"], _dem,
+                                _mot_l or _mot, user.get("nom", ""))
+                            if _ok_r:
+                                st.session_state["_reset_resultat"] = (
+                                    _cod_c, _fic["nom"], _mp_r)
+                                st.session_state.pop("_reset_cible", None)
+                                st.rerun()
+                            else:
+                                st.error(_msg_r)
+                        if _v2.button("Annuler", use_container_width=True,
+                                      key="btn_ann_reset"):
+                            st.session_state.pop("_reset_cible", None)
+                            st.rerun()
+
+                    # Résultat affiché une seule fois
+                    _res = st.session_state.get("_reset_resultat")
+                    if _res and _res[0] == _cod_c:
+                        st.markdown("---")
+                        st.success(
+                            f"Mot de passe provisoire pour **{_res[1]}** :")
+                        st.code(_res[2], language=None)
+                        st.caption(
+                            f"Valable {_VALIDITE_PROVISOIRE_H} heures. "
+                            f"Communiquez-le de vive voix ou par un canal "
+                            f"maîtrisé, jamais par message non chiffré. "
+                            f"Il devra être changé dès la première connexion.")
+                        if st.button("J'ai noté le mot de passe",
+                                     use_container_width=True, key="btn_ok_reset"):
+                            st.session_state.pop("_reset_resultat", None)
+                            st.rerun()
+
+                    # Journal des réinitialisations du compte
+                    _jr = journal_reset(_cod_c)
+                    if not _jr.empty:
+                        with st.expander(f"Historique des réinitialisations "
+                                         f"({nb_full(len(_jr))})"):
+                            _jd = pd.DataFrame({
+                                "Date":        _jr["execute_le"],
+                                "Demandé par": _jr["demande_par"],
+                                "Motif":       _jr["motif"],
+                                "Exécuté par": _jr["execute_par"],
+                                "Expire le":   _jr["expire_le"],
+                                "Utilisé":     _jr["utilise"].map(
+                                                   {1: "Oui", 0: "Non"})})
+                            st.dataframe(_jd, use_container_width=True,
+                                         hide_index=True)
 
     except Exception as _e_page:
         _erreur_onglet(_e_page, "Comptes commerciaux")
