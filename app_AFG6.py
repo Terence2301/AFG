@@ -541,7 +541,27 @@ _CATEG_APPORTEUR = [
 # Regroupement des partenaires en trois familles, tel qu'il figure dans
 # les etats de la Direction technique : banques, institutions de
 # microfinance, et acceptations (compagnies cedantes).
+# Plage de codes intermediaires reservee aux courtiers dans la
+# nomenclature AFG. Un code compris dans cette fourchette prevaut sur
+# toute lecture du nom : « OLEA BENIN INSURANCE » porte le code 314 et
+# releve du courtage, non de l'acceptation malgre le mot « INSURANCE ».
+CODES_COURTIERS = (300, 325)
+
+
+def est_courtier_code(code) -> bool:
+    """Vrai si le code intermediaire designe un courtier."""
+    _c = str(code or "").strip()
+    if not _c.isdigit():
+        return False
+    return CODES_COURTIERS[0] <= int(_c) <= CODES_COURTIERS[1]
+
+
 _GROUPES_PARTENAIRES = [
+    ("Courtiers", [
+        "COURTAGE", "COURTIER", "BROKER", "OLEA", "ASCOMA",
+        "GRAS SAVOYE", "AON", "MARSH", "WILLIS", "CABINET",
+        "INTERMEDIATION", "ASK ", "SOGEA",
+    ]),
     ("Banques locales", [
         "BANK", "BANQUE", "B.I.I.C", "BIIC", "BOA", "UBA", "ECOBANK",
         "BSIC", "CORIS BANK", "ORABANK", "BGFI", "DIAMOND", "SGB",
@@ -560,13 +580,21 @@ _GROUPES_PARTENAIRES = [
 ]
 
 
-def groupe_partenaire(nom) -> str:
-    """Classe un partenaire dans l'une des trois familles de l'etat.
+def groupe_partenaire(nom, code=None) -> str:
+    """Classe un partenaire dans l'une des familles de l'etat.
 
-    L'ordre de test compte : « CORIS MESO FINANCE » doit tomber en IMF
-    et non en banque, « ATLANTIQUE ASSURANCES » en acceptation et non
-    en banque. Les motifs les plus specifiques sont donc evalues avant.
+    Le code intermediaire, lorsqu'il est fourni, fait autorite pour les
+    courtiers : la plage 300-325 leur est reservee et prime sur toute
+    lecture du nom.
+
+    A defaut de code, l'ordre de test compte : « CORIS MESO FINANCE »
+    doit tomber en IMF et non en banque, « ATLANTIQUE ASSURANCES » en
+    acceptation et non en banque. Les motifs les plus specifiques sont
+    donc evalues avant les motifs generiques.
     """
+    # Le code prime : un courtier reste un courtier quel que soit son nom.
+    if code is not None and est_courtier_code(code):
+        return "Courtiers"
     _n = str(nom or "").upper().strip()
     if not _n or _n in ("NAN", "NONE", "NAT"):
         return "Non classé"
@@ -579,6 +607,12 @@ def groupe_partenaire(nom) -> str:
     # Cas particuliers qui prevalent sur le motif generique
     if "MESO FINANCE" in _n or "AGRIFINANCE" in _n:
         return "IMF"
+    # Un courtier nomme se reconnait avant toute lecture « assurance » :
+    # « OLEA BENIN INSURANCE » ne doit pas devenir une acceptation.
+    for _mc in ("COURTAGE", "COURTIER", "BROKER", "OLEA", "ASCOMA",
+                "GRAS SAVOYE", "AON ", "MARSH", "WILLIS"):
+        if _mc in _n:
+            return "Courtiers"
     if "ASSURANCES VIE" in _n or "ASSUR" in _n and "BANQUE" not in _n:
         if any(m in _n for m in ("BANK", "BANQUE")):
             pass
@@ -5460,7 +5494,10 @@ elif "Partenaires" in page:
         #  acceptations. Pour chacune : evolution mensuelle detaillee,
         #  comparaison a l'exercice precedent, et synthese inter-groupes.
         # ══════════════════════════════════════════════════════════════════════
-        df_pf["_GROUPE"] = df_pf["_RS"].apply(groupe_partenaire)
+        # Le code intermediaire prime pour identifier les courtiers.
+        df_pf["_GROUPE"] = [groupe_partenaire(_n, _c)
+                            for _n, _c in zip(df_pf["_RS"],
+                                              df_pf["_CODE_STR"])]
         df_pf = df_pf[df_pf["_GROUPE"] != "Réseau propre"]
 
         _cak_p = "CHIFAFFA" if "CHIFAFFA" in df_pf.columns else "MONTENCA"
@@ -5485,7 +5522,8 @@ elif "Partenaires" in page:
         _pb = _pb[_pb["_RS"] != ""]
         # Alias lisible : _NOM designe la raison sociale du partenaire.
         _pb["_NOM"] = _pb["_RS"]
-        _pb["_GROUPE"] = _pb["_RS"].apply(groupe_partenaire)
+        _pb["_GROUPE"] = [groupe_partenaire(_n, _c)
+                          for _n, _c in zip(_pb["_RS"], _pb["_CODE_STR"])]
         _pb = _pb[~_pb["_GROUPE"].isin(["Réseau propre", "Non classé"])]
         _pb["_DT"] = pd.to_datetime(_pb[_cdt_p], errors="coerce")
         _pb = _pb.dropna(subset=["_DT"])
@@ -5545,7 +5583,8 @@ elif "Partenaires" in page:
                 _f[_c] = _f[_c].apply(lambda v: fmt_full(v, "") if v else "—")
             return _f.reset_index()
 
-        _grp_ordre = ["Banques locales", "IMF", "Acceptations", "Autres partenaires"]
+        _grp_ordre = ["Courtiers", "Banques locales", "IMF", "Acceptations",
+                      "Autres partenaires"]
         _grp_present = [g for g in _grp_ordre if g in _pb["_GROUPE"].unique()]
 
         # ── Synthèse d'ouverture ─────────────────────────────────────────────
@@ -5564,8 +5603,9 @@ elif "Partenaires" in page:
             f"{nb_full(int(_syn['count'].sum()))} quittances", "", icon="Σ")
 
         st.markdown("")
-        _t_grp, _t_ban, _t_imf, _t_acc, _t_cmp, _t_brut = st.tabs([
-            "Synthèse par groupe", "Banques", "IMF", "Acceptations",
+        _t_grp, _t_crt, _t_ban, _t_imf, _t_acc, _t_cmp, _t_brut = st.tabs([
+            "Synthèse par groupe", "Courtiers", "Banques", "IMF",
+            "Acceptations",
             f"Comparaison {_iso_lbl} / {_iso_lbl_p}", "Données"])
 
         # ══════════════════════════════════════════════════════════════════════
@@ -5782,7 +5822,8 @@ elif "Partenaires" in page:
 
             # Vert, rouge et bleu marine : trois teintes bien distinctes,
             # y compris a l'impression en niveaux de gris.
-            _COUL_FAM = {"Banques locales": "#00AD00",
+            _COUL_FAM = {"Courtiers":       "#CA6F1E",
+                         "Banques locales": "#00AD00",
                          "IMF":             "#FF0000",
                          "Acceptations":    "#002060"}
             _cf = lambda _g: _COUL_FAM.get(_g, "#7A7A7A")
@@ -5839,6 +5880,8 @@ elif "Partenaires" in page:
                    if _pdom >= 65 else
                    f" La répartition entre les canaux reste équilibrée."))
 
+        with _t_crt:
+            _volet_famille("Courtiers", "🤝", "crt")
         with _t_ban:
             _volet_famille("Banques locales", "🏦", "ban")
         with _t_imf:
@@ -9079,8 +9122,10 @@ elif "Rapport PDF" in page:
                         # series — les trois familles de partenaires — sont
                         # ainsi lisibles sans ambiguite, y compris a
                         # l'impression en niveaux de gris.
-                        _MPL = ["#00AD00","#FF0000","#002060","#00B050",
-                                "#7A7A7A","#005C00","#B30000","#3A5A8C"]
+                        # Quatre familles, quatre teintes bien distinctes :
+                        # courtiers, banques, IMF, acceptations.
+                        _MPL = ["#CA6F1E","#00AD00","#FF0000","#002060",
+                                "#00B050","#7A7A7A","#B30000","#3A5A8C"]
 
                         def _espace(v, _p=None):
                             """Sépare les milliers par une espace insécable fine."""
@@ -9974,10 +10019,20 @@ elif "Rapport PDF" in page:
                                        "Octobre","Novembre","Décembre"]
 
                                 if _cd_p4 and _rs_p4:
-                                    _p4 = ca[[_cd_p4, _rs_p4, "CHIFAFFA"]].copy()
+                                    # Le code intermediaire identifie les
+                                    # courtiers : plage 300-325.
+                                    _ci_p4 = next((c for c in ["CODEINTE","CODE_INTER"]
+                                                   if c in ca.columns), None)
+                                    _cols_p4 = [_cd_p4, _rs_p4, "CHIFAFFA"]
+                                    if _ci_p4: _cols_p4.append(_ci_p4)
+                                    _p4 = ca[_cols_p4].copy()
                                     _p4["_NM"] = _p4[_rs_p4].fillna("").astype(str).str.strip()
                                     _p4 = _p4[_p4["_NM"] != ""]
-                                    _p4["_GR"] = _p4["_NM"].apply(groupe_partenaire)
+                                    _p4["_CI"] = (code_propre(_p4[_ci_p4])
+                                                  if _ci_p4 else "")
+                                    _p4["_GR"] = [groupe_partenaire(_n, _c)
+                                                  for _n, _c in zip(_p4["_NM"],
+                                                                    _p4["_CI"])]
                                     _p4 = _p4[~_p4["_GR"].isin(["Réseau propre","Réseau interne","Non classé"])]
                                     _p4["_DT"] = pd.to_datetime(_p4[_cd_p4], errors="coerce")
                                     _p4 = _p4.dropna(subset=["_DT"])
@@ -10022,7 +10077,10 @@ elif "Rapport PDF" in page:
                                 story.append(_sec("4.  PARTENAIRES FINANCIERS"))
                                 story.append(Spacer(1,0.2*cm))
 
-                                _ord4  = ["Banques locales", "IMF", "Acceptations"]
+                                # Ordre de presentation : courtiers, banques,
+                                # IMF, acceptations.
+                                _ord4  = ["Courtiers", "Banques locales",
+                                          "IMF", "Acceptations"]
                                 _pres4 = [g for g in _ord4 if g in _dN4["_GR"].unique()]
 
                                 if _pres4:
