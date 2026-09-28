@@ -59,7 +59,7 @@ section[data-testid="stSidebar"] .stFileUploader label {
 </style>
 """, unsafe_allow_html=True)
 
-import pandas as pd, numpy as np, io, os, tempfile, warnings, hashlib, hmac, sqlite3
+import pandas as pd, numpy as np, io, os, tempfile, warnings, hashlib, hmac, sqlite3, re
 from datetime import datetime, date, timedelta
 import plotly.graph_objects as go
 import plotly.express as px
@@ -114,7 +114,7 @@ PRODUITS = [
     {"code":"220","nom":"ASSURTOUS Vigninou","grp":"Groupe 1","cat":"Décès"},
     {"code":"221","nom":"ASSURTOUS AVIGBO","grp":"Groupe 1","cat":"Décès"},
     {"code":"EP0","nom":"Épargne","grp":"Groupe 2","cat":"Épargne"},
-    {"code":"PA0","nom":"Prévoyance Auto","grp":"Groupe 1","cat":"Décès"},
+    {"code":"PAuto","nom":"Prévoyance Auto","grp":"Groupe 1","cat":"Décès"},
 ]
 
 # ── Barème Prévoyance Auto ────────────────────────────────────────
@@ -556,6 +556,244 @@ def est_courtier_code(code) -> bool:
     return CODES_COURTIERS[0] <= int(_c) <= CODES_COURTIERS[1]
 
 
+# ══════════════════════════════════════════════════════════════════════
+#  Referentiel nominatif des partenaires AFG Assurances Benin Vie
+# ══════════════════════════════════════════════════════════════════════
+# Source : etat des conventions de la Direction technique. Ce referentiel
+# fait autorite sur toute lecture heuristique du nom : il fixe la famille,
+# la nature du partenariat et, lorsqu'il existe, le domaine officiel qui
+# sert a resoudre le logo.
+#
+# Chaque fiche porte une liste de motifs de rapprochement. Les noms issus
+# des bases sont tronques a la saisie (« OLEA BENIN INSURANCE S »,
+# « BANQUE ATLANTIQUE BENI »), un rapprochement par egalite echouerait ;
+# le motif est donc cherche en sous-chaine sur le nom normalise.
+
+_REF_PARTENAIRES = [
+    # ── Banques partenaires ──────────────────────────────────────────
+    ("BANQUE ATLANTIQUE", "Banques locales", "DCE et MA RETRAITE",
+     "banqueatlantique.net", ["BANQUE ATLANTIQUE", "ATLANTIQUE BENIN",
+                              "BANK OF AFRICA ATLANTIQUE"]),
+    ("BIIC", "Banques locales", "DCE, MA PARCELLE et ESTUDIS",
+     "biic.bj", ["BIIC", "BIIC BENIN", "BANQUE INTERNATIONALE POUR"]),
+    ("CORIS BANK", "Banques locales", "DCE",
+     "corisbank.com", ["CORIS BANK"]),
+    ("UBA BANK", "Banques locales", "DCE en coassurance",
+     "ubagroup.com", ["UBA"]),
+    ("BGFI BANK", "Banques locales",
+     "DCE en coassurance et BGFI SECURITE FAMILLE",
+     "bgfi.com", ["BGFI"]),
+    ("ORABANK", "Banques locales",
+     "DCE en coassurance et ORABANK ETUDE",
+     "orabank.net", ["ORABANK", "ORA BANK"]),
+    ("BSIC", "Banques locales",
+     "DCE, BSIC CONSOLATION et BSIC EDUCATION",
+     "bsicbenin.com", ["BSIC"]),
+    ("CBAO", "Banques locales", "DCE", "cbao.sn", ["CBAO"]),
+    ("SONIBANK", "Banques locales", "DCE", "sonibank.net", ["SONIBANK"]),
+    ("BANGE BANK", "Banques locales", "DCE", "bangebank.net",
+     ["BANGE"]),
+
+    # ── Systemes financiers decentralises (IMF) ──────────────────────
+    ("CORIS MESO FINANCE", "IMF", "DCE", "corisbank.com",
+     ["MESO FINANCE", "CORIS MESO"]),
+    ("PADME", "IMF", "DCE en coassurance", "padme.bj", ["PADME"]),
+    ("RENACA", "IMF", "DCE", "", ["RENACA"]),
+    ("FNM", "IMF", "DCE", "fnm.bj",
+     ["FNM", "FONDS NATIONAL DE LA MICROFINANCE"]),
+    ("MDB", "IMF", "DCE", "", ["MDB", "MUTUELLE POUR LE DEVELOPPEMENT"]),
+    ("AFRICA FINANCE", "IMF", "DCE", "", ["AFRICA FINANCE"]),
+    ("BENIN MICROFINANCE", "IMF", "DCE", "",
+     ["BENIN MICROFINANCE", "BENIN MICRO FINANCE"]),
+    ("AGRIFINANCE", "IMF", "DCE", "", ["AGRIFINANCE", "AGRI FINANCE"]),
+    ("CCR-BENIN", "IMF", "DCE", "", ["CCR BENIN", "CCR-BENIN"]),
+
+    # ── Courtiers partenaires ────────────────────────────────────────
+    ("OLEA INSURANCE", "Courtiers", "Produits Corporate et Individuels",
+     "olea.africa", ["OLEA"]),
+    ("ASK GRAS SAVOYE", "Courtiers", "Produits Corporate et Individuels",
+     "askgs-benin.com", ["ASK GRAS SAVOYE", "GRAS SAVOYE", "ASK GSB"]),
+    ("ASCOMA", "Courtiers", "Produits Corporate et Individuels",
+     "ascoma.com", ["ASCOMA"]),
+    ("AFRICA BSI", "Courtiers", "Produits Corporate et Individuels",
+     "", ["AFRICA BSI", "BSI AFRICA"]),
+    ("SERENA COURTAGE", "Courtiers", "Produits Corporate et Individuels",
+     "", ["SERENA"]),
+    ("ASSUR INVEST", "Courtiers", "Produits Corporate et Individuels",
+     "", ["ASSUR INVEST", "ASSURINVEST"]),
+    ("ANEK COURTAGE", "Courtiers", "Produits Corporate et Individuels",
+     "", ["ANEK"]),
+    ("SICAR", "Courtiers", "Produits Corporate et Individuels",
+     "", ["SICAR"]),
+    ("LA PROTECTRICE", "Courtiers", "Produits Corporate et Individuels",
+     "", ["PROTECTRICE"]),
+    ("BENINVEST ASSURANCES", "Courtiers",
+     "Produits Corporate et Individuels", "",
+     ["BENINVEST", "BENIN INVEST"]),
+    ("REIMOKO COURTAGE", "Courtiers", "Produits Corporate et Individuels",
+     "", ["REIMOKO"]),
+    ("SAECO", "Courtiers", "Produits Corporate et Individuels",
+     "", ["SAECO"]),
+    ("GB COURTAGE", "Courtiers", "Produits Corporate et Individuels",
+     "", ["GB COURTAGE"]),
+    ("BECOTRAC", "Courtiers", "Produits Corporate et Individuels",
+     "", ["BECOTRAC"]),
+    ("DJID'S COURTAGE", "Courtiers", "Produits Corporate et Individuels",
+     "", ["DJID"]),
+]
+
+# Couleur d'aplat de l'avatar de repli, stable pour un meme partenaire.
+_TEINTES_AVATAR = ["1A7F6E", "002060", "CA6F1E", "00AD00", "7A3B8C",
+                   "B30000", "3A5A8C", "7A7A7A"]
+
+
+def _sans_accent(txt: str) -> str:
+    """Retire les diacritiques sans dependre de la locale."""
+    import unicodedata as _u
+    return "".join(_c for _c in _u.normalize("NFD", str(txt))
+                   if _u.category(_c) != "Mn")
+
+
+def norm_partenaire(nom) -> str:
+    """Normalise un nom de partenaire pour le rapprochement.
+
+    Majuscules, sans accent, ponctuation ramenee a l'espace, espaces
+    multiples reduits. « B.I.I.C.-Benin » et « BIIC BENIN » convergent.
+    """
+    _n = _sans_accent(str(nom or "")).upper()
+    _n = re.sub(r"[^A-Z0-9]+", " ", _n)
+    _n = re.sub(r"\s+", " ", _n).strip()
+    # Un sigle pointe se disloque a la deponctuation : « B.I.I.C » devient
+    # « B I I C » et ne rejoint plus « BIIC ». Les suites de lettres
+    # isolees sont donc resoudees en un seul jeton.
+    return re.sub(r"\b(?:[A-Z0-9] ){1,7}[A-Z0-9]\b",
+                  lambda _m: _m.group(0).replace(" ", ""), _n)
+
+
+def fiche_partenaire(nom):
+    """Retourne la fiche du referentiel correspondant au nom, ou None.
+
+    Le rapprochement privilegie le motif le plus long : « CORIS MESO
+    FINANCE » doit l'emporter sur « CORIS BANK » pour un nom qui porte
+    les deux amorces.
+    """
+    _n = norm_partenaire(nom)
+    if not _n or _n in ("NAN", "NONE", "NAT"):
+        return None
+    _enc = f" {_n} "
+    _best, _lg = None, 0
+    for _lib, _fam, _prod, _dom, _motifs in _REF_PARTENAIRES:
+        for _m in _motifs:
+            _mn = norm_partenaire(_m)
+            if not _mn:
+                continue
+            # Un sigle court (UBA, BSIC, MDB) est cherche en mot entier :
+            # une sous-chaine nue le ferait surgir dans « TUBA » ou
+            # « RUBAN ». Les motifs longs restent cherches en sous-chaine
+            # pour absorber les noms tronques a la saisie.
+            _ok = (f" {_mn} " in _enc) if len(_mn) <= 5 else (_mn in _n)
+            if _ok and len(_mn) > _lg:
+                _best, _lg = (_lib, _fam, _prod, _dom), len(_mn)
+    if _best is None:
+        return None
+    return {"libelle": _best[0], "famille": _best[1],
+            "produits": _best[2], "domaine": _best[3]}
+
+
+def initiales_partenaire(nom) -> str:
+    """Deux initiales significatives, articles courts ecartes."""
+    _mots = [m for m in norm_partenaire(nom).split()
+             if m not in ("LA", "LE", "LES", "DE", "DU", "DES", "ET",
+                          "SA", "SARL", "S", "BENIN", "BJ")]
+    if not _mots:
+        _mots = norm_partenaire(nom).split() or ["?"]
+    if len(_mots) == 1:
+        return _mots[0][:2]
+    return (_mots[0][:1] + _mots[1][:1])
+
+
+def avatar_partenaire(nom) -> str:
+    """Avatar d'initiales : repli qui ne depend d'aucun site tiers vivant."""
+    _f = fiche_partenaire(nom)
+    _ini = initiales_partenaire(nom)
+    _t = _TEINTES_AVATAR[sum(ord(c) for c in _ini) % len(_TEINTES_AVATAR)]
+    from urllib.parse import quote as _q
+    return ("https://ui-avatars.com/api/?background=" + _t +
+            "&color=fff&bold=true&size=128&length=2&name=" +
+            _q(((_f or {}).get("libelle") or str(nom or "?"))[:24]))
+
+
+def url_logo_partenaire(nom) -> str:
+    """URL du logo : icone du site officiel si connu, avatar sinon.
+
+    Le service d'icones est interroge par le navigateur du poste, jamais
+    par le serveur : l'application reste fonctionnelle derriere un
+    pare-feu, le logo se degradant alors en avatar d'initiales.
+
+    L'ancienne API de logos Clearbit a ete fermee ; le service d'icones
+    retenu ici repond toujours, avec une icone generique a defaut, ce
+    qui evite l'image cassee dans les fiches.
+    """
+    _dom = (fiche_partenaire(nom) or {}).get("domaine", "")
+    if _dom:
+        return f"https://icons.duckduckgo.com/ip3/{_dom}.ico"
+    return avatar_partenaire(nom)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _logos_deposes() -> dict:
+    """Logos televerses par l'administration, indexes par nom normalise.
+
+    Un logo depose fait autorite sur toute source distante : c'est le
+    logo officiel remis par le partenaire, verifie avant depot.
+    """
+    _d = {}
+    try:
+        _d.update(lister_logos_partenaires())
+    except Exception:
+        pass
+    # Un courtier titulaire d'un compte a deja depose son logo a la
+    # creation du compte : il sert egalement de source, sans ecraser un
+    # logo depose expressement au referentiel.
+    try:
+        for _c in lister_courtiers():
+            _lg = _c.get("logo_b64")
+            if not _lg:
+                continue
+            _d.setdefault(norm_partenaire(_c.get("raison_sociale")), _lg)
+            _fi = fiche_partenaire(_c.get("raison_sociale"))
+            if _fi:
+                _d.setdefault(norm_partenaire(_fi["libelle"]), _lg)
+    except Exception:
+        pass
+    return _d
+
+
+def img_logo_partenaire(nom, taille: int = 46) -> str:
+    """Balise <img> du logo d'un partenaire.
+
+    Trois sources, dans cet ordre : le logo televerse en base, l'icone
+    du site officiel, l'avatar d'initiales. L'attribut onerror assure la
+    bascule finale si l'icone distante n'aboutit pas, avec une seule
+    tentative pour eviter toute boucle de rechargement.
+    """
+    from urllib.parse import quote as _q
+    _sty = ('style="border-radius:8px;object-fit:contain;background:#FFFFFF;'
+            'border:1px solid #E3E8EF;padding:3px"')
+    _dep = _logos_deposes()
+    _b64 = (_dep.get(norm_partenaire(nom))
+            or _dep.get(norm_partenaire((fiche_partenaire(nom) or {})
+                                        .get("libelle", ""))))
+    if _b64:
+        return (f'<img src="data:image/png;base64,{_b64}" '
+                f'width="{taille}" height="{taille}" {_sty} alt="logo">')
+    _rep = avatar_partenaire(nom)
+    _src = url_logo_partenaire(nom)
+    return (f'<img src="{_src}" width="{taille}" height="{taille}" {_sty} '
+            f'onerror="this.onerror=null;this.src=\'{_rep}\'" '
+            f'alt="{_q(str(nom or ""))}">')
+
+
 _GROUPES_PARTENAIRES = [
     ("Courtiers", [
         "COURTAGE", "COURTIER", "BROKER", "OLEA", "ASCOMA",
@@ -592,7 +830,13 @@ def groupe_partenaire(nom, code=None) -> str:
     acceptation et non en banque. Les motifs les plus specifiques sont
     donc evalues avant les motifs generiques.
     """
-    # Le code prime : un courtier reste un courtier quel que soit son nom.
+    # Le referentiel nominatif fait autorite : il est renseigne par la
+    # Direction technique et prime sur le code comme sur l'heuristique.
+    _fp = fiche_partenaire(nom)
+    if _fp:
+        return _fp["famille"]
+    # Le code prime ensuite : un courtier reste un courtier quel que
+    # soit son nom.
     if code is not None and est_courtier_code(code):
         return "Courtiers"
     _n = str(nom or "").upper().strip()
@@ -1187,6 +1431,21 @@ CREATE TABLE IF NOT EXISTS courtiers (
 )
 """
 
+# Logos officiels des partenaires du referentiel. Une table dediee plutot
+# qu'un detournement de la table des comptes courtiers : un logo n'est pas
+# un compte, il n'a ni mot de passe ni droit d'acces, et le melanger aux
+# comptes fausserait les effectifs affiches a l'administration.
+_DDL_LOGOS = """
+CREATE TABLE IF NOT EXISTS partenaires_logo (
+    cle           TEXT PRIMARY KEY,
+    libelle       TEXT NOT NULL,
+    logo_b64      TEXT NOT NULL,
+    depose_le     TEXT,
+    depose_par    TEXT
+)
+"""
+
+
 def init_db():
     """Crée toutes les tables (idempotent)."""
     try:
@@ -1197,6 +1456,7 @@ def init_db():
         cur.execute(_DDL_BASES_META if pg else _DDL_BASES_META_SQ)
         cur.execute(_DDL_DATA       if pg else _DDL_DATA_SQ)
         cur.execute(_DDL_COURTIERS)
+        cur.execute(_DDL_LOGOS)
         cur.execute(_DDL_COMMERCIAUX)
         cur.execute(_DDL_RESET_PG if pg else _DDL_RESET)
         cur.execute(_DDL_AUDIT_PG if pg else _DDL_AUDIT)
@@ -1956,6 +2216,51 @@ def lister_courtiers(actifs_seuls: bool = False) -> list:
         return []
 
 
+def enregistrer_logo_partenaire(libelle, logo_b64, depose_par="") -> tuple:
+    """Depose ou remplace le logo officiel d'un partenaire du referentiel."""
+    try:
+        _cle = norm_partenaire(libelle)
+        if not _cle or not logo_b64:
+            return False, "Partenaire ou image manquant."
+        conn = get_conn(); cur = conn.cursor()
+        _p = "%s" if _is_pg(conn) else "?"
+        cur.execute(f"DELETE FROM partenaires_logo WHERE cle = {_p}", (_cle,))
+        cur.execute(
+            f"INSERT INTO partenaires_logo (cle, libelle, logo_b64, "
+            f"depose_le, depose_par) VALUES ({_p}, {_p}, {_p}, {_p}, {_p})",
+            (_cle, str(libelle).strip(), logo_b64,
+             datetime.now().strftime("%Y-%m-%d %H:%M"), str(depose_par)))
+        conn.commit(); cur.close(); conn.close()
+        return True, "Logo enregistré."
+    except Exception as _e:
+        return False, str(_e)
+
+
+def supprimer_logo_partenaire(libelle) -> bool:
+    """Retire le logo depose : l'application revient a l'icone du site."""
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        _p = "%s" if _is_pg(conn) else "?"
+        cur.execute(f"DELETE FROM partenaires_logo WHERE cle = {_p}",
+                    (norm_partenaire(libelle),))
+        conn.commit(); cur.close(); conn.close()
+        return True
+    except Exception:
+        return False
+
+
+def lister_logos_partenaires() -> dict:
+    """Logos deposes, indexes par cle normalisee."""
+    try:
+        conn = get_conn(); cur = conn.cursor()
+        cur.execute("SELECT cle, logo_b64 FROM partenaires_logo")
+        _d = {r[0]: r[1] for r in cur.fetchall()}
+        cur.close(); conn.close()
+        return _d
+    except Exception:
+        return {}
+
+
 def lire_courtier(identifiant: str):
     """Retourne le courtier correspondant à l'identifiant, ou None."""
     try:
@@ -2249,7 +2554,10 @@ def delete_base(base_type: str) -> bool:
     """Supprime une base de la table centralisée."""
     try:
         conn = get_conn()
-        ph   = "%s" if pg else "?" if not _is_pg(conn) else "%s"
+        # Le dialecte est determine avant toute utilisation : la version
+        # precedente lisait « pg » une ligne avant de l'affecter, ce qui
+        # levait une UnboundLocalError avalee par le bloc d'exception —
+        # la suppression d'une base echouait silencieusement.
         pg   = _is_pg(conn)
         ph   = "%s" if pg else "?"
         cur  = conn.cursor()
@@ -5603,9 +5911,10 @@ elif "Partenaires" in page:
             f"{nb_full(int(_syn['count'].sum()))} quittances", "", icon="Σ")
 
         st.markdown("")
-        _t_grp, _t_crt, _t_ban, _t_imf, _t_acc, _t_cmp, _t_brut = st.tabs([
-            "Synthèse par groupe", "Courtiers", "Banques", "IMF",
-            "Acceptations",
+        (_t_grp, _t_ref, _t_crt, _t_ban, _t_imf, _t_acc,
+         _t_cmp, _t_brut) = st.tabs([
+            "Synthèse par groupe", "Référentiel", "Courtiers", "Banques",
+            "IMF", "Acceptations",
             f"Comparaison {_iso_lbl} / {_iso_lbl_p}", "Données"])
 
         # ══════════════════════════════════════════════════════════════════════
@@ -5879,6 +6188,172 @@ elif "Partenaires" in page:
                    f"diversification des sources d'affaires."
                    if _pdom >= 65 else
                    f" La répartition entre les canaux reste équilibrée."))
+
+        # ══════════════════════════════════════════════════════════════════════
+        #  Onglet referentiel : les conventions signees, face a la production
+        # ══════════════════════════════════════════════════════════════════════
+        with _t_ref:
+            section("📇 Référentiel des partenaires",
+                    "CONVENTIONS · FAMILLES · PRODUCTION RAPPROCHÉE",
+                    espace=False)
+
+            # Production de l'exercice, agregee par fiche du referentiel.
+            # Le rapprochement se fait sur la fiche et non sur le libelle
+            # brut : plusieurs graphies d'un meme partenaire (« BANQUE
+            # ATLANTIQUE BENI », « ATLANTIQUE BENIN ») se cumulent alors
+            # sur une seule ligne, ce qu'un regroupement par nom rate.
+            _pr_ref = {}
+            _dN_ref = _pb[_pb["_AN"] == _an_ref]
+            if not _dN_ref.empty:
+                for _nm, _v in (_dN_ref.groupby("_NOM")[_cak_p]
+                                .sum().items()):
+                    _fi = fiche_partenaire(_nm)
+                    if _fi:
+                        _k = _fi["libelle"]
+                        _pr_ref[_k] = _pr_ref.get(_k, 0.0) + float(_v)
+
+            _lig_ref = []
+            for _lib, _fam, _prod, _dom, _mot in _REF_PARTENAIRES:
+                _lig_ref.append({
+                    "Partenaire": _lib, "Famille": _fam,
+                    "Produits conventionnés": _prod,
+                    "Production " + str(_an_ref): _pr_ref.get(_lib, 0.0),
+                    "Actif": "Oui" if _pr_ref.get(_lib, 0.0) > 0 else "Non",
+                })
+            _df_ref = pd.DataFrame(_lig_ref)
+
+            _nb_ref  = len(_df_ref)
+            _nb_actf = int((_df_ref["Actif"] == "Oui").sum())
+            _prod_rf = float(_df_ref["Production " + str(_an_ref)].sum())
+            _tot_exo = float(_dN_ref[_cak_p].sum()) if not _dN_ref.empty else 0.0
+
+            _r1, _r2, _r3, _r4 = st.columns(4)
+            kpi(_r1, "Conventions au référentiel", nb_full(_nb_ref),
+                "banques, SFD et courtiers", "teal", icon="📇")
+            kpi(_r2, f"Partenaires actifs {_an_ref}", nb_full(_nb_actf),
+                f"{_nb_actf/max(_nb_ref,1)*100:.0f} % du référentiel",
+                "blue", icon="✅")
+            kpi(_r3, "Production rapprochée", fmt_full(_prod_rf),
+                f"{_prod_rf/max(_tot_exo,1)*100:.1f} % de la production "
+                "partenaires", "", icon="💰")
+            kpi(_r4, "Conventions sans production", nb_full(_nb_ref - _nb_actf),
+                "à relancer par la Direction technique", "amber", icon="⚠️")
+
+            st.markdown("")
+            _fam_ref = st.radio(
+                "Famille", ["Toutes", "Courtiers", "Banques locales", "IMF"],
+                horizontal=True, key="ref_part_fam")
+            _vue_ref = (_df_ref if _fam_ref == "Toutes"
+                        else _df_ref[_df_ref["Famille"] == _fam_ref])
+            _vue_ref = _vue_ref.sort_values(
+                ["Famille", "Production " + str(_an_ref)],
+                ascending=[True, False])
+
+            # Fiches illustrees : le logo aide a l'identification visuelle
+            # lors des revues de portefeuille avec les commerciaux.
+            _cols_r = st.columns(3)
+            for _i_r, (_, _rw) in enumerate(_vue_ref.iterrows()):
+                _cel = _cols_r[_i_r % 3]
+                _pv  = float(_rw["Production " + str(_an_ref)])
+                _bdg = ("#00AD00" if _pv > 0 else "#7A7A7A")
+                _txt = fmt_full(_pv) if _pv > 0 else "Aucune production"
+                _cel.markdown(
+                    f"""<div style="border:1px solid #E3E8EF;border-radius:12px;
+                        padding:12px 14px;margin-bottom:12px;background:#FFFFFF;
+                        display:flex;gap:12px;align-items:flex-start">
+                      {img_logo_partenaire(_rw['Partenaire'], 46)}
+                      <div style="flex:1;min-width:0">
+                        <div style="font-weight:700;font-size:.92rem;
+                             color:#0F2B46;line-height:1.2">
+                             {_rw['Partenaire']}</div>
+                        <div style="font-size:.72rem;color:#7A7A7A;
+                             margin:2px 0 4px">{_rw['Famille']}</div>
+                        <div style="font-size:.74rem;color:#33475B;
+                             line-height:1.3">{_rw['Produits conventionnés']}</div>
+                        <div style="font-size:.78rem;font-weight:700;
+                             color:{_bdg};margin-top:6px">{_txt}</div>
+                      </div>
+                    </div>""",
+                    unsafe_allow_html=True)
+
+            # Depot des logos officiels. Un logo remis par le partenaire
+            # prime sur toute icone recuperee en ligne : il est verifie
+            # avant depot et reste disponible hors connexion.
+            if is_admin(user):
+                with st.expander("🖼️ Déposer le logo officiel d'un partenaire",
+                                 expanded=False):
+                    _cl1, _cl2 = st.columns([2, 3])
+                    _cible = _cl1.selectbox(
+                        "Partenaire",
+                        [r[0] for r in _REF_PARTENAIRES],
+                        key="ref_logo_cible")
+                    _fic = _cl2.file_uploader(
+                        "Fichier image (PNG ou JPG, 256 px conseillés)",
+                        type=["png", "jpg", "jpeg"], key="ref_logo_fic")
+                    _ap1, _ap2 = st.columns([1, 4])
+                    _ap1.markdown(img_logo_partenaire(_cible, 64),
+                                  unsafe_allow_html=True)
+                    _ap2.caption(
+                        "Aperçu du logo actuellement servi pour ce "
+                        "partenaire. Sans dépôt, l'application utilise "
+                        "l'icône du site officiel puis, à défaut, un "
+                        "avatar d'initiales.")
+                    _bl1, _bl2 = st.columns(2)
+                    if _bl2.button("Retirer le logo déposé",
+                                   key="ref_logo_del",
+                                   use_container_width=True):
+                        supprimer_logo_partenaire(_cible)
+                        _logos_deposes.clear()
+                        st.info(f"Logo retiré pour {_cible}.")
+                        st.rerun()
+                    if _fic is not None and _bl1.button(
+                            "Enregistrer le logo", key="ref_logo_ok",
+                            use_container_width=True):
+                        try:
+                            import base64 as _b64m
+                            _b = _b64m.b64encode(_fic.getvalue()).decode()
+                            _ok, _msg = enregistrer_logo_partenaire(
+                                _cible, _b, user.get("nom", ""))
+                            _logos_deposes.clear()
+                            if _ok:
+                                st.success(f"Logo enregistré pour {_cible}.")
+                                st.rerun()
+                            else:
+                                st.error(f"Échec de l'enregistrement : {_msg}")
+                        except Exception as _e_lg:
+                            st.error(f"Erreur de dépôt du logo : {_e_lg}")
+
+            st.markdown("")
+            st.markdown("**Tableau du référentiel**")
+            _aff_ref = _vue_ref.copy()
+            _aff_ref["Production " + str(_an_ref)] = (
+                _aff_ref["Production " + str(_an_ref)].map(fmt_full))
+            st.dataframe(_aff_ref, use_container_width=True, hide_index=True)
+
+            # Partenaires presents dans les bases mais absents du
+            # referentiel : c'est la liste de travail de la Direction
+            # technique pour completer les conventions.
+            if not _dN_ref.empty:
+                _hors = []
+                for _nm, _v in (_dN_ref.groupby("_NOM")[_cak_p]
+                                .sum().sort_values(ascending=False).items()):
+                    if fiche_partenaire(_nm) is None and float(_v) > 0:
+                        _hors.append({"Partenaire (base)": _nm,
+                                      "Famille déduite": groupe_partenaire(_nm),
+                                      "Production": float(_v)})
+                if _hors:
+                    with st.expander(
+                            f"⚠️ {len(_hors)} partenaires produisant hors "
+                            "référentiel", expanded=False):
+                        st.caption(
+                            "Ces intermédiaires apparaissent dans les bases "
+                            "sans figurer au référentiel des conventions. "
+                            "Leur famille ci-dessous est déduite du nom et "
+                            "reste à valider.")
+                        _dh = pd.DataFrame(_hors)
+                        _dh["Production"] = _dh["Production"].map(fmt_full)
+                        st.dataframe(_dh, use_container_width=True,
+                                     hide_index=True)
 
         with _t_crt:
             _volet_famille("Courtiers", "🤝", "crt")
