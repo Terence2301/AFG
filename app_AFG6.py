@@ -114,7 +114,7 @@ PRODUITS = [
     {"code":"220","nom":"ASSURTOUS Vigninou","grp":"Groupe 1","cat":"Décès"},
     {"code":"221","nom":"ASSURTOUS AVIGBO","grp":"Groupe 1","cat":"Décès"},
     {"code":"EP0","nom":"Épargne","grp":"Groupe 2","cat":"Épargne"},
-    {"code":"PAuto","nom":"Prévoyance Auto","grp":"Groupe 1","cat":"Décès"},
+    {"code":"PA0","nom":"Prévoyance Auto","grp":"Groupe 1","cat":"Décès"},
 ]
 
 # ── Barème Prévoyance Auto ────────────────────────────────────────
@@ -5875,9 +5875,18 @@ elif "Partenaires" in page:
                    f"**{_iso_lbl_p}**.")
 
         def _tableau_mensuel(_d, _cle):
-            """Croise partenaires en lignes et mois en colonnes."""
+            """Croise partenaires en lignes et mois en colonnes.
+
+            Sur un perimetre vide, renvoie une table VIDE MAIS COMPLETE :
+            douze colonnes de mois et la colonne Total. La version
+            precedente renvoyait un DataFrame nu, sans colonnes ; tout
+            acces ulterieur a `.loc[groupe, mois]` ou a `["Total"]`
+            levait alors une KeyError qui interrompait l'onglet apres
+            les indicateurs.
+            """
             if _d.empty:
-                return pd.DataFrame()
+                return pd.DataFrame(columns=_MOIS_AB + ["Total"],
+                                    dtype=float)
             _t = (_d.pivot_table(index=_cle, columns="_MOI", values=_cak_p,
                                  aggfunc="sum", fill_value=0)
                     .reindex(columns=range(1,13), fill_value=0))
@@ -5909,6 +5918,39 @@ elif "Partenaires" in page:
                 ["blue","teal","amber","",""][_i % 5], icon="🏦")
         kpi(_sc[-1], f"Total {_an_ref}", fmt_full(_tot_N),
             f"{nb_full(int(_syn['count'].sum()))} quittances", "", icon="Σ")
+
+        # ── Panneau de diagnostic d'affichage ────────────────────────────
+        # Deux causes possibles a une zone de graphique restee blanche :
+        # soit le perimetre ne contient aucune ligne, soit la couche
+        # graphique du navigateur ne s'est pas chargee. Ce panneau tranche
+        # d'un coup d'oeil : les effectifs disent la premiere, le
+        # graphique temoin dit la seconde.
+        with st.expander("🔧 Diagnostic d'affichage des graphiques",
+                         expanded=False):
+            _d1, _d2, _d3 = st.columns(3)
+            _d1.metric("Lignes hors période", nb_full(len(_pb)))
+            _d2.metric(f"Lignes sur {_iso_lbl}", nb_full(int(_msk_N.sum())
+                       if hasattr(_msk_N, "sum") else 0))
+            _d3.metric("Familles détectées", nb_full(len(_grp_present)))
+            st.caption(
+                f"Période d'analyse : **{_b_deb:%d/%m/%Y} → {_b_fin:%d/%m/%Y}** "
+                f"· exercice de référence **{_an_ref}** · exercice précédent "
+                f"**{_an_pre if _an_pre else 'aucun'}** · colonne de date "
+                f"**{_cdt_p}** · colonne de montant **{_cak_p}**.")
+            _f_diag = go.Figure(go.Bar(
+                x=["A", "B", "C"], y=[3, 1, 2], marker_color=GREEN))
+            fig_style(_f_diag, 200, "Graphique témoin")
+            st.plotly_chart(_f_diag, use_container_width=True,
+                            key="fig_diag_partenaires")
+            st.caption(
+                "Si ce graphique témoin n'apparaît pas alors que les "
+                "indicateurs s'affichent, la bibliothèque graphique n'est "
+                "pas chargée par le navigateur : videz le cache du "
+                "navigateur (Ctrl+Maj+R) ou vérifiez que le réseau de "
+                "l'entreprise n'en bloque pas le téléchargement. Si le "
+                "témoin apparaît mais que les autres graphiques sont "
+                "absents, c'est le périmètre qui est vide : élargissez la "
+                "période d'analyse dans le panneau latéral.")
 
         st.markdown("")
         (_t_grp, _t_ref, _t_crt, _t_ban, _t_imf, _t_acc,
@@ -6123,71 +6165,84 @@ elif "Partenaires" in page:
         #  Onglet 1 : synthese des trois groupes
         # ══════════════════════════════════════════════════════════════════════
         with _t_grp:
-            _tg = _tableau_mensuel(_dN, "_GROUPE").reindex(_grp_present).fillna(0)
+            # Le perimetre de la synthese est la PERIODE d'analyse, pas
+            # l'exercice : une semaine ou un mois sans production
+            # partenaire vide legitimement la table. On le dit, plutot
+            # que d'afficher des graphiques plats ou de lever une erreur.
+            if _dN.empty:
+                bloc_vide(
+                    f"Aucune quittance partenaire sur la période "
+                    f"{_iso_lbl}. Les graphiques de cet onglet suivent la "
+                    f"période d'analyse choisie dans le panneau latéral : "
+                    f"élargissez-la (exercice {_an_ref}) pour les afficher.",
+                    "🏦")
+            else:
 
-            st.markdown(f"**Production mensuelle par groupe · {_an_ref}**")
-            st.dataframe(_formater(_tg).rename(columns={"_GROUPE": "Groupe"}),
-                         use_container_width=True, hide_index=True)
+                _tg = _tableau_mensuel(_dN, "_GROUPE").reindex(_grp_present).fillna(0)
 
-            # Vert, rouge et bleu marine : trois teintes bien distinctes,
-            # y compris a l'impression en niveaux de gris.
-            _COUL_FAM = {"Courtiers":       "#CA6F1E",
-                         "Banques locales": "#00AD00",
-                         "IMF":             "#FF0000",
-                         "Acceptations":    "#002060"}
-            _cf = lambda _g: _COUL_FAM.get(_g, "#7A7A7A")
+                st.markdown(f"**Production mensuelle par groupe · {_an_ref}**")
+                st.dataframe(_formater(_tg).rename(columns={"_GROUPE": "Groupe"}),
+                             use_container_width=True, hide_index=True)
 
-            _c1, _c2 = st.columns([1.4, 1])
-            with _c1:
-                _fg = go.Figure()
+                # Vert, rouge et bleu marine : trois teintes bien distinctes,
+                # y compris a l'impression en niveaux de gris.
+                _COUL_FAM = {"Courtiers":       "#CA6F1E",
+                             "Banques locales": "#00AD00",
+                             "IMF":             "#FF0000",
+                             "Acceptations":    "#002060"}
+                _cf = lambda _g: _COUL_FAM.get(_g, "#7A7A7A")
+
+                _c1, _c2 = st.columns([1.4, 1])
+                with _c1:
+                    _fg = go.Figure()
+                    for _g in _grp_present:
+                        _fg.add_scatter(x=_MOIS_AB, y=_tg.loc[_g, _MOIS_AB].tolist(),
+                                        mode="lines+markers", name=_g,
+                                        line=dict(color=_cf(_g), width=2.4),
+                                        marker=dict(size=7, color=_cf(_g)),
+                                        hovertemplate="%{fullData.name}<br>"
+                                                      "%{x} : %{y:,.0f} FCFA<extra></extra>")
+                    _fg.update_layout(yaxis=dict(title="CA (FCFA)"),
+                                      legend=dict(orientation="h", y=-0.2))
+                    fig_style(_fg, 380, f"Évolution mensuelle des trois groupes · {_an_ref}")
+                    st.plotly_chart(_fg, use_container_width=True, key="fig_grp_evo")
+                with _c2:
+                    _fp = go.Figure(go.Pie(
+                        labels=_grp_present, values=_tg["Total"].tolist(), hole=.44,
+                        marker=dict(colors=[_cf(_g) for _g in _grp_present]),
+                        textinfo="percent", textfont=dict(size=11, color="white"),
+                        hovertemplate="%{label}<br>%{value:,.0f} FCFA<br>"
+                                      "%{percent}<extra></extra>"))
+                    _fp.update_layout(legend=dict(font=dict(size=10)))
+                    fig_style(_fp, 380, "Poids de chaque groupe")
+                    st.plotly_chart(_fp, use_container_width=True, key="fig_grp_part")
+
+                # Barres empilees mensuelles
+                _fs = go.Figure()
                 for _g in _grp_present:
-                    _fg.add_scatter(x=_MOIS_AB, y=_tg.loc[_g, _MOIS_AB].tolist(),
-                                    mode="lines+markers", name=_g,
-                                    line=dict(color=_cf(_g), width=2.4),
-                                    marker=dict(size=7, color=_cf(_g)),
-                                    hovertemplate="%{fullData.name}<br>"
-                                                  "%{x} : %{y:,.0f} FCFA<extra></extra>")
-                _fg.update_layout(yaxis=dict(title="CA (FCFA)"),
+                    _fs.add_bar(x=_MOIS_AB, y=_tg.loc[_g, _MOIS_AB].tolist(),
+                                name=_g, marker_color=_cf(_g))
+                _fs.update_layout(barmode="stack", yaxis=dict(title="CA (FCFA)"),
                                   legend=dict(orientation="h", y=-0.2))
-                fig_style(_fg, 380, f"Évolution mensuelle des trois groupes · {_an_ref}")
-                st.plotly_chart(_fg, use_container_width=True, key="fig_grp_evo")
-            with _c2:
-                _fp = go.Figure(go.Pie(
-                    labels=_grp_present, values=_tg["Total"].tolist(), hole=.44,
-                    marker=dict(colors=[_cf(_g) for _g in _grp_present]),
-                    textinfo="percent", textfont=dict(size=11, color="white"),
-                    hovertemplate="%{label}<br>%{value:,.0f} FCFA<br>"
-                                  "%{percent}<extra></extra>"))
-                _fp.update_layout(legend=dict(font=dict(size=10)))
-                fig_style(_fp, 380, "Poids de chaque groupe")
-                st.plotly_chart(_fp, use_container_width=True, key="fig_grp_part")
+                fig_style(_fs, 340, f"Composition mensuelle de la production · {_an_ref}")
+                st.plotly_chart(_fs, use_container_width=True, key="fig_grp_stack")
 
-            # Barres empilees mensuelles
-            _fs = go.Figure()
-            for _g in _grp_present:
-                _fs.add_bar(x=_MOIS_AB, y=_tg.loc[_g, _MOIS_AB].tolist(),
-                            name=_g, marker_color=_cf(_g))
-            _fs.update_layout(barmode="stack", yaxis=dict(title="CA (FCFA)"),
-                              legend=dict(orientation="h", y=-0.2))
-            fig_style(_fs, 340, f"Composition mensuelle de la production · {_an_ref}")
-            st.plotly_chart(_fs, use_container_width=True, key="fig_grp_stack")
-
-            # Lecture de la structure
-            _dom = _tg["Total"].idxmax()
-            _pdom = _tg.loc[_dom, "Total"] / max(_tot_N, 1) * 100
-            _mois_pleins = [m for m in _MOIS_AB if _tg[m].sum() > 0]
-            _pic_g = max(_mois_pleins, key=lambda m: _tg[m].sum()) if _mois_pleins else "—"
-            st.info(
-                f"Sur {_an_ref}, la production repose principalement sur "
-                f"**{_dom}** avec **{_pdom:.1f} %** du total, soit "
-                f"**{fmt_full(_tg.loc[_dom,'Total'])}**. Le mois de "
-                f"**{str(_pic_g)}** concentre la production la plus élevée "
-                f"({fmt_full(_tg[_pic_g].sum()) if _pic_g != '—' else '—'}), "
-                f"tous groupes confondus."
-                + (f" La concentration sur un seul canal appelle une "
-                   f"diversification des sources d'affaires."
-                   if _pdom >= 65 else
-                   f" La répartition entre les canaux reste équilibrée."))
+                # Lecture de la structure
+                _dom = _tg["Total"].idxmax()
+                _pdom = _tg.loc[_dom, "Total"] / max(_tot_N, 1) * 100
+                _mois_pleins = [m for m in _MOIS_AB if _tg[m].sum() > 0]
+                _pic_g = max(_mois_pleins, key=lambda m: _tg[m].sum()) if _mois_pleins else "—"
+                st.info(
+                    f"Sur {_an_ref}, la production repose principalement sur "
+                    f"**{_dom}** avec **{_pdom:.1f} %** du total, soit "
+                    f"**{fmt_full(_tg.loc[_dom,'Total'])}**. Le mois de "
+                    f"**{str(_pic_g)}** concentre la production la plus élevée "
+                    f"({fmt_full(_tg[_pic_g].sum()) if _pic_g != '—' else '—'}), "
+                    f"tous groupes confondus."
+                    + (f" La concentration sur un seul canal appelle une "
+                       f"diversification des sources d'affaires."
+                       if _pdom >= 65 else
+                       f" La répartition entre les canaux reste équilibrée."))
 
         # ══════════════════════════════════════════════════════════════════════
         #  Onglet referentiel : les conventions signees, face a la production
