@@ -2983,26 +2983,27 @@ def filter_df(df, dcol, sel: date, mode: str) -> pd.DataFrame:
     return df[mask.fillna(False)].copy()
 
 def filter_sin_exo(df, sel: date, mode: str) -> pd.DataFrame:
+    """Filtre les prestations sur la periode d'analyse.
+
+    « Date Création » fait foi. La version precedente filtrait sur
+    l'exercice sinistre : un trimestre ou un semestre y ramenaient
+    l'annee entiere, puisque l'exercice n'est pas decoupe en trimestres.
+    Un dossier survenu en 2019 mais enregistre en 2025 relevait alors de
+    2019, alors que le tableau de bord suit l'activite de gestion.
+
+    L'exercice de survenance garde sa place la ou il est pertinent :
+    le triangle de developpement, qui par construction croise l'annee de
+    survenance et l'annee de reglement.
     """
-    Pour les prestations, filtre par exercice sinistre (annee/sem/trim)
-    ou par Date Survenance (jour/mois).
-    Exercice sinistre = colonne ANNEE_SIN (int).
-    """
-    if df is None or df.empty: return pd.DataFrame()
-    if mode in ("jour","mois"):
-        return filter_df(df, "Date Survenance", sel, mode)
-    # Pour trimestre/semestre/annee  filtre sur ANNEE_SIN
-    if "ANNEE_SIN" not in df.columns: return df
-    yr = sel.year
-    if mode == "annee":
-        mask = df["ANNEE_SIN"] == yr
-    elif mode == "trim":
-        mask = df["ANNEE_SIN"] == yr   # exercice pas découpé en trim  filtre annuel
-    elif mode == "sem":
-        mask = df["ANNEE_SIN"] == yr
-    else:
-        mask = df["ANNEE_SIN"] == yr
-    return df[mask.fillna(False)].copy()
+    if df is None or df.empty:
+        return pd.DataFrame()
+    _cd = col_date_sin(df)
+    if _cd is not None:
+        return filter_df(df, _cd, sel, mode)
+    # Repli : sans date de creation, on retombe sur l'exercice sinistre.
+    if "ANNEE_SIN" not in df.columns:
+        return df
+    return df[(df["ANNEE_SIN"] == sel.year).fillna(False)].copy()
 
 # ─────────────────────────────────────────────
 #  SESSION STATE
@@ -7067,26 +7068,56 @@ elif "Sinistres" in page:
                 alert("Colonne 'Nature Sinistre' ou 'Reglement Total' absente du fichier.", "warn")
 
         with t_e:
-            if "ANNEE_SIN" in sin.columns:
-                evo = _safe_groupby(sin, "ANNEE_SIN",
-                    {"Nb":("ANNEE_SIN","count"),
+            # L'axe des annees est bati sur « Date Création », conformement
+            # au filtre de periode. La version precedente agregait sur
+            # l'exercice sinistre et bornait l'affichage a 1997-2025 en
+            # dur : toute donnee posterieure, 2026 comprise, disparaissait
+            # du graphique sans aucun message.
+            _c_dc_evo = col_date_sin(sin)
+            _base_evo = sin.copy()
+            if _c_dc_evo is not None:
+                _base_evo["_AN_EVO"] = pd.to_datetime(
+                    _base_evo[_c_dc_evo], errors="coerce").dt.year
+                _lib_evo = "date de création"
+            elif "ANNEE_SIN" in _base_evo.columns:
+                _base_evo["_AN_EVO"] = _base_evo["ANNEE_SIN"]
+                _lib_evo = "exercice de survenance"
+            else:
+                _base_evo["_AN_EVO"] = None
+                _lib_evo = ""
+            _base_evo = _base_evo.dropna(subset=["_AN_EVO"])
+            if not _base_evo.empty:
+                _base_evo["_AN_EVO"] = _base_evo["_AN_EVO"].astype(int)
+                evo = _safe_groupby(_base_evo, "_AN_EVO",
+                    {"Nb":("_AN_EVO","count"),
                      "Réglé":(_c_regle_,"sum") if _c_regle_ else None,
                      "SAP":(_c_sap_,"sum") if _c_sap_ else None})
                 if "Réglé" not in evo.columns: evo["Réglé"] = 0
                 if "SAP"   not in evo.columns: evo["SAP"]   = 0
-                evo=evo[evo["ANNEE_SIN"].between(1997,2025)].sort_values("ANNEE_SIN")
+                # Bornes lues dans les donnees, jamais ecrites en dur :
+                # l'amplitude suit les fichiers charges.
+                _an_min = int(evo["_AN_EVO"].min())
+                _an_max = int(evo["_AN_EVO"].max())
+                evo = evo.sort_values("_AN_EVO")
+                evo = evo.rename(columns={"_AN_EVO": "Année"})
                 fig=make_subplots(specs=[[{"secondary_y":True}]])
-                fig.add_bar(x=evo["ANNEE_SIN"].astype(str),y=evo["Réglé"],name="Réglé",marker_color=RED,opacity=.82)
-                fig.add_bar(x=evo["ANNEE_SIN"].astype(str),y=evo["SAP"],name="SAP",marker_color=AMBER,opacity=.82)
-                fig.add_scatter(x=evo["ANNEE_SIN"].astype(str),y=evo["Nb"],name="Nb dossiers",
+                fig.add_bar(x=evo["Année"].astype(str),y=evo["Réglé"],name="Réglé",marker_color=RED,opacity=.82)
+                fig.add_bar(x=evo["Année"].astype(str),y=evo["SAP"],name="SAP",marker_color=AMBER,opacity=.82)
+                fig.add_scatter(x=evo["Année"].astype(str),y=evo["Nb"],name="Nb dossiers",
                     line=dict(color=GREEN,width=2.5),mode="lines+markers",secondary_y=True)
                 fig.update_layout(barmode="stack")
                 fig.update_yaxes(title_text="Montant (FCFA)",secondary_y=False)
                 fig.update_yaxes(title_text="Nb dossiers",secondary_y=True,showgrid=False)
-                fig_style(fig,420,"📈 Sinistres par exercice 1997–2025"); st.plotly_chart(fig,use_container_width=True)
+                fig_style(fig, 420,
+                          f"📈 Sinistres par année de {_lib_evo} · "
+                          f"{_an_min}–{_an_max}")
+                st.plotly_chart(fig,use_container_width=True)
                 a,b=st.columns(2)
                 a.download_button("📥 CSV",dl_csv(evo),"evo_sin.csv","text/csv",use_container_width=True,key="dl_evo_sin")
                 b.download_button("📥 Excel",dl_xlsx(evo),"evo_sin.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True,key="dl_evo_sin_xl")
+            else:
+                alert("Aucune date exploitable dans la base des prestations : "
+                      "ni « Date Création », ni exercice de survenance.", "warn")
 
         with t_p:
             # Détection robuste du nom de colonne (accents variables selon encodage)
