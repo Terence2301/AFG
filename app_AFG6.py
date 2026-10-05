@@ -2525,29 +2525,77 @@ def save_base(base_type: str, df: pd.DataFrame,
         st.error(f"❌ Erreur sauvegarde base {base_type} : {e}")
         return False
 
-def load_base(base_type: str):
-    """
-    Charge un DataFrame depuis la base centralisée.
-    Retourne (DataFrame, metadata_dict) ou (None, None) si absent.
-    Strip systématique des noms de colonnes après désérialisation Parquet.
+def _horodatage_base(base_type: str):
+    """Date de derniere mise a jour d'une base, sans lire les donnees.
+
+    Sert de cle de cache : tant qu'elle ne change pas, la base en cache
+    est valide. Deux allers-retours courts valent mieux qu'un transfert
+    de plusieurs dizaines de megaoctets inutile.
     """
     try:
         conn = get_conn()
-        pg   = _is_pg(conn)
-        ph   = "%s" if pg else "?"
-        cur  = conn.cursor()
-        cur.execute(f"SELECT data_parquet, updated_at FROM bases_data WHERE base_type={ph}",
+        _p = "%s" if _is_pg(conn) else "?"
+        cur = conn.cursor()
+        cur.execute(f"SELECT updated_at FROM bases_data WHERE base_type={_p}",
                     [base_type])
+        _r = cur.fetchone()
+        cur.close(); conn.close()
+        return str(_r[0]) if _r else None
+    except Exception:
+        return None
+
+
+@st.cache_resource(show_spinner=False, max_entries=6)
+def _lire_base_cachee(base_type: str, _version: str):
+    """Telecharge et deserialise une base, une seule fois par serveur.
+
+    Sans ce cache, chaque session rouvrait la connexion, retelechargeait
+    plusieurs dizaines de megaoctets de Parquet et redeserialisait des
+    centaines de milliers de lignes. Le premier utilisateur attendait,
+    tous les suivants attendaient autant, et un visiteur qui actualisait
+    la page repartait de zero : les ecrans paraissaient vides le temps du
+    rechargement. Le cache est partage par toutes les sessions du serveur
+    et `_version` l'invalide des qu'une base est rechargee.
+    """
+    try:
+        conn = get_conn()
+        _p = "%s" if _is_pg(conn) else "?"
+        cur = conn.cursor()
+        cur.execute(
+            f"SELECT data_parquet, updated_at FROM bases_data "
+            f"WHERE base_type={_p}", [base_type])
         row = cur.fetchone()
         cur.close(); conn.close()
         if not row:
             return None, None
         df = _parquet_bytes_to_df(row[0])
-        # Strip systématique des noms de colonnes (espaces parasites dans fichiers AFG)
+        # Strip systematique des noms de colonnes (espaces parasites)
         df.columns = [str(c).strip() for c in df.columns]
-        meta = {"updated_at": row[1]}
-        return df, meta
-    except Exception as e:
+        return df, {"updated_at": row[1]}
+    except Exception:
+        return None, None
+
+
+def load_base(base_type: str):
+    """
+    Charge un DataFrame depuis la base centralisée.
+    Retourne (DataFrame, metadata_dict) ou (None, None) si absent.
+    Le resultat est servi depuis le cache du serveur lorsqu'il y est deja.
+    """
+    _v = _horodatage_base(base_type)
+    if _v is None:
+        return None, None
+    try:
+        _df, _meta = _lire_base_cachee(base_type, _v)
+        if _df is None:
+            return None, None
+        # Le cache sert un objet unique a toutes les sessions : une
+        # conversion de colonne faite par un utilisateur se propagerait
+        # aux autres. Chaque session recoit donc sa copie. Ce qui est
+        # mutualise est le transfert reseau et la deserialisation, c'est
+        # a dire tout le temps d'attente ; la copie, elle, est immediate.
+        return _df.copy(), dict(_meta or {})
+    except Exception:
         return None, None
 
 def delete_base(base_type: str) -> bool:
@@ -2608,8 +2656,13 @@ def codes_utilisateur(user_dict: dict) -> list:
     _c += [str(x).strip() for x in (user_dict.get("codes_lies") or [])]
     return [x for x in _c if x]
 UPLOAD_ROLES    = {"PDG", "ACTUAIRE"}   # peuvent charger PF, CA, Prestations
-# Rôles autorisés à voir les onglets analytiques
-ANALYTICS_ROLES = {"PDG", "ACTUAIRE"}   # voient le dashboard complet
+# Roles autorises a voir les onglets analytiques.
+# Le jeu precedent se limitait a PDG et ACTUAIRE, alors que DG et ADMIN
+# figurent dans VUE_GLOBALE : ces deux profils etaient donc habilites a
+# voir l'ensemble des contrats sans qu'aucune base ne soit chargee dans
+# leur session. Resultat : des ecrans qui affichaient leurs en-tetes et
+# leurs indicateurs a zero, puis plus rien. Les deux listes sont alignees.
+ANALYTICS_ROLES = {"PDG", "DG", "ADMIN", "ACTUAIRE"}
 
 def is_admin(user_dict: dict) -> bool:
     """Peut charger et gérer les bases de données."""
@@ -3135,7 +3188,19 @@ if not st.session_state.bases_loaded_from_db:
                     setattr(st.session_state, f"{_attr}_ok", True)
                     _loaded_any = True
         _ph_load.empty()
-    st.session_state.bases_loaded_from_db = True
+        # Le drapeau n'est pose que si TOUT ce que la base centrale
+        # contient est effectivement arrive en session. Pose
+        # inconditionnellement, il figeait un chargement partiel pour
+        # toute la duree de la session : une base absente ne pouvait
+        # plus etre reessayee, et les ecrans qui en dependaient
+        # restaient vides jusqu'a la deconnexion.
+        _tout_charge = all(
+            getattr(st.session_state, f"{_a}_ok", False)
+            for _b, _a in [("pf","pf"), ("ca","ca"), ("sin","sin")]
+            if _b in _meta)
+        st.session_state.bases_loaded_from_db = bool(_tout_charge)
+    else:
+        st.session_state.bases_loaded_from_db = True
 
 # ─────────────────────────────────────────────
 #  SIDEBAR
@@ -3382,9 +3447,62 @@ with st.sidebar:
     }
     </style>""", unsafe_allow_html=True)
 
+    # ══════════════════════════════════════════════════════════════════
+    #  Periode par defaut : la derniere periode REELLEMENT couverte
+    # ══════════════════════════════════════════════════════════════════
+    # Une date par defaut ecrite en dur vieillit avec le fichier : passe
+    # la fin des donnees, une session neuve s'ouvre sur une periode vide
+    # et tous les ecrans filtres par periode paraissent cassés alors que
+    # les indicateurs globaux, eux, s'affichent. La valeur par defaut est
+    # donc lue dans les bases chargees, une seule fois par session.
+    def _date_defaut_periode():
+        """Derniere date exploitable des bases, repli au 31/12/2025."""
+        if "_dt_max_bases" in st.session_state:
+            return st.session_state["_dt_max_bases"]
+        _cands = []
+        for _att, _cols in [
+                ("ca",  ["DATECOMP", "DATEEFFE", "DATESOUS"]),
+                ("pf",  ["DATE_EFFET", "DATEEFFE", "DATESOUS"]),
+                ("sin", ["Date Création", "Date Comptabilisation"])]:
+            _d = getattr(st.session_state, _att, None)
+            if _d is None or not hasattr(_d, "columns"):
+                continue
+            for _c in _cols:
+                if _c in _d.columns:
+                    try:
+                        _m = pd.to_datetime(_d[_c], errors="coerce").max()
+                    except Exception:
+                        _m = None
+                    if _m is not None and pd.notna(_m):
+                        _cands.append(_m.date())
+                    break
+        _res = max(_cands) if _cands else date(2025, 12, 31)
+        st.session_state["_dt_max_bases"] = _res
+        return _res
+
+    # ══════════════════════════════════════════════════════════════════
+    #  Avertissement de stockage volatil
+    # ══════════════════════════════════════════════════════════════════
+    # Sans PostgreSQL, les bases et les bulletins sont ecrits dans un
+    # fichier SQLite du conteneur. Sur un hebergement infonuagique ce
+    # disque est efface a chaque redemarrage de l'application : les
+    # donnees chargees disparaissent sans message. Le mode de stockage
+    # etait calcule mais n'etait affiche nulle part ; il l'est desormais.
+    if not _USE_PG:
+        st.markdown(
+            "<div style='background:#7A0C0C;color:#FFFFFF;border-radius:7px;"
+            "padding:8px 9px;margin:0 4px 8px;font-size:11px;line-height:1.4'>"
+            "<b>⚠️ STOCKAGE NON PERSISTANT</b><br>"
+            "Aucune base PostgreSQL n'est configurée. Les bases chargées "
+            "et les bulletins saisis sont perdus à chaque redémarrage de "
+            "l'application.</div>", unsafe_allow_html=True)
+
     st.markdown(f"<div style='font-size:9.5px;font-weight:700;opacity:.55;text-transform:uppercase;letter-spacing:.07em;margin-bottom:5px'>📅 Période d'analyse</div>", unsafe_allow_html=True)
+    # « Année » a l'ouverture : une semaine de sept jours ne contient
+    # presque jamais de production partenaire, et un visiteur qui decouvre
+    # l'outil conclurait a tort que les ecrans sont vides.
     mode_lbl = st.selectbox("", ["Semaine","Mois","Trimestre","Semestre","Année","Jour"],
-                            label_visibility="collapsed", key="mode_sel")
+                            index=4, label_visibility="collapsed", key="mode_sel")
     MODE = {"Semaine":"semaine","Mois":"mois","Trimestre":"trim",
             "Semestre":"sem","Année":"annee","Jour":"jour"}[mode_lbl]
 
@@ -3392,7 +3510,7 @@ with st.sidebar:
     # en decoule : il sert aux lectures annuelles et aux comparaisons N/N-1,
     # sans qu'aucun second selecteur ne puisse le contredire.
     sel_date = st.date_input(
-        "", value=st.session_state.get("sel_date", date(2025, 6, 30)),
+        "", value=st.session_state.get("sel_date", _date_defaut_periode()),
         label_visibility="collapsed", key="sel_date",
         help="Choisissez une date dans la période à analyser. "
              "Le mode ci-dessus définit l'amplitude retenue.")
@@ -3417,6 +3535,24 @@ with st.sidebar:
     st.markdown(f"<div style='background:#C0392B;color:white;text-align:center;"
                 f"border-radius:7px;padding:5px;margin:5px 4px;font-weight:800;"
                 f"font-size:12px'>{period_lbl}</div>", unsafe_allow_html=True)
+
+    # Avertissement de periode hors donnees. Sans lui, une periode vide se
+    # traduit par des ecrans muets : les indicateurs globaux s'affichent,
+    # tout ce qui est filtre par periode reste blanc, et l'utilisateur
+    # conclut a une panne. Le message dit la cause et la borne utile.
+    try:
+        _dmax = _date_defaut_periode()
+        if sel_date > _dmax:
+            st.markdown(
+                f"<div style='background:#FFF4E5;border:1px solid #E5B769;"
+                f"border-radius:7px;padding:7px 8px;margin:4px;"
+                f"font-size:11px;line-height:1.35;color:#7A4E0B'>"
+                f"⚠️ <b>Période hors données.</b> Les bases s'arrêtent au "
+                f"{_dmax.strftime('%d/%m/%Y')}. Les écrans filtrés par "
+                f"période seront vides tant que la date reste au-delà."
+                f"</div>", unsafe_allow_html=True)
+    except Exception:
+        pass
 
     # Exercice de rattachement, deduit de la periode. Il gouverne les
     # analyses annuelles (portefeuille cumule, partenaires, rapport) et
@@ -5808,15 +5944,67 @@ elif "Partenaires" in page:
                                               df_pf["_CODE_STR"])]
         df_pf = df_pf[df_pf["_GROUPE"] != "Réseau propre"]
 
-        _cak_p = "CHIFAFFA" if "CHIFAFFA" in df_pf.columns else "MONTENCA"
-        _cdt_p = next((c for c in ["DATECOMP","DATEEFFE","DATESOUS"]
-                       if c in df_pf.columns), None)
-        _cprod = next((c for c in ["NOMPRODUIT","LIBECATE"]
-                       if c in df_pf.columns), None)
+        # ══════════════════════════════════════════════════════════════
+        #  Reperage tolerant des colonnes de la base
+        # ══════════════════════════════════════════════════════════════
+        # Les extractions ne sortent pas toujours avec les memes en-tetes
+        # d'un export a l'autre : espaces, accents, tirets, casse. Une
+        # recherche a l'identique echoue alors sur un fichier pourtant
+        # valide, et toute la page s'arrete apres les indicateurs. On
+        # compare donc sur une forme normalisee.
+        def _cle_col(_c):
+            import unicodedata as _u
+            _t = "".join(_x for _x in _u.normalize("NFD", str(_c))
+                         if _u.category(_x) != "Mn").upper()
+            return re.sub(r"[^A-Z0-9]", "", _t)
+
+        _idx_col = {}
+        for _c in df_pf.columns:
+            _idx_col.setdefault(_cle_col(_c), _c)
+
+        def _trouver_col(*_cands):
+            for _cd in _cands:
+                _k = _cle_col(_cd)
+                if _k in _idx_col:
+                    return _idx_col[_k]
+            return None
+
+        _cak_p = _trouver_col("CHIFAFFA", "MONTENCA", "CHIFFREAFFAIRES",
+                              "CHIFFRE D'AFFAIRES", "PRIMNETT") or "CHIFAFFA"
+        _cdt_p = _trouver_col(
+            "DATECOMP", "DATE COMPTABILISATION", "DATE COMPTA",
+            "DATECOMPTA", "DATE_COMP", "DATEEFFE", "DATE EFFET",
+            "DATE_EFFET", "DATE D'EFFET", "DATE DE L'EFFET", "DATESOUS",
+            "DATE SOUSCRIPTION", "DATE DE SOUSCRIPTION", "DATE CREATION",
+            "DATE DE CREATION", "DATE DE COMPTABILISATION")
+        _cprod = _trouver_col("NOMPRODUIT", "LIBECATE", "NOM PRODUIT",
+                              "PRODUIT", "LIBELLE CATEGORIE")
 
         if _cdt_p is None or df_pf.empty:
-            bloc_vide("Aucune date exploitable pour construire les états "
-                      "mensuels des partenaires.", "🏦")
+            # Arret explicite. La version precedente s'interrompait sur un
+            # message discret : l'utilisateur voyait les indicateurs puis
+            # plus rien, sans savoir pourquoi. On nomme desormais la cause
+            # et on montre les colonnes reellement presentes dans la base.
+            if df_pf.empty:
+                st.error(
+                    "⛔ **Aucun partenaire financier sur ce périmètre.** "
+                    "Tous les apporteurs de la base ont été classés dans le "
+                    "réseau propre. Vérifiez la colonne des raisons sociales "
+                    "du fichier CA chargé.")
+            else:
+                st.error(
+                    "⛔ **Colonne de date introuvable dans la base CA.** "
+                    "Les états mensuels des partenaires ne peuvent pas être "
+                    "construits sans une date de comptabilisation, d'effet "
+                    "ou de souscription.")
+                with st.expander("Colonnes présentes dans le fichier chargé",
+                                 expanded=True):
+                    st.caption(
+                        "Attendu : DATECOMP, DATEEFFE ou DATESOUS "
+                        "(les variantes avec espaces, accents ou tirets "
+                        "sont acceptées). Rechargez le fichier CA en "
+                        "conservant les en-têtes d'origine.")
+                    st.code(" · ".join(str(_c) for _c in df_pf.columns))
             st.stop()
 
         # Base de travail sur l'ensemble des exercices : la comparaison
@@ -5842,7 +6030,15 @@ elif "Partenaires" in page:
                     "juil","août","sept","oct","nov","déc"]
         _ans_dispo = sorted(_pb["_AN"].dropna().astype(int).unique().tolist())
         if not _ans_dispo:
-            bloc_vide("Aucun exercice exploitable.", "🏦"); st.stop()
+            st.error(
+                f"⛔ **Aucun exercice exploitable.** La colonne de date "
+                f"retenue (**{_cdt_p}**) n'a produit aucune date valide "
+                f"après conversion, ou aucune ligne partenaire ne subsiste "
+                f"après classification.")
+            st.caption(
+                f"Lignes partenaires avant conversion de la date : "
+                f"{len(_pb)} · colonne de montant retenue : {_cak_p}.")
+            st.stop()
 
         _an_ref = (int(SEL_YEAR) if SEL_YEAR and int(SEL_YEAR) in _ans_dispo
                    else _ans_dispo[-1])
@@ -5927,6 +6123,43 @@ elif "Partenaires" in page:
         # graphique temoin dit la seconde.
         with st.expander("🔧 Diagnostic d'affichage des graphiques",
                          expanded=False):
+            # Etat des bases DANS CETTE SESSION. C'est le point que la
+            # comparaison entre deux postes ne permet pas de voir : une
+            # session peut avoir charge le portefeuille sans le chiffre
+            # d'affaires, et les ecrans se vident alors a moitie.
+            _b1, _b2, _b3 = st.columns(3)
+            for _c_ui, _lib, _att in [(_b1, "Portefeuille", "pf"),
+                                      (_b2, "Chiffre d'affaires", "ca"),
+                                      (_b3, "Prestations", "sin")]:
+                _ok = bool(getattr(st.session_state, f"{_att}_ok", False))
+                _df_e = getattr(st.session_state, _att, None)
+                _nl = len(_df_e) if _df_e is not None and hasattr(_df_e, "__len__") else 0
+                _c_ui.markdown(
+                    f"<div style='border:1px solid "
+                    f"{'#9BD3A7' if _ok else '#E5A3A3'};background:"
+                    f"{'#EFF9F1' if _ok else '#FDF0F0'};border-radius:8px;"
+                    f"padding:10px 12px'>"
+                    f"<div style='font-size:11px;text-transform:uppercase;"
+                    f"letter-spacing:.06em;color:#6A7179'>{_lib}</div>"
+                    f"<div style='font-size:20px;font-weight:700;color:"
+                    f"{'#1A7F6E' if _ok else '#B30000'}'>"
+                    f"{'chargée' if _ok else 'ABSENTE'}</div>"
+                    f"<div style='font-size:12px;color:#6A7179'>"
+                    f"{nb_full(_nl)} lignes en mémoire</div></div>",
+                    unsafe_allow_html=True)
+            st.caption(
+                f"Mode de stockage : **{_BIA_MODE}**."
+                + ("" if _USE_PG else
+                   " Les bases sont écrites dans un fichier local du "
+                   "serveur, effacé à chaque redémarrage de l'application : "
+                   "c'est la cause la plus fréquente de bases absentes.")
+                + " Une base marquée ABSENTE n'a pas été chargée dans **cette "
+                "session**. Les écrans qui en dépendent resteront vides pour "
+                "cet utilisateur alors qu'ils s'affichent normalement chez "
+                "un autre. Dans ce cas, rechargez la page ; si la base reste "
+                "absente, la mémoire du serveur est saturée.")
+            st.markdown("")
+
             _d1, _d2, _d3 = st.columns(3)
             _d1.metric("Lignes hors période", nb_full(len(_pb)))
             _d2.metric(f"Lignes sur {_iso_lbl}", nb_full(int(_msk_N.sum())
