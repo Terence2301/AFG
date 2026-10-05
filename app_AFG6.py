@@ -2947,7 +2947,7 @@ def load_sin(f) -> pd.DataFrame:
 # ─────────────────────────────────────────────
 #  FILTRE PÉRIODE — CORRIGÉ
 #  Clé : comparer dt.date == sel (date Python)
-#  Pour Prestations, filtre sur Exercice Sinistre (annuel) ou Date Survenance
+#  Pour Prestations, le filtre porte sur « Date Création »
 # ─────────────────────────────────────────────
 def filter_df(df, dcol, sel: date, mode: str) -> pd.DataFrame:
     """
@@ -4278,7 +4278,8 @@ if "Accueil" in page:
 
         if sin is not None and not df_sin.empty:
             st.markdown("")
-            _sin_yr_lbl = f"Exercice {SEL_YEAR}" if SEL_YEAR else "Toutes périodes"
+            _sin_yr_lbl = (f"dossiers créés en {SEL_YEAR}" if SEL_YEAR
+                           else "Toutes périodes")
             section(f"🏥 Sinistres & Prestations — {_sin_yr_lbl}",
                     "RÉGLEMENTS · SAP · RATIO S/P · DONNÉES FILTRÉES")
             # Résolution dynamique des colonnes
@@ -6905,10 +6906,16 @@ elif "Sinistres" in page:
                 _sd = pd.to_datetime(sin[_c_dc_s], errors="coerce")
                 df_sf = sin[(_sd.dt.year == int(SEL_YEAR)).fillna(False)].copy()
             else:
+                # Repli, « Date Création » etant absente du fichier. On
+                # s'approche au mieux de la date d'entree en gestion :
+                # comptabilisation, puis emission, et seulement en
+                # dernier ressort l'exercice de survenance, qui designe
+                # autre chose.
                 df_sf = sin[year_mask(sin,
-                    ["ANNEE_SIN","Exercice Sinistre","Date Survenance"],
+                    ["Date Comptabilisation", "Date Emission",
+                     "Date Survenance", "ANNEE_SIN", "Exercice Sinistre"],
                     SEL_YEAR)].copy()
-            _sin_scope = f"Exercice {SEL_YEAR}"
+            _sin_scope = f"dossiers créés en {SEL_YEAR}"
         else:
             df_sf = sin_f()
             _sin_scope = period_lbl
@@ -6957,7 +6964,6 @@ elif "Sinistres" in page:
         _c_sort_  = _find_col(sin, "Sort Sinistre")
         _c_cat_   = _find_col(sin, "Libéllé Catégorie",    "Libellé Catégorie",    "Libelle Categorie", "Libéllé Catégorie risque")
         _c_souscr = _find_col(sin, "Souscripteur")
-        _c_exo    = _find_col(sin, "Exercice Sinistre")
         _c_surv_  = _find_col(sin, "Date Survenance")
         _c_decl   = _find_col(sin, "Date Déclaration",     "Date Declaration")
         _c_compt  = _find_col(sin, "Réglement Comptable",   "Reglement Comptable")
