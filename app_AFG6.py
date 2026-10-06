@@ -62,6 +62,39 @@ section[data-testid="stSidebar"] .stFileUploader label {
 import pandas as pd, numpy as np, io, os, tempfile, warnings, hashlib, hmac, sqlite3, re
 from datetime import datetime, date, timedelta
 import plotly.graph_objects as go
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  Conversion de dates tolerante au format francais
+# ══════════════════════════════════════════════════════════════════════
+# Les extractions AFG sortent en JJ/MM/AAAA. Un appel nu a pd.to_datetime
+# interprete le premier nombre comme un MOIS : toute date dont le jour
+# depasse 12 devient alors invalide et la ligne est ecartee du filtre.
+# Sur la base des prestations, cela representait 17 253 dossiers sur
+# 26 377 et pres de 11,9 milliards FCFA de reglements qui disparaissaient
+# des indicateurs, sans le moindre message.
+#
+# On essaie donc les deux lectures et on retient celle qui convertit le
+# plus de lignes : une base reellement ISO (AAAA-MM-JJ) reste traitee
+# correctement, une base francaise aussi.
+def to_dt(serie):
+    """Serie de dates convertie, format francais ou ISO, sans perte."""
+    import warnings as _w
+    if serie is None:
+        return serie
+    try:
+        if pd.api.types.is_datetime64_any_dtype(serie):
+            return serie
+    except Exception:
+        pass
+    with _w.catch_warnings():
+        _w.simplefilter("ignore")
+        _iso = pd.to_datetime(serie, errors="coerce")
+        _fr  = pd.to_datetime(serie, errors="coerce", dayfirst=True)
+    try:
+        return _fr if int(_fr.notna().sum()) > int(_iso.notna().sum()) else _iso
+    except Exception:
+        return _iso
 import plotly.express as px
 from plotly.subplots import make_subplots
 warnings.filterwarnings("ignore")
@@ -2821,7 +2854,7 @@ def load_pf(f) -> pd.DataFrame:
     # Typage uniquement sur les colonnes présentes et nécessaires
     for c in ["DATESOUS", "DATEEFFE", "DATEECHE", "DATENAIS"]:
         if c in df.columns:
-            df[c] = pd.to_datetime(df[c], errors="coerce")
+            df[c] = to_dt(df[c])
     for c in ["MONTENCA", "COTI_PERIODIQUE", "NBRE_PRIME", "COMMGEST"]:
         if c in df.columns:
             df[c] = clean_num(df[c])
@@ -2868,7 +2901,7 @@ def load_ca(f) -> pd.DataFrame:
     df = df.dropna(how="all").reset_index(drop=True)
 
     if "DATECOMP" in df.columns:
-        df["DATECOMP"] = pd.to_datetime(df["DATECOMP"], errors="coerce")
+        df["DATECOMP"] = to_dt(df["DATECOMP"])
         df["ANNEE"]    = df["DATECOMP"].dt.year.astype("Int64")
         df["MOIS"]     = df["DATECOMP"].dt.month.astype("Int64")
     for c in ["CHIFAFFA","PRIMNETT","COMMAPPO","COMMGEST"]:
@@ -2929,7 +2962,7 @@ def load_sin(f) -> pd.DataFrame:
               "Date Emission","Date Comptabilisation","Date Création",
               "Date Creation","DATE_CREATION"]:
         if c in df.columns:
-            df[c] = pd.to_datetime(df[c], errors="coerce")
+            df[c] = to_dt(df[c])
     for c in ["Réglement Total","Réglement Principal",
               "SAP au 31/12/2025","Réglement Honoraires"]:
         if c in df.columns:
@@ -2963,7 +2996,7 @@ def filter_df(df, dcol, sel: date, mode: str) -> pd.DataFrame:
     if dcol not in df.columns: return df
     col = df[dcol]
     if not pd.api.types.is_datetime64_any_dtype(col):
-        col = pd.to_datetime(col, errors="coerce")
+        col = to_dt(col)
     if mode == "jour":
         mask = col.dt.date == sel
     elif mode == "semaine":
@@ -3471,7 +3504,7 @@ with st.sidebar:
             for _c in _cols:
                 if _c in _d.columns:
                     try:
-                        _m = pd.to_datetime(_d[_c], errors="coerce").max()
+                        _m = to_dt(_d[_c]).max()
                     except Exception:
                         _m = None
                     if _m is not None and pd.notna(_m):
@@ -3748,7 +3781,7 @@ def _bytes_to_df_pf(raw: bytes, fname: str) -> pd.DataFrame:
             except: pass
     df = df.dropna(how="all").reset_index(drop=True)
     for c in ["DATESOUS","DATEEFFE","DATEECHE","DATENAIS"]:
-        if c in df.columns: df[c] = pd.to_datetime(df[c], errors="coerce")
+        if c in df.columns: df[c] = to_dt(df[c])
     for c in ["MONTENCA","COTI_PERIODIQUE","NBRE_PRIME","COMMGEST"]:
         if c in df.columns: df[c] = clean_num(df[c])
     if "CODEINTE_P" in df.columns and "NUMEPOLI_P" in df.columns:
@@ -3783,7 +3816,7 @@ def _bytes_to_df_ca(raw: bytes, fname: str) -> pd.DataFrame:
             except: pass
     df = df.dropna(how="all").reset_index(drop=True)
     if "DATECOMP" in df.columns:
-        df["DATECOMP"] = pd.to_datetime(df["DATECOMP"], errors="coerce")
+        df["DATECOMP"] = to_dt(df["DATECOMP"])
         df["ANNEE"]    = df["DATECOMP"].dt.year.astype("Int64")
         df["MOIS"]     = df["DATECOMP"].dt.month.astype("Int64")
     for c in ["CHIFAFFA","PRIMNETT","COMMAPPO","COMMGEST"]:
@@ -3833,7 +3866,7 @@ def _bytes_to_df_sin(raw: bytes, fname: str) -> pd.DataFrame:
     for c in ["Date Survenance","Date Déclaration","Date validation",
               "Date Emission","Date Comptabilisation","Date Création",
               "Date Creation","DATE_CREATION"]:
-        if c in df.columns: df[c] = pd.to_datetime(df[c], errors="coerce")
+        if c in df.columns: df[c] = to_dt(df[c])
     for c in ["Réglement Total","Réglement Principal",
               "SAP au 31/12/2025","Réglement Honoraires"]:
         if c in df.columns: df[c] = clean_num(df[c])
@@ -4088,7 +4121,7 @@ def masque_periode(df, col, d, mode):
     """Masque des lignes dont `col` tombe dans la periode de `d`."""
     if df is None or col not in df.columns:
         return pd.Series(False, index=(df.index if df is not None else []))
-    _s = pd.to_datetime(df[col], errors="coerce")
+    _s = to_dt(df[col])
     _a, _b = bornes_periode(d, mode)
     return (_s >= pd.Timestamp(_a)) & (_s <= pd.Timestamp(_b))
 
@@ -4097,7 +4130,7 @@ def masque_periode_precedente(df, col, d, mode):
     """Masque isoperimetre sur l'exercice precedent."""
     if df is None or col not in df.columns:
         return pd.Series(False, index=(df.index if df is not None else []))
-    _s = pd.to_datetime(df[col], errors="coerce")
+    _s = to_dt(df[col])
     _a, _b = periode_precedente(d, mode)
     return (_s >= pd.Timestamp(_a)) & (_s <= pd.Timestamp(_b))
 
@@ -4178,7 +4211,7 @@ def sin_f():
     _cd = col_date_sin(sin)
     if _cd is None:
         return filter_sin_exo(sin, sel_date, MODE)
-    _s = pd.to_datetime(sin[_cd], errors="coerce")
+    _s = to_dt(sin[_cd])
     if MODE == "annee":
         return sin[(_s.dt.year == int(sel_date.year)).fillna(False)]
     _a, _b = bornes_periode(sel_date, MODE)
@@ -4447,7 +4480,7 @@ elif "Analyse CA" in page:
                         alert("Colonne DATECOMP absente — comparaison impossible.","warn")
                     else:
                         _cb = ca.copy()
-                        _cb["_DT"] = pd.to_datetime(_cb[_dc_c], errors="coerce")
+                        _cb["_DT"] = to_dt(_cb[_dc_c])
                         _cb = _cb.dropna(subset=["_DT"])
                         if _cb.empty:
                             alert("Aucune date de comptabilisation exploitable.","warn")
@@ -6036,7 +6069,7 @@ elif "Partenaires" in page:
         _pb["_GROUPE"] = [groupe_partenaire(_n, _c)
                           for _n, _c in zip(_pb["_RS"], _pb["_CODE_STR"])]
         _pb = _pb[~_pb["_GROUPE"].isin(["Réseau propre", "Non classé"])]
-        _pb["_DT"] = pd.to_datetime(_pb[_cdt_p], errors="coerce")
+        _pb["_DT"] = to_dt(_pb[_cdt_p])
         _pb = _pb.dropna(subset=["_DT"])
         _pb["_AN"]  = _pb["_DT"].dt.year
         _pb["_MOI"] = _pb["_DT"].dt.month
@@ -6818,7 +6851,7 @@ elif "Clients" in page:
             with t_a:
                 if "DATENAIS" in df.columns and "SEXERISQ" in df.columns:
                     da=df[["DATENAIS","SEXERISQ","MONTENCA"]].copy()
-                    da["DATENAIS"]=pd.to_datetime(da["DATENAIS"],errors="coerce")
+                    da["DATENAIS"]=to_dt(da["DATENAIS"])
                     da=da.dropna(subset=["DATENAIS"])
                     da["age"]=(pd.Timestamp.now()-da["DATENAIS"]).dt.days/365.25
                     da=da[(da["age"]>=0)&(da["age"]<=95)]
@@ -6916,7 +6949,7 @@ elif "Sinistres" in page:
             # ne remonte et les indicateurs restent a zero.
             _c_dc_s = col_date_sin(sin)
             if _c_dc_s:
-                _sd = pd.to_datetime(sin[_c_dc_s], errors="coerce")
+                _sd = to_dt(sin[_c_dc_s])
                 df_sf = sin[(_sd.dt.year == int(SEL_YEAR)).fillna(False)].copy()
             else:
                 # Repli, « Date Création » etant absente du fichier. On
@@ -7129,8 +7162,8 @@ elif "Sinistres" in page:
             _c_dc_evo = col_date_sin(sin)
             _base_evo = sin.copy()
             if _c_dc_evo is not None:
-                _base_evo["_AN_EVO"] = pd.to_datetime(
-                    _base_evo[_c_dc_evo], errors="coerce").dt.year
+                _base_evo["_AN_EVO"] = to_dt(
+                    _base_evo[_c_dc_evo]).dt.year
                 _lib_evo = "date de création"
             elif "ANNEE_SIN" in _base_evo.columns:
                 _base_evo["_AN_EVO"] = _base_evo["ANNEE_SIN"]
@@ -7252,8 +7285,8 @@ elif "Sinistres" in page:
                 alert(f"Colonne(s) manquante(s) pour le triangle : {', '.join(_manque)}.","warn")
             else:
                 _tri = _tri_src[[_c_surv_t, _c_comp_t, _c_regl_t]].copy()
-                _tri["_SURV"] = pd.to_datetime(_tri[_c_surv_t], errors="coerce").dt.year
-                _tri["_COMP"] = pd.to_datetime(_tri[_c_comp_t], errors="coerce").dt.year
+                _tri["_SURV"] = to_dt(_tri[_c_surv_t]).dt.year
+                _tri["_COMP"] = to_dt(_tri[_c_comp_t]).dt.year
                 _tri["_MT"]   = pd.to_numeric(_tri[_c_regl_t], errors="coerce").fillna(0)
                 _tri = _tri.dropna(subset=["_SURV","_COMP"])
                 _tri["_SURV"] = _tri["_SURV"].astype(int)
@@ -7479,7 +7512,7 @@ elif "Prévisions" in page:
             d_k="DATECOMP" if "DATECOMP" in src.columns else "DATESOUS"
             if d_k not in src.columns: alert("Colonne date introuvable.","warn"); st.stop()
             src2=src[[d_k,ca_k]].copy()
-            src2[d_k]=pd.to_datetime(src2[d_k],errors="coerce"); src2=src2.dropna(subset=[d_k])
+            src2[d_k]=to_dt(src2[d_k]); src2=src2.dropna(subset=[d_k])
             mo=src2.groupby(src2[d_k].dt.to_period("M").astype(str))[ca_k].sum().reset_index()
             mo.columns=["Période","CA"]; mo=mo.sort_values("Période")
             n=len(mo)
@@ -10694,7 +10727,7 @@ elif "Rapport PDF" in page:
                                          if c in _ca_r.columns), None)
                             if _cdt:
                                 _ev = _ca_r[[_cdt,"CHIFAFFA"]].copy()
-                                _ev["_M"] = pd.to_datetime(_ev[_cdt], errors="coerce")
+                                _ev["_M"] = to_dt(_ev[_cdt])
                                 _ev = _ev.dropna(subset=["_M"])
                                 # L'exercice de la section suit le filtre annuel
                                 _an_ev = (int(SEL_YEAR) if SEL_YEAR
@@ -10881,7 +10914,7 @@ elif "Rapport PDF" in page:
                                                   for _n, _c in zip(_p4["_NM"],
                                                                     _p4["_CI"])]
                                     _p4 = _p4[~_p4["_GR"].isin(["Réseau propre","Réseau interne","Non classé"])]
-                                    _p4["_DT"] = pd.to_datetime(_p4[_cd_p4], errors="coerce")
+                                    _p4["_DT"] = to_dt(_p4[_cd_p4])
                                     _p4 = _p4.dropna(subset=["_DT"])
                                     _p4["_AN"]  = _p4["_DT"].dt.year
                                     _p4["_MOI"] = _p4["_DT"].dt.month
