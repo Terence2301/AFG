@@ -4283,10 +4283,22 @@ if "Accueil" in page:
             section(f"🏥 Sinistres & Prestations — {_sin_yr_lbl}",
                     "RÉGLEMENTS · SAP · RATIO S/P · DONNÉES FILTRÉES")
             # Résolution dynamique des colonnes
-            _c_r_a = next((c for c in df_sin.columns if "glement" in c.lower() and "otal" in c.lower()), None)
+            # Le principal est la prestation versee au beneficiaire ; le
+            # total y ajoute les honoraires d'expertise, qui sont une
+            # charge de gestion. Les deux ecrans doivent retenir la meme
+            # base, sans quoi le conseil lit deux « total regle »
+            # differents selon l'onglet ouvert.
+            _c_r_a = next((c for c in df_sin.columns
+                           if "glement" in c.lower() and "rincipal" in c.lower()), None)
+            if _c_r_a is None:
+                _c_r_a = next((c for c in df_sin.columns
+                               if "glement" in c.lower() and "otal" in c.lower()), None)
+            _c_h_a = next((c for c in df_sin.columns
+                           if "glement" in c.lower() and "onorair" in c.lower()), None)
             _c_s_a = next((c for c in df_sin.columns if c.upper().startswith("SAP")), None)
             _c_srt = next((c for c in df_sin.columns if "ort" in c.lower() and "ini" in c.lower()), None)
             tot_sin = float(df_sin[_c_r_a].fillna(0).sum()) if _c_r_a else 0
+            tot_hon = float(df_sin[_c_h_a].fillna(0).sum()) if _c_h_a else 0
             tot_sap = float(df_sin[_c_s_a].fillna(0).sum()) if _c_s_a else 0
             nb_sin  = len(df_sin)
             nb_ouv  = int((df_sin[_c_srt]=="Ouvert").sum()) if _c_srt else 0
@@ -4294,11 +4306,12 @@ if "Accueil" in page:
             ca_all  = float(ca["CHIFAFFA"].fillna(0).sum()) if ca is not None and "CHIFAFFA" in ca.columns else 0
             sp = tot_sin/max(ca_all,1)*100
             actifs_tot = int((pf["ETAT_POLICE"].str.strip().isin(["ACTIF"])).sum()) if pf is not None and "ETAT_POLICE" in pf.columns else 1
-            burning = (tot_sin+tot_sap)/max(actifs_tot,1)*1000
+            burning = (tot_sin+tot_hon+tot_sap)/max(actifs_tot,1)*1000
             e1,e2,e3,e4,e5 = st.columns(5)
-            kpi(e1,"Total réglé",fmt(tot_sin),"Toutes périodes","red",icon="💊")
+            kpi(e1,"Sinistres réglés",fmt(tot_sin),"Réglement Principal","red",icon="💊")
             kpi(e2,"SAP (provisions)",fmt(tot_sap),"Au 31/12/2025","amber",icon="📌")
-            kpi(e3,"Charge ultime",fmt(tot_sin+tot_sap),"Réglé+SAP","red",icon="⚖️")
+            kpi(e3,"Charge ultime",fmt(tot_sin+tot_hon+tot_sap),
+                "Principal+Honoraires+SAP","red",icon="⚖️")
             kpi(e4,"Ratio S/P",pct(sp),"vs CA","red" if sp>80 else "amber",icon="📐")
             kpi(e5,"Burning Cost",fmt(burning),"Charge/1 000 actifs","red",icon="🔥")
 
@@ -6981,15 +6994,49 @@ elif "Sinistres" in page:
 
         section(f"⚠️ Sinistres & Prestations — {_sin_scope}","ANALYSE ACTUARIELLE · SAP · S/P")
         # Noms exacts vérifiés sur fichier AFG réel
-        _c_tot  = "Réglement Total"     if "Réglement Total"     in sin.columns else next((c for c in sin.columns if "glement" in c and "otal" in c), None)
+        # ══════════════════════════════════════════════════════════════
+        #  Decomposition de la charge sinistres
+        # ══════════════════════════════════════════════════════════════
+        # Le fichier AFG porte quatre colonnes de reglement :
+        #   Principal  = la prestation versee au beneficiaire
+        #   Honoraires = les frais d'expertise, qui sont une charge de
+        #                gestion et non une prestation
+        #   Total      = Principal + Honoraires (verifie : egalite exacte
+        #                sur la totalite des dossiers du fichier)
+        #   Comptable  = le montant effectivement decaisse
+        #
+        # « Sinistres regles » designe donc le PRINCIPAL. La version
+        # precedente retenait le Total, puis ajoutait les honoraires pour
+        # obtenir la charge ultime : les honoraires etaient comptes deux
+        # fois, le Total les contenant deja. Sans effet visible tant
+        # qu'ils valent zero dans le fichier, mais le ratio S/P aurait
+        # ete fausse des le premier honoraire enregistre.
+        _c_tot  = "Réglement Total" if "Réglement Total" in sin.columns else next((c for c in sin.columns if "glement" in c and "otal" in c), None)
+        _c_pri  = "Réglement Principal" if "Réglement Principal" in sin.columns else next((c for c in sin.columns if "glement" in c and "rincipal" in c), None)
         _c_sap  = "SAP au 31/12/2025"  if "SAP au 31/12/2025"  in sin.columns else next((c for c in sin.columns if c.startswith("SAP")), None)
-        _c_hon  = "Réglement Honoraires" if "Réglement Honoraires" in sin.columns else next((c for c in sin.columns if "glement" in c and "onnor" in c), None)
+        _c_hon  = "Réglement Honoraires" if "Réglement Honoraires" in sin.columns else next((c for c in sin.columns if "glement" in c and ("onorair" in c or "onnor" in c)), None)
         # Tous les indicateurs sont calcules sur le PERIMETRE FILTRE (df_sf)
         _S = df_sf
-        tot_sin = float(_S[_c_tot].fillna(0).sum()) if _c_tot and _c_tot in _S.columns else 0
-        tot_sap = float(_S[_c_sap].fillna(0).sum()) if _c_sap and _c_sap in _S.columns else 0
-        tot_hon = float(_S[_c_hon].fillna(0).sum()) if _c_hon and _c_hon in _S.columns else 0
-        charge_u=tot_sin+tot_sap+tot_hon
+
+        def _somme_col(_c):
+            if not _c or _c not in _S.columns:
+                return 0.0
+            return float(pd.to_numeric(_S[_c], errors="coerce").fillna(0).sum())
+
+        tot_hon = _somme_col(_c_hon)
+        _mt_tot = _somme_col(_c_tot)
+        # Le principal fait foi ; a defaut de la colonne, on le reconstitue
+        # en retranchant les honoraires du total.
+        if _c_pri:
+            tot_sin = _somme_col(_c_pri)
+            _base_regle = "Réglement Principal"
+        else:
+            tot_sin = max(_mt_tot - tot_hon, 0.0)
+            _base_regle = "Total moins honoraires"
+        tot_sap = _somme_col(_c_sap)
+        # Charge ultime = prestations + frais d'expertise + provisions.
+        # Chaque terme n'entre qu'une fois.
+        charge_u = tot_sin + tot_hon + tot_sap
         nb_sin  = len(_S)
         nb_clos = int((_S[_c_sort_]=="Cloturé").sum()) if _c_sort_ and _c_sort_ in _S.columns else 0
         nb_ouv  = int((_S[_c_sort_]=="Ouvert").sum())  if _c_sort_ and _c_sort_ in _S.columns else 0
@@ -7008,9 +7055,9 @@ elif "Sinistres" in page:
         burning=charge_u/max(actifs_n,1)*1000
 
         c1,c2,c3,c4,c5,c6=st.columns(6)
-        kpi(c1,"Total réglé",     fmt_full(tot_sin), _sin_scope,            "red",  icon="💊")
+        kpi(c1,"Sinistres réglés", fmt_full(tot_sin), _base_regle,          "red",  icon="💊")
         kpi(c2,"SAP (provisions)",fmt_full(tot_sap), "Provisions restantes","amber",icon="📌")
-        kpi(c3,"Charge ultime",   fmt_full(charge_u),"Réglé+SAP+Honoraires","red",  icon="⚖️")
+        kpi(c3,"Charge ultime",   fmt_full(charge_u),"Principal+Honoraires+SAP","red",icon="⚖️")
         kpi(c4,"Ratio S/P",       pct(sp),           "vs CA même période",
             "red" if sp>80 else "amber", icon="📐")
         kpi(c5,"Coût moy/clos",   fmt_full(cout_m),  f"{nb_clos:,} dossiers clos".replace(","," "),
@@ -11034,7 +11081,13 @@ elif "Rapport PDF" in page:
                             story.append(Spacer(1,0.3*cm))
                             story.append(_sec("5.  SINISTRES ET PRESTATIONS"))
                             story.append(Spacer(1,0.2*cm))
-                            _st  = float(_sin_r["Réglement Total"].fillna(0).sum()) if "Réglement Total" in _sin_r.columns else 0
+                            # Le principal, non le total : le total contient
+                            # deja les honoraires, qui sont additionnes plus
+                            # bas pour obtenir la charge ultime.
+                            _st  = (float(_sin_r["Réglement Principal"].fillna(0).sum())
+                                    if "Réglement Principal" in _sin_r.columns
+                                    else float(_sin_r["Réglement Total"].fillna(0).sum())
+                                         if "Réglement Total" in _sin_r.columns else 0)
                             _ss  = float(_sin_r["SAP au 31/12/2025"].fillna(0).sum()) if "SAP au 31/12/2025" in _sin_r.columns else 0
                             _sh  = float(_sin_r["Réglement Honoraires"].fillna(0).sum()) if "Réglement Honoraires" in _sin_r.columns else 0
                             _sc  = int((_sin_r["Sort Sinistre"]=="Cloturé").sum()) if "Sort Sinistre" in _sin_r.columns else 0
